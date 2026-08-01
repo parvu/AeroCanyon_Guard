@@ -1,0 +1,13 @@
+# 1. Extragerea arhivei în directorul dorit
+unzip ros2_pinn_live_inference_workspace.zip -d ~/ros2_ws
+cd ~/ros2_ws
+
+# 2. Instalarea eventualelor dependențe lipsă prin rosdep
+rosdep install --from-paths src --ignore-src -r -y
+
+# 3. Compilarea Workspace-ului utilizând colcon
+colcon build --symlink-install
+
+# 4. Sursarea mediului de execuție local și lansarea buclei
+source install/setup.bash
+ros2 launch phy_ai_simulation sim_launch.py

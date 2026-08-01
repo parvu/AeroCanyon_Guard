@@ -1,0 +1,12 @@
+# ===== Terminal 1: Launch Gazebo + all nodes (includes teleop in xterm) =====
+source install/setup.bash
+ros2 launch phy_ai_simulation sim_launch.py
+
+# ===== Alternative: Terminal 2 (if you want manual teleop without xterm) =====
+# source install/setup.bash
+# ros2 run phy_ai_simulation teleop_drone_keyboard.py
+
+# ===== Debug helpers =====
+# ros2 topic echo /pinn_drone/cmd_vel
+# ros2 topic echo /pinn/input_state
+# ros2 topic hz /world/dve_wind_arena/model/pinn_drone/link/base_link/sensor/imu_sensor/imu

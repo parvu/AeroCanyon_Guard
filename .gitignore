@@ -1,0 +1,13 @@
+# colcon build artifacts
+build/
+install/
+log/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# ROS logs
+.ros/
