@@ -10,11 +10,14 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import Vector3Stamped
 from px4_msgs.msg import (OffboardControlMode, TrajectorySetpoint,
-                          VehicleCommand, VehicleLocalPosition, VehicleStatus)
+                          VehicleAttitude, VehicleCommand,
+                          VehicleLocalPosition, VehicleStatus)
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 
 from . import constants as C
+from .cbf_filter import CBFFilter
+from .constants import MASS_KG
 from .mission import Mission
 
 SETPOINTS_BEFORE_OFFBOARD = 20  # PX4 needs an existing stream to accept the mode
@@ -40,6 +43,12 @@ class ControllerNode(Node):
         self.pos = np.zeros(3)
         self.vel = np.zeros(3)
 
+        self.cbf = CBFFilter()
+        self.quat = np.array([1.0, 0.0, 0.0, 0.0])
+        self.wind_truth = np.zeros(3)
+        self.cbf_pub = self.create_publisher(
+            Vector3Stamped, C.TOPIC_CBF_DIAG, 10)
+
         self.sp_pub = self.create_publisher(
             TrajectorySetpoint, '/fmu/in/trajectory_setpoint', 10)
         self.mode_pub = self.create_publisher(
@@ -57,6 +66,11 @@ class ControllerNode(Node):
             self._on_status, qos_profile_sensor_data)
         self.create_subscription(
             Vector3Stamped, C.TOPIC_WIND_EST, self._on_wind_est, 10)
+        self.create_subscription(
+            VehicleAttitude, '/fmu/out/vehicle_attitude',
+            self._on_attitude, qos_profile_sensor_data)
+        self.create_subscription(
+            Vector3Stamped, C.TOPIC_WIND_TRUTH, self._on_wind_truth, 10)
 
         self.create_timer(1.0 / C.CONTROL_HZ, self._tick)
 
@@ -69,6 +83,12 @@ class ControllerNode(Node):
 
     def _on_wind_est(self, msg):
         self.wind_est = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
+
+    def _on_attitude(self, msg):
+        self.quat = np.array([msg.q[0], msg.q[1], msg.q[2], msg.q[3]])
+
+    def _on_wind_truth(self, msg):
+        self.wind_truth = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
 
     def _send_command(self, command, param1=0.0, param2=0.0):
         msg = VehicleCommand()
@@ -87,7 +107,7 @@ class ControllerNode(Node):
         msg = OffboardControlMode()
         msg.position = True
         msg.velocity = False
-        msg.acceleration = False
+        msg.acceleration = True
         msg.attitude = False
         msg.body_rate = False
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
@@ -115,6 +135,22 @@ class ControllerNode(Node):
         sp = TrajectorySetpoint()
         sp.position = [float(v) for v in target]
         sp.yaw = 0.0  # nose along +north, down the canyon
+
+        if self.mode == 'treatment':
+            # The PINN estimates the disturbance FORCE; the feedforward is
+            # the acceleration that cancels it. Negative: we push back.
+            u_des = -self.wind_est / MASS_KG
+            u_safe, info = self.cbf.filter(
+                u_des, self.pos, self.vel, self.wind_truth, self.quat)
+            sp.acceleration = [float(v) for v in u_safe]
+
+            diag = Vector3Stamped()
+            diag.header.stamp = self.get_clock().now().to_msg()
+            diag.vector.x = 1.0 if info['active'] else 0.0
+            diag.vector.y = float(np.clip(info['h_min'], -1e3, 1e3))
+            diag.vector.z = 0.0 if info['feasible'] else 1.0
+            self.cbf_pub.publish(diag)
+
         sp.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.sp_pub.publish(sp)
 
