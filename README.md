@@ -170,3 +170,45 @@ lateral deviation reduction percentage — treat that number honestly: if
 it's small or negative, confirm `cbf_active` is non-zero and that the PINN
 estimate correlates with wind truth before concluding the pipeline needs
 retuning.
+
+### Known-good arming configuration
+
+Two mistakes will silently prevent the vehicle from arming (motors spin
+but the vehicle never lifts, or arming is outright denied):
+
+1. **Missing `<spherical_coordinates>` in the world.** Without it, Gazebo's
+   simulated magnetometer/GPS have no reference location, and PX4's EKF
+   reports "Preflight Fail: no heading reference" / "Strong magnetic
+   interference" forever. `worlds/_template.sdf` sets this (Zurich, same
+   as PX4's stock `default.sdf`) — keep it if you edit the template.
+2. **Disabling `SYS_HAS_MAG` / `SYS_HAS_BARO` in the airframe file.**
+   Gazebo *does* simulate both sensors via the world's `Magnetometer` and
+   `AirPressure` plugins, so telling PX4 the vehicle has neither starves
+   the EKF of its yaw reference. The airframe
+   (`ROMFS/px4fmu_common/init.d-posix/airframes/4020_gz_tiltrotor`) only
+   needs:
+   ```
+   param set-default COM_ARM_WO_GPS 1
+   param set-default SYS_HAS_NUM_ASPD 0
+   param set-default CBRK_SUPPLY_CHK 894281
+   param set-default COM_DISARM_LAND 0
+   param set-default NAV_DLL_ACT 0
+   ```
+   (`SYS_HAS_NUM_ASPD=0` skips the airspeed-sensor check — there's no
+   airspeed sensor on this airframe; `CBRK_SUPPLY_CHK` is PX4's documented
+   circuit-breaker magic value for the SITL-only "system power unavailable"
+   check.)
+
+If you edit airframe parameters and arming still fails the same way, the
+parameter store may have a stale saved value from a previous run —
+`param set-default` only takes effect when nothing has been saved yet:
+```bash
+rm -f build/px4_sitl_default/rootfs/parameters.bson \
+      build/px4_sitl_default/rootfs/parameters_backup.bson
+rm -rf build/px4_sitl_default/rootfs/eeprom
+```
+
+Also confirm the tiltrotor model's motor plugins subscribe to
+`gazebo/command/motor_speed` (matching PX4's `gz_bridge` publish topic),
+not the bare `command/motor_speed` some templates ship with — otherwise
+the vehicle spawns and arms but the motors never receive commands.
