@@ -1,0 +1,12 @@
+=== alpha=0.0
+val_mse=0.0541  zero-predictor=1.0692  skill=0.949
+=== alpha=0.3
+val_mse=0.0470  zero-predictor=1.0692  skill=0.956
+=== alpha=0.5
+val_mse=0.0425  zero-predictor=1.0692  skill=0.960
+=== alpha=0.7
+val_mse=0.0483  zero-predictor=1.0692  skill=0.955
+=== alpha=0.9
+val_mse=0.0439  zero-predictor=1.0692  skill=0.959
+=== alpha=1.0
+val_mse=0.0395  zero-predictor=1.0692  skill=0.963
