@@ -22,7 +22,9 @@ import subprocess
 import time
 
 from gz.msgs10.boolean_pb2 import Boolean
+from gz.msgs10.empty_pb2 import Empty
 from gz.msgs10.entity_pb2 import Entity
+from gz.msgs10.scene_pb2 import Scene
 from gz.transport13 import Node as GzNode
 
 from . import constants as C
@@ -41,6 +43,39 @@ def _reset_gazebo_model():
     req = Entity(name=C.MODEL_NAME, type=Entity.MODEL)
     node.request(f'/world/{C.WORLD_NAME}/remove', req, Entity, Boolean, 2000)
     time.sleep(1)  # let Gazebo actually process the removal before PX4's own create races it
+
+
+def _model_is_spawned():
+    node = GzNode()
+    ok, scene = node.request(f'/world/{C.WORLD_NAME}/scene/info', Empty(),
+                             Empty, Scene, 2000)
+    return ok and any(m.name == C.MODEL_NAME for m in scene.model)
+
+
+def _wait_for_spawn(timeout_s=20):
+    """_reset_gazebo_model() deletes the old entity before every PX4
+    (re)start; if the new PX4 process then fails to actually spawn a
+    replacement -- most commonly because something else (a manually
+    started PX4/agent from an earlier terminal, per the README's OLDER
+    4-terminal instructions) is already holding the SITL instance-0 lock
+    or the UDP 8888 port this function's caller is about to try to bind,
+    so this run_one()'s own PX4/agent spawn dies immediately -- the
+    vehicle is simply gone for the rest of the trial with nothing else in
+    the stack ever raising an error. Fail loudly here instead."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if _model_is_spawned():
+            return
+        time.sleep(1)
+    raise SystemExit(
+        f'{C.MODEL_NAME} never appeared in the Gazebo scene {timeout_s}s '
+        'after starting PX4 -- _reset_gazebo_model() already removed the '
+        'previous one, so the vehicle is gone from the sim. Most likely '
+        'cause: a PX4 and/or Micro-XRCE-DDS-Agent instance is already '
+        'running from another terminal and is blocking this one\'s own '
+        '(run_trial.py spawns and owns both itself -- do not start them '
+        'manually alongside it). Other cause: Gazebo was started without '
+        'sourcing build/px4_sitl_default/rootfs/gz_env.sh, see the README.')
 
 
 def _spawn(cmd, cwd=None, env=None):
@@ -73,7 +108,13 @@ def run_one(mode, trial, duration, headless=True):
 
     px4 = _spawn('./build/px4_sitl_default/bin/px4 -d', cwd=PX4_DIR, env=env)
     agent = _spawn(f'{AGENT} udp4 -p 8888')
-    time.sleep(15)  # PX4 boot + EKF convergence
+    try:
+        _wait_for_spawn()  # fails loudly rather than flying a trial with no vehicle
+    except SystemExit:
+        _kill(agent)
+        _kill(px4)
+        raise
+    time.sleep(10)  # remaining EKF convergence margin
 
     launch = (f'bash -lc "source /opt/ros/jazzy/setup.bash && '
               f'source {WS}/install/setup.bash && '

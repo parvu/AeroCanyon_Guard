@@ -101,10 +101,23 @@ task's environment).
 
 **Headless mode (recommended, works on WSL2):**
 
+`run_trial.py` spawns and owns PX4 SITL and the Micro-XRCE-DDS-Agent
+itself (killing and restarting both between the baseline and treatment
+legs, since PX4's EKF and mission state don't reset cleanly in place) —
+**only Gazebo is external.** Do not also start PX4 or the DDS agent by
+hand: `run_trial.py`'s own spawn of either will silently lose the port/
+instance-0-lock race against a manually-started one, its own PX4 process
+dies immediately, and — because `run_one()` unconditionally deletes the
+previous trial's vehicle entity before every restart (see the module
+docstring) — the vehicle then has nothing left to respawn it and is just
+gone from the sim for the rest of the trial. (This used to fail
+silently; `run_trial.py` now raises immediately with a clear message if
+the vehicle doesn't reappear within a few seconds, so a stray manual PX4
+shows up as an error instead of a mysteriously empty world.)
+
 ```bash
 cd ~/PX4-Autopilot
 source /opt/ros/jazzy/setup.bash
-export R="build/px4_sitl_default/rootfs/"
 export GZ_IP=127.0.0.1
 
 # Terminal 1: Gazebo headless
@@ -116,17 +129,7 @@ source build/px4_sitl_default/rootfs/gz_env.sh
 gz sim -v 2 Tools/simulation/gz/worlds/urban_canyon.sdf -r -s &
 sleep 5
 
-# Terminal 2: XRCE-DDS bridge
-~/Micro-XRCE-DDS-Agent/build/MicroXRCEAgent udp4 -p 8888 &
-sleep 2
-
-# Terminal 3: PX4 SITL
-export PX4_SIM_MODEL=gz_tiltrotor
-export PX4_GZ_WORLD=urban_canyon
-./build/px4_sitl_default/bin/px4 &
-sleep 15
-
-# Terminal 4: run the trial, then plot it
+# Terminal 2: run the trial, then plot it
 cd ~/ros2_pinn_sim
 source /opt/ros/jazzy/setup.bash && source install/setup.bash
 source .venv/bin/activate
@@ -157,12 +160,27 @@ The `-g` flag opens a Gazebo GUI window; omit it for headless (saves ~100MB RAM)
 below — it's the single source of truth for the airframe parameters;
 don't duplicate them here, they've drifted out of sync with reality before.
 
-**Output:**
+**Watching a trial fly (manual arm/offboard, no `run_trial.py`):** if you
+want to fly the tiltrotor by hand instead — e.g. to sanity-check a fresh
+PX4/model checkout, or to just watch it in the GUI without the trial
+harness's own PX4/agent lifecycle management — start PX4 and the agent
+yourself, exactly as `run_trial.py` would, in their own terminals after
+Terminal 1 above:
 
-`run_trial.py` spawns PX4 SITL and the Micro-XRCE-DDS-Agent, runs the
-baseline mission, tears everything down, then repeats for the treatment
-(FO-PINN + CBF) mission against the same wind seed — PX4's EKF and mission
-state don't reset cleanly in place, so each trial gets a fresh PX4 process.
+```bash
+# Terminal 2: XRCE-DDS bridge
+~/Micro-XRCE-DDS-Agent/build/MicroXRCEAgent udp4 -p 8888 &
+sleep 2
+
+# Terminal 3: PX4 SITL
+export R="build/px4_sitl_default/rootfs/"
+export PX4_SIM_MODEL=gz_tiltrotor
+export PX4_GZ_WORLD=urban_canyon
+./build/px4_sitl_default/bin/px4 &
+sleep 15
+```
+
+Do not run `run_trial.py` on top of this -- see the warning above.
 
 ### View the figures
 
