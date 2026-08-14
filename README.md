@@ -35,13 +35,23 @@ Apply these edits to `PX4-Autopilot`:
    <enable_wind>true</enable_wind>
    ```
 
-2. **Place the canyon world:**
+2. **Fix the motor command topic.** The stock tiltrotor model's four
+   `MulticopterMotorModel` plugins subscribe to `command/motor_speed`, but
+   PX4's `gz_bridge` publishes on the model-namespaced
+   `gazebo/command/motor_speed`. With the mismatch the vehicle spawns and
+   even arms, but the motors never spin and it never leaves the ground:
+   ```bash
+   sed -i 's#<commandSubTopic>command/motor_speed</commandSubTopic>#<commandSubTopic>gazebo/command/motor_speed</commandSubTopic>#' \
+     ~/PX4-Autopilot/Tools/simulation/gz/models/tiltrotor/model.sdf
+   ```
+
+3. **Place the canyon world:**
    ```bash
    cp ~/ros2_pinn_sim/src/aerocanyon/worlds/urban_canyon.sdf \
       ~/PX4-Autopilot/Tools/simulation/gz/worlds/urban_canyon.sdf
    ```
 
-3. **Disable GCS requirement for offboard arming:**
+4. **Disable GCS requirement for offboard arming:**
    ```bash
    # In PX4 shell:
    param set NAV_DLL_ACT 0
