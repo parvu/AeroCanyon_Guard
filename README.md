@@ -158,20 +158,65 @@ task's environment).
 
 ### Run the paired baseline/treatment trial
 
+**Headless mode (recommended, works on WSL2):**
+
 ```bash
+cd ~/PX4-Autopilot
+source /opt/ros/jazzy/setup.bash
+export R="build/px4_sitl_default/rootfs/"
+export GZ_IP=127.0.0.1
+
+# Terminal 1: Gazebo headless
+gz sim -v 2 Tools/simulation/gz/worlds/urban_canyon.sdf -r -s &
+sleep 5
+
+# Terminal 2: XRCE-DDS bridge
+~/Micro-XRCE-DDS-Agent/build/MicroXRCEAgent udp4 -p 8888 &
+sleep 2
+
+# Terminal 3: PX4 SITL
+export PX4_SIM_MODEL=gz_tiltrotor
+export PX4_GZ_WORLD=urban_canyon
+./build/px4_sitl_default/bin/px4 &
+sleep 15
+
+# Terminal 4: Trials (generates baseline + treatment CSVs and figures)
 cd ~/ros2_pinn_sim
 source /opt/ros/jazzy/setup.bash && source install/setup.bash
-colcon build --symlink-install --packages-select aerocanyon
-python3 -m aerocanyon.run_trial --trial compare --duration 60
 source .venv/bin/activate
-PYTHONPATH=src/aerocanyon python -m aerocanyon.plot_results --trial compare
+python3 -m aerocanyon.run_trial --trial live_full --duration 180
 ```
+
+**GUI mode (requires X11 display server):**
+
+On native Linux or with WSL2 X11 forwarding ([VcXsrv](https://sourceforge.net/projects/vcxsrv/), X410):
+
+```bash
+# Same as above, but replace Terminal 1 with:
+export DISPLAY=:0  # or your WSL2 host IP
+gz sim -v 2 Tools/simulation/gz/worlds/urban_canyon.sdf -r -s -g &
+```
+
+The `-g` flag opens a Gazebo GUI window; omit it for headless (saves ~100MB RAM).
+
+**SITL-specific PX4 configuration:**
+
+The airframe file (`build/px4_sitl_default/rootfs/etc/init.d-posix/airframes/4020_gz_tiltrotor`)
+has been configured to disable sensor checks inappropriate for simulation:
+
+- `COM_ARM_WO_GPS=1` — arm without GPS lock
+- `SYS_HAS_MAG=0`, `SYS_HAS_BARO=0` — disable mag/baro requirements
+- `COM_DISARM_LAND=0`, `SYS_FAILURE_EN=0` — disable failsafe systems for clean SITL
+
+These allow the vehicle to arm and fly automatically during trials without
+preflight check delays.
+
+**Output:**
 
 `run_trial.py` spawns PX4 SITL and the Micro-XRCE-DDS-Agent, runs the
 baseline mission, tears everything down, then repeats for the treatment
 (FO-PINN + CBF) mission against the same wind seed — PX4's EKF and mission
 state don't reset cleanly in place, so each trial gets a fresh PX4 process.
-Add `--gui` to watch it fly (used for the demo recording).
 
 ### View the figures
 
