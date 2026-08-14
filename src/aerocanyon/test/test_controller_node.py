@@ -11,7 +11,9 @@ assert the vehicle_command sequence actually gets sent.
 """
 import rclpy
 
-from aerocanyon.controller_node import SETPOINTS_BEFORE_OFFBOARD, ControllerNode
+from aerocanyon.controller_node import (ENGAGE_RETRY_TICKS,
+                                        SETPOINTS_BEFORE_OFFBOARD,
+                                        ControllerNode)
 from px4_msgs.msg import VehicleCommand
 
 
@@ -72,6 +74,18 @@ def test_does_not_request_offboard_before_the_setpoint_stream_is_established():
     assert sent == []
 
 
+def test_retries_arm_request_until_engaged():
+    # A single arm/offboard request can be silently rejected if PX4 hasn't
+    # finished its own preflight/EKF convergence yet at exactly the tick
+    # SETPOINTS_BEFORE_OFFBOARD fires. Nothing in _run_ticks ever satisfies
+    # ControllerNode.armed/offboard_engaged (no PX4 is present), so if the
+    # node only asked once, this would see exactly one request no matter
+    # how long it ran -- it must keep asking instead.
+    sent = _run_ticks('baseline', SETPOINTS_BEFORE_OFFBOARD + 2 * ENGAGE_RETRY_TICKS + 1)
+    arm_cmds = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM]
+    assert len(arm_cmds) == 3, 'must retry roughly once per ENGAGE_RETRY_TICKS while unengaged'
+
+
 def test_treatment_mode_also_survives_the_tick_loop():
     # Treatment mode additionally publishes CBF diagnostics; make sure that
     # path (float(np.clip(...)) etc.) doesn't have the same bug.
@@ -83,5 +97,6 @@ if __name__ == '__main__':
     test_tick_loop_survives_past_first_tick()
     test_requests_offboard_mode_and_arm_after_setpoint_stream()
     test_does_not_request_offboard_before_the_setpoint_stream_is_established()
+    test_retries_arm_request_until_engaged()
     test_treatment_mode_also_survives_the_tick_loop()
     print('ok')

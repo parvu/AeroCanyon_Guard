@@ -21,6 +21,7 @@ from .constants import MASS_KG
 from .mission import Mission
 
 SETPOINTS_BEFORE_OFFBOARD = 20  # PX4 needs an existing stream to accept the mode
+ENGAGE_RETRY_TICKS = 50  # retry the arm+offboard request once a second until it sticks
 
 
 class ControllerNode(Node):
@@ -37,6 +38,7 @@ class ControllerNode(Node):
         self.tick = 0
         self.start_time = None
         self.armed = False
+        self.offboard_engaged = False
         self.done_logged = False
         self.wind_est = np.zeros(3)
 
@@ -80,6 +82,7 @@ class ControllerNode(Node):
 
     def _on_status(self, msg):
         self.armed = msg.arming_state == VehicleStatus.ARMING_STATE_ARMED
+        self.offboard_engaged = msg.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD
 
     def _on_wind_est(self, msg):
         self.wind_est = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
@@ -116,11 +119,22 @@ class ControllerNode(Node):
     def _tick(self):
         self._publish_offboard_mode()
 
-        if self.tick == SETPOINTS_BEFORE_OFFBOARD:
+        engaged = self.armed and self.offboard_engaged
+        since_stream_started = self.tick - SETPOINTS_BEFORE_OFFBOARD
+        if (not engaged and since_stream_started >= 0
+                and since_stream_started % ENGAGE_RETRY_TICKS == 0):
+            # A single request can be silently rejected if PX4 hasn't
+            # finished its own preflight/EKF convergence yet -- keep
+            # asking once a second until the vehicle actually confirms
+            # armed + offboard, rather than trying exactly once and
+            # leaving the vehicle idle for the rest of the trial with no
+            # visible error.
             # 1 = custom main mode, 6 = offboard
             self._send_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, 1.0, 6.0)
             self._send_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0)
             self.get_logger().info('requested offboard mode and arm')
+
+        if engaged and self.start_time is None:
             self.start_time = self.get_clock().now()
 
         elapsed = 0.0
