@@ -1,0 +1,330 @@
+# Task 3 Review Package
+
+Commits: f6a2c63..d306ec7
+
+d306ec7 feat(aerocanyon): urban canyon wind field generation and lookup
+
+ src/aerocanyon/aerocanyon/canyon_field.py | 197 ++++++++++++++++++++++++++++++
+ src/aerocanyon/data/wind_grid.json        |  19 +++
+ src/aerocanyon/data/wind_grid.npy         | Bin 0 -> 1382528 bytes
+ src/aerocanyon/test/test_canyon_field.py  |  79 ++++++++++++
+ 4 files changed, 295 insertions(+)
+
+diff --git a/src/aerocanyon/aerocanyon/canyon_field.py b/src/aerocanyon/aerocanyon/canyon_field.py
+new file mode 100644
+index 0000000..abda80e
+--- /dev/null
++++ b/src/aerocanyon/aerocanyon/canyon_field.py
+@@ -0,0 +1,197 @@
++"""Urban canyon wind field: offline generation, runtime lookup, turbulence.
++
++The field is composed from published urban-canyon aerodynamics rather than
++solved: a log-law vertical profile, channeling speedup through the throat
++between the tower rows, and recirculation behind the tower corners. WP1 of
++the funded project replaces generate() with real CFD output; the .npy plus
++metadata JSON is the contract, and WindGrid does not care which produced it.
++
++Turbulence is deliberately NOT baked into the grid -- DrydenGust adds it at
++runtime. That keeps the stored field 3D instead of 4D and lets turbulence
++intensity vary per trial without regenerating anything.
++
++All vectors are Gazebo ENU, m/s.
++"""
++import json
++import pathlib
++
++import numpy as np
++
++from . import canyon_geometry as cg
++
++KARMAN = 0.41
++
++
++def log_law(z, u_ref=10.0, z_ref=30.0, z0=1.0):
++    """Neutral-stability logarithmic wind profile.
++
++    z0 = 1.0 m is the standard roughness length for a dense urban centre.
++    Below z0 the profile is undefined, so it clamps to zero rather than
++    returning a negative wind speed.
++    """
++    if z <= z0:
++        return 0.0
++    return u_ref * np.log(z / z0) / np.log(z_ref / z0)
++
++
++def _channeling(y, z):
++    """Speedup factor for flow squeezed between the two tower rows.
++
++    Peaks on the canyon axis and decays to 1.0 (no effect) outside the
++    throat. Only applies below the roofline; above it the flow is not
++    channelled.
++    """
++    w = cg.CANYON_HALF_WIDTH
++    if abs(y) > 3.0 * w:
++        return 1.0
++    roof = max(b.sz for b in cg.BUILDINGS)
++    height_factor = np.clip(1.0 - z / roof, 0.0, 1.0)
++    return 1.0 + 0.6 * height_factor * np.exp(-(y / w) ** 2)
++
++
++def _recirculation(p):
++    """Corner separation: a lateral+vertical eddy in each tower's lee.
++
++    Modelled as a rotational contribution centred just downstream of each
++    tower, decaying over one building depth. This is what makes the corners
++    hazardous and is the disturbance the PINN has to learn.
++    """
++    v = np.zeros(3)
++    for b in cg.BUILDINGS:
++        centre = np.array([b.cx + b.sx * 0.75, b.cy, b.sz * 0.5])
++        r = p - centre
++        scale = np.array([b.sx, b.sy, b.sz])
++        d2 = float(np.sum((r / scale) ** 2))
++        if d2 > 4.0:
++            continue
++        strength = 3.0 * np.exp(-d2)
++        sign = np.sign(b.cy) or 1.0
++        # Swirl in the plane across the canyon, plus downwash on the lee side.
++        v += strength * np.array([-0.4, -sign * 0.5, -0.3])
++    return v
++
++
++def generate(nx=60, ny=40, nz=24):
++    """Build the 3D wind grid over the canyon and its surroundings.
++
++    Returns (field, meta) where field has shape (nx, ny, nz, 3).
++    """
++    xs_lo, xs_hi = cg.CANYON_ENTRY[0] - 20.0, cg.CANYON_EXIT[0] + 20.0
++    ys_lo, ys_hi = -150.0, 150.0
++    zs_lo, zs_hi = 0.0, 100.0
++
++    xs = np.linspace(xs_lo, xs_hi, nx)
++    ys = np.linspace(ys_lo, ys_hi, ny)
++    zs = np.linspace(zs_lo, zs_hi, nz)
++
++    field = np.zeros((nx, ny, nz, 3))
++    for i, x in enumerate(xs):
++        for j, y in enumerate(ys):
++            for k, z in enumerate(zs):
++                p = np.array([x, y, z])
++                d, _ = cg.distance_and_normal(p)
++                if d <= 0.0:
++                    continue  # inside a building: no flow
++                base = log_law(z) * _channeling(y, z)
++                # Prevailing wind along +x, down the canyon axis.
++                v = np.array([base, 0.0, 0.0]) + _recirculation(p)
++                # Blend to zero at the walls (no-slip).
++                v *= np.clip(d / 3.0, 0.0, 1.0)
++                field[i, j, k] = v
++
++    meta = {
++        'origin': [xs_lo, ys_lo, zs_lo],
++        'spacing': [(xs_hi - xs_lo) / (nx - 1),
++                    (ys_hi - ys_lo) / (ny - 1),
++                    (zs_hi - zs_lo) / (nz - 1)],
++        'shape': [nx, ny, nz],
++        'u_ref': 10.0,
++        'z0': 1.0,
++    }
++    return field, meta
++
++
++class WindGrid:
++    """Trilinear lookup into a generated or CFD-produced wind grid."""
++
++    def __init__(self, field, meta):
++        self.field = np.asarray(field, dtype=float)
++        self.origin = np.array(meta['origin'], dtype=float)
++        self.spacing = np.array(meta['spacing'], dtype=float)
++        self.shape = np.array(meta['shape'], dtype=int)
++        self.meta = meta
++
++    @classmethod
++    def load(cls, data_dir):
++        d = pathlib.Path(data_dir)
++        field = np.load(d / 'wind_grid.npy')
++        meta = json.loads((d / 'wind_grid.json').read_text())
++        return cls(field, meta)
++
++    def save(self, data_dir):
++        d = pathlib.Path(data_dir)
++        d.mkdir(parents=True, exist_ok=True)
++        np.save(d / 'wind_grid.npy', self.field)
++        (d / 'wind_grid.json').write_text(json.dumps(self.meta, indent=2))
++
++    def at(self, p_enu):
++        """Wind velocity at an ENU point. Clamps outside the grid."""
++        f = (np.asarray(p_enu, dtype=float) - self.origin) / self.spacing
++        f = np.clip(f, 0.0, self.shape - 1.0)
++        i0 = np.floor(f).astype(int)
++        i1 = np.minimum(i0 + 1, self.shape - 1)
++        t = f - i0
++
++        out = np.zeros(3)
++        for bx in (0, 1):
++            for by in (0, 1):
++                for bz in (0, 1):
++                    w = ((t[0] if bx else 1 - t[0])
++                         * (t[1] if by else 1 - t[1])
++                         * (t[2] if bz else 1 - t[2]))
++                    if w == 0.0:
++                        continue
++                    idx = (i1[0] if bx else i0[0],
++                           i1[1] if by else i0[1],
++                           i1[2] if bz else i0[2])
++                    out += w * self.field[idx]
++        return out
++
++
++class DrydenGust:
++    """Dryden turbulence as a first-order Markov process per axis.
++
++    The full Dryden spectrum needs a second-order filter on the lateral
++    axes; a first-order approximation matches the dominant time constant,
++    which is what governs how the fractional-memory term behaves. That is
++    the property under test here.
++
++    ponytail: first-order Dryden approximation. Upgrade to the full
++    second-order lateral filter only if spectral fidelity is ever claimed
++    in a paper.
++    """
++
++    def __init__(self, dt, sigma=1.5, length_scale=200.0, seed=0):
++        self.dt = float(dt)
++        self.sigma = float(sigma)
++        self.length_scale = float(length_scale)
++        self.rng = np.random.default_rng(seed)
++        self.state = np.zeros(3)
++
++    def step(self, airspeed):
++        """Advance one timestep. Faster flight decorrelates gusts sooner."""
++        v = max(float(airspeed), 1.0)
++        tau = self.length_scale / v
++        a = np.exp(-self.dt / tau)
++        noise = self.rng.normal(0.0, 1.0, 3)
++        self.state = a * self.state + self.sigma * np.sqrt(1.0 - a * a) * noise
++        return self.state.copy()
++
++
++if __name__ == '__main__':
++    field, meta = generate()
++    out = pathlib.Path(__file__).resolve().parents[1] / 'data'
++    WindGrid(field, meta).save(out)
++    speeds = np.linalg.norm(field, axis=-1)
++    print(f'wrote {out}/wind_grid.npy shape={field.shape} '
++          f'max={speeds.max():.2f} m/s mean={speeds.mean():.2f} m/s')
+diff --git a/src/aerocanyon/data/wind_grid.json b/src/aerocanyon/data/wind_grid.json
+new file mode 100644
+index 0000000..d86a0b6
+--- /dev/null
++++ b/src/aerocanyon/data/wind_grid.json
+@@ -0,0 +1,19 @@
++{
++  "origin": [
++    -110.0,
++    -150.0,
++    0.0
++  ],
++  "spacing": [
++    4.067796610169491,
++    7.6923076923076925,
++    4.3478260869565215
++  ],
++  "shape": [
++    60,
++    40,
++    24
++  ],
++  "u_ref": 10.0,
++  "z0": 1.0
++}
+\ No newline at end of file
+diff --git a/src/aerocanyon/data/wind_grid.npy b/src/aerocanyon/data/wind_grid.npy
+new file mode 100644
+index 0000000..2f19832
+Binary files /dev/null and b/src/aerocanyon/data/wind_grid.npy differ
+diff --git a/src/aerocanyon/test/test_canyon_field.py b/src/aerocanyon/test/test_canyon_field.py
+new file mode 100644
+index 0000000..a9591a9
+--- /dev/null
++++ b/src/aerocanyon/test/test_canyon_field.py
+@@ -0,0 +1,79 @@
++import numpy as np
++import pytest
++from aerocanyon import canyon_field as cf
++from aerocanyon import canyon_geometry as cg
++
++
++def test_log_law_is_zero_at_roughness_height():
++    assert cf.log_law(1.0, u_ref=10.0, z_ref=30.0, z0=1.0) == pytest.approx(0.0)
++
++
++def test_log_law_hits_reference_speed_at_reference_height():
++    assert cf.log_law(30.0, u_ref=10.0, z_ref=30.0, z0=1.0) == pytest.approx(10.0)
++
++
++def test_log_law_increases_with_height():
++    speeds = [cf.log_law(z) for z in (5.0, 15.0, 30.0, 60.0)]
++    assert speeds == sorted(speeds)
++
++
++def test_log_law_clamps_below_roughness_instead_of_going_negative():
++    assert cf.log_law(0.1, z0=1.0) >= 0.0
++
++
++def test_generated_grid_has_the_declared_shape():
++    field, meta = cf.generate(nx=10, ny=8, nz=6)
++    assert field.shape == (10, 8, 6, 3)
++    assert meta['shape'] == [10, 8, 6]
++    assert len(meta['origin']) == 3 and len(meta['spacing']) == 3
++
++
++def test_canyon_throat_is_faster_than_open_air_at_the_same_height():
++    """Channeling: flow squeezed between the towers accelerates."""
++    field, meta = cf.generate(nx=40, ny=30, nz=16)
++    grid = cf.WindGrid(field, meta)
++    z = 20.0
++    throat = np.linalg.norm(grid.at(np.array([0.0, 0.0, z])))
++    open_air = np.linalg.norm(grid.at(np.array([0.0, 120.0, z])))
++    assert throat > open_air
++
++
++def test_lookup_clamps_outside_the_grid_rather_than_raising():
++    field, meta = cf.generate(nx=10, ny=8, nz=6)
++    grid = cf.WindGrid(field, meta)
++    far = grid.at(np.array([1e6, 1e6, 1e6]))
++    assert far.shape == (3,) and np.all(np.isfinite(far))
++
++
++def test_lookup_returns_the_stored_value_at_a_cell_centre():
++    field, meta = cf.generate(nx=10, ny=8, nz=6)
++    grid = cf.WindGrid(field, meta)
++    o, s = np.array(meta['origin']), np.array(meta['spacing'])
++    p = o + s * np.array([3, 2, 4])
++    assert np.allclose(grid.at(p), field[3, 2, 4], atol=1e-9)
++
++
++def test_wind_inside_a_building_is_near_zero():
++    field, meta = cf.generate(nx=40, ny=30, nz=16)
++    grid = cf.WindGrid(field, meta)
++    b = cg.BUILDINGS[0]
++    inside = grid.at(np.array([b.cx, b.cy, b.sz / 2.0]))
++    assert np.linalg.norm(inside) < 1.0
++
++
++def test_dryden_is_zero_mean_and_reproducible():
++    a = cf.DrydenGust(dt=0.02, seed=7)
++    b = cf.DrydenGust(dt=0.02, seed=7)
++    sa = np.array([a.step(15.0) for _ in range(4000)])
++    sb = np.array([b.step(15.0) for _ in range(4000)])
++    assert np.allclose(sa, sb), "same seed must reproduce the same gust train"
++    assert np.all(np.abs(sa.mean(axis=0)) < 0.5)
++    assert np.all(sa.std(axis=0) > 0.1), "gusts must actually vary"
++
++
++def test_dryden_is_correlated_in_time():
++    """The whole point of Dryden over white noise: successive samples relate."""
++    g = cf.DrydenGust(dt=0.02, seed=1)
++    s = np.array([g.step(15.0) for _ in range(4000)])[:, 0]
++    lag1 = np.corrcoef(s[:-1], s[1:])[0, 1]
++    assert lag1 > 0.8

@@ -1,0 +1,397 @@
+# Task 5 Review Package
+
+Commits: 9e489be..eca50d8
+
+eca50d8 feat(aerocanyon): canyon transit mission, baseline controller and trial logger
+
+ .gitignore                                   |   1 +
+ src/aerocanyon/aerocanyon/controller_node.py | 142 +++++++++++++++++++++++++++
+ src/aerocanyon/aerocanyon/mission.py         |  41 ++++++++
+ src/aerocanyon/aerocanyon/trial_logger.py    | 122 +++++++++++++++++++++++
+ src/aerocanyon/test/test_mission.py          |  39 ++++++++
+ 5 files changed, 345 insertions(+)
+
+diff --git a/.gitignore b/.gitignore
+index 4a51faa..2c21c92 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -4,10 +4,11 @@ install/
+ log/
+ 
+ # Python
+ .venv/
+ __pycache__/
+ *.pyc
+ *.egg-info/
+ 
+ # ROS logs
+ .ros/
++trials/
+diff --git a/src/aerocanyon/aerocanyon/controller_node.py b/src/aerocanyon/aerocanyon/controller_node.py
+new file mode 100644
+index 0000000..120c615
+--- /dev/null
++++ b/src/aerocanyon/aerocanyon/controller_node.py
+@@ -0,0 +1,142 @@
++"""Offboard setpoint streamer. Baseline mode publishes the raw mission
++reference; treatment mode adds PINN feedforward behind the CBF filter.
++
++The offboard arm/engage sequence follows the pattern already proven in
++px4_teleop/teleop_keyboard.py: stream setpoints for a beat BEFORE
++requesting offboard mode, because PX4 rejects the mode switch if no
++setpoint stream is already present.
++"""
++import numpy as np
++import rclpy
++from geometry_msgs.msg import Vector3Stamped
++from px4_msgs.msg import (OffboardControlMode, TrajectorySetpoint,
++                          VehicleCommand, VehicleLocalPosition, VehicleStatus)
++from rclpy.node import Node
++from rclpy.qos import qos_profile_sensor_data
++
++from . import constants as C
++from .mission import Mission
++
++SETPOINTS_BEFORE_OFFBOARD = 20  # PX4 needs an existing stream to accept the mode
++
++
++class ControllerNode(Node):
++
++    def __init__(self):
++        super().__init__('controller_node')
++        self.declare_parameter('mode', 'baseline')
++        self.mode = self.get_parameter('mode').value
++        if self.mode not in ('baseline', 'treatment'):
++            raise ValueError(f'mode must be baseline or treatment, got {self.mode}')
++        self.get_logger().info(f'controller mode: {self.mode}')
++
++        self.mission = Mission()
++        self.tick = 0
++        self.start_time = None
++        self.armed = False
++        self.done_logged = False
++        self.wind_est = np.zeros(3)
++
++        self.pos = np.zeros(3)
++        self.vel = np.zeros(3)
++
++        self.sp_pub = self.create_publisher(
++            TrajectorySetpoint, '/fmu/in/trajectory_setpoint', 10)
++        self.mode_pub = self.create_publisher(
++            OffboardControlMode, '/fmu/in/offboard_control_mode', 10)
++        self.cmd_pub = self.create_publisher(
++            VehicleCommand, '/fmu/in/vehicle_command', 10)
++        self.desired_pub = self.create_publisher(
++            Vector3Stamped, C.TOPIC_SETPOINT_DESIRED, 10)
++
++        self.create_subscription(
++            VehicleLocalPosition, '/fmu/out/vehicle_local_position',
++            self._on_position, qos_profile_sensor_data)
++        self.create_subscription(
++            VehicleStatus, '/fmu/out/vehicle_status',
++            self._on_status, qos_profile_sensor_data)
++        self.create_subscription(
++            Vector3Stamped, C.TOPIC_WIND_EST, self._on_wind_est, 10)
++
++        self.create_timer(1.0 / C.CONTROL_HZ, self._tick)
++
++    def _on_position(self, msg):
++        self.pos = np.array([msg.x, msg.y, msg.z])
++        self.vel = np.array([msg.vx, msg.vy, msg.vz])
++
++    def _on_status(self, msg):
++        self.armed = msg.arming_state == VehicleStatus.ARMING_STATE_ARMED
++
++    def _on_wind_est(self, msg):
++        self.wind_est = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
++
++    def _send_command(self, command, param1=0.0, param2=0.0):
++        msg = VehicleCommand()
++        msg.command = command
++        msg.param1 = param1
++        msg.param2 = param2
++        msg.target_system = 1
++        msg.target_component = 1
++        msg.source_system = 1
++        msg.source_component = 1
++        msg.from_external = True
++        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
++        self.cmd_pub.publish(msg)
++
++    def _publish_offboard_mode(self):
++        msg = OffboardControlMode()
++        msg.position = True
++        msg.velocity = False
++        msg.acceleration = False
++        msg.attitude = False
++        msg.body_rate = False
++        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
++        self.mode_pub.publish(msg)
++
++    def _tick(self):
++        self._publish_offboard_mode()
++
++        if self.tick == SETPOINTS_BEFORE_OFFBOARD:
++            # 1 = custom main mode, 6 = offboard
++            self._send_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, 1.0, 6.0)
++            self._send_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0)
++            self.get_logger().info('requested offboard mode and arm')
++            self.start_time = self.get_clock().now()
++
++        elapsed = 0.0
++        if self.start_time is not None:
++            elapsed = (self.get_clock().now() - self.start_time).nanoseconds / 1e9
++
++        target, done = self.mission.target(elapsed)
++        if done and not self.done_logged:
++            self.get_logger().info(f'mission complete at t={elapsed:.1f}s')
++            self.done_logged = True
++
++        sp = TrajectorySetpoint()
++        sp.position = [float(v) for v in target]
++        sp.yaw = 0.0  # nose along +north, down the canyon
++        sp.timestamp = int(self.get_clock().now().nanoseconds / 1000)
++        self.sp_pub.publish(sp)
++
++        desired = Vector3Stamped()
++        desired.header.stamp = self.get_clock().now().to_msg()
++        desired.vector.x, desired.vector.y, desired.vector.z = sp.position
++        self.desired_pub.publish(desired)
++
++        self.tick += 1
++
++
++def main(args=None):
++    rclpy.init(args=args)
++    node = ControllerNode()
++    try:
++        rclpy.spin(node)
++    except KeyboardInterrupt:
++        pass
++    finally:
++        node.destroy_node()
++        rclpy.shutdown()
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/src/aerocanyon/aerocanyon/mission.py b/src/aerocanyon/aerocanyon/mission.py
+new file mode 100644
+index 0000000..939478d
+--- /dev/null
++++ b/src/aerocanyon/aerocanyon/mission.py
+@@ -0,0 +1,41 @@
++"""The fixed canyon-transit mission, flown identically by both trials.
++
++Both trials must fly the SAME reference or the comparison is meaningless,
++so this is a pure function of mission time with no feedback and no
++randomness whatsoever.
++"""
++import numpy as np
++
++from . import canyon_geometry as cg
++from . import frames
++
++CRUISE_SPEED = 12.0  # m/s along the canyon; inside the tiltrotor's transition band
++
++WAYPOINTS_NED = [
++    frames.enu_to_ned(cg.CANYON_ENTRY),
++    frames.enu_to_ned(cg.CANYON_EXIT),
++]
++
++
++class Mission:
++    """Straight transit from canyon entry to exit at constant speed."""
++
++    def __init__(self, hold_s=3.0, speed=CRUISE_SPEED):
++        self.hold_s = float(hold_s)
++        self.start = WAYPOINTS_NED[0].astype(float)
++        self.end = WAYPOINTS_NED[1].astype(float)
++        delta = self.end - self.start
++        self.distance = float(np.linalg.norm(delta))
++        self.direction = delta / self.distance
++        self.transit_s = self.distance / float(speed)
++        self.speed = float(speed)
++
++    def target(self, t):
++        """NED position setpoint at mission time t, and a done flag."""
++        t = float(t)
++        if t <= self.hold_s:
++            return self.start.copy(), False
++        travelled = (t - self.hold_s) * self.speed
++        if travelled >= self.distance:
++            return self.end.copy(), True
++        return self.start + self.direction * travelled, False
+diff --git a/src/aerocanyon/aerocanyon/trial_logger.py b/src/aerocanyon/aerocanyon/trial_logger.py
+new file mode 100644
+index 0000000..3fc73ad
+--- /dev/null
++++ b/src/aerocanyon/aerocanyon/trial_logger.py
+@@ -0,0 +1,122 @@
++"""Log everything a trial needs, to one CSV per run.
++
++This CSV is both the PINN's training set and the figures' input, so it
++carries ground-truth wind alongside the state. Keep the column order
++stable -- train_pinn.py and plot_results.py both read it by name, but a
++human comparing two runs reads it by eye.
++"""
++import csv
++import pathlib
++
++import numpy as np
++import rclpy
++from geometry_msgs.msg import Vector3Stamped
++from px4_msgs.msg import (SensorCombined, VehicleAttitude, VehicleLocalPosition)
++from rclpy.node import Node
++from rclpy.qos import qos_profile_sensor_data
++
++from . import constants as C
++
++COLUMNS = [
++    't',
++    'x', 'y', 'z', 'vx', 'vy', 'vz',
++    'qw', 'qx', 'qy', 'qz',
++    'ax', 'ay', 'az', 'p', 'q', 'r',
++    'wind_true_n', 'wind_true_e', 'wind_true_d',
++    'wind_est_n', 'wind_est_e', 'wind_est_d',
++    'sp_n', 'sp_e', 'sp_d',
++    'cbf_active', 'cbf_h_min',
++]
++
++
++class TrialLogger(Node):
++
++    def __init__(self):
++        super().__init__('trial_logger')
++        self.declare_parameter('trial', 'trial')
++        self.declare_parameter('mode', 'baseline')
++        self.declare_parameter('out_dir', 'trials')
++
++        out = pathlib.Path(self.get_parameter('out_dir').value)
++        out.mkdir(parents=True, exist_ok=True)
++        name = (f"{self.get_parameter('trial').value}_"
++                f"{self.get_parameter('mode').value}.csv")
++        self.path = out / name
++        self.fh = self.path.open('w', newline='')
++        self.writer = csv.DictWriter(self.fh, fieldnames=COLUMNS)
++        self.writer.writeheader()
++        self.get_logger().info(f'logging to {self.path}')
++
++        self.row = {c: 0.0 for c in COLUMNS}
++        self.t0 = self.get_clock().now()
++
++        self.create_subscription(
++            VehicleLocalPosition, '/fmu/out/vehicle_local_position',
++            self._on_position, qos_profile_sensor_data)
++        self.create_subscription(
++            VehicleAttitude, '/fmu/out/vehicle_attitude',
++            self._on_attitude, qos_profile_sensor_data)
++        self.create_subscription(
++            SensorCombined, '/fmu/out/sensor_combined',
++            self._on_imu, qos_profile_sensor_data)
++        self.create_subscription(
++            Vector3Stamped, C.TOPIC_WIND_TRUTH, self._on_truth, 10)
++        self.create_subscription(
++            Vector3Stamped, C.TOPIC_WIND_EST, self._on_est, 10)
++        self.create_subscription(
++            Vector3Stamped, C.TOPIC_SETPOINT_DESIRED, self._on_sp, 10)
++        self.create_subscription(
++            Vector3Stamped, C.TOPIC_CBF_DIAG, self._on_cbf, 10)
++
++        self.create_timer(1.0 / C.CONTROL_HZ, self._write)
++
++    def _on_position(self, m):
++        self.row.update(x=m.x, y=m.y, z=m.z, vx=m.vx, vy=m.vy, vz=m.vz)
++
++    def _on_attitude(self, m):
++        self.row.update(qw=m.q[0], qx=m.q[1], qy=m.q[2], qz=m.q[3])
++
++    def _on_imu(self, m):
++        self.row.update(ax=m.accelerometer_m_s2[0], ay=m.accelerometer_m_s2[1],
++                        az=m.accelerometer_m_s2[2],
++                        p=m.gyro_rad[0], q=m.gyro_rad[1], r=m.gyro_rad[2])
++
++    def _on_truth(self, m):
++        self.row.update(wind_true_n=m.vector.x, wind_true_e=m.vector.y,
++                        wind_true_d=m.vector.z)
++
++    def _on_est(self, m):
++        self.row.update(wind_est_n=m.vector.x, wind_est_e=m.vector.y,
++                        wind_est_d=m.vector.z)
++
++    def _on_sp(self, m):
++        self.row.update(sp_n=m.vector.x, sp_e=m.vector.y, sp_d=m.vector.z)
++
++    def _on_cbf(self, m):
++        # x = 1.0 if the filter modified the command, y = smallest barrier value
++        self.row.update(cbf_active=m.vector.x, cbf_h_min=m.vector.y)
++
++    def _write(self):
++        self.row['t'] = (self.get_clock().now() - self.t0).nanoseconds / 1e9
++        self.writer.writerow(self.row)
++        self.fh.flush()
++
++    def destroy_node(self):
++        self.fh.close()
++        super().destroy_node()
++
++
++def main(args=None):
++    rclpy.init(args=args)
++    node = TrialLogger()
++    try:
++        rclpy.spin(node)
++    except KeyboardInterrupt:
++        pass
++    finally:
++        node.destroy_node()
++        rclpy.shutdown()
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/src/aerocanyon/test/test_mission.py b/src/aerocanyon/test/test_mission.py
+new file mode 100644
+index 0000000..b1eb2e8
+--- /dev/null
++++ b/src/aerocanyon/test/test_mission.py
+@@ -0,0 +1,39 @@
++import numpy as np
++from aerocanyon import canyon_geometry as cg
++from aerocanyon import frames
++from aerocanyon.mission import Mission
++
++
++def test_mission_starts_at_the_canyon_entry():
++    m = Mission()
++    p, done = m.target(0.0)
++    assert not done
++    assert np.allclose(p, frames.enu_to_ned(cg.CANYON_ENTRY), atol=1e-6)
++
++
++def test_mission_ends_at_the_canyon_exit():
++    m = Mission()
++    p, done = m.target(1e6)
++    assert done
++    assert np.allclose(p, frames.enu_to_ned(cg.CANYON_EXIT), atol=1e-6)
++
++
++def test_mission_is_monotonic_along_the_canyon():
++    m = Mission()
++    # NED north is ENU +x, so the north component must increase monotonically.
++    north = [m.target(t)[0][0] for t in np.linspace(0.0, 200.0, 400)]
++    assert all(b >= a - 1e-9 for a, b in zip(north, north[1:]))
++
++
++def test_mission_stays_clear_of_the_buildings():
++    m = Mission()
++    for t in np.linspace(0.0, 200.0, 400):
++        p_ned, _ = m.target(t)
++        d, _ = cg.distance_and_normal(frames.ned_to_enu(p_ned))
++        assert d > 2.0, f'setpoint at t={t} is {d:.2f} m from a building'
++
++
++def test_mission_is_deterministic():
++    a, b = Mission(), Mission()
++    for t in (0.0, 12.5, 60.0, 130.0):
++        assert np.allclose(a.target(t)[0], b.target(t)[0])

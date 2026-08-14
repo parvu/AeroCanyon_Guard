@@ -1,0 +1,116 @@
+# Task 4 Review Package
+
+Commits: d306ec7..9e489be
+
+9e489be feat(aerocanyon): wind field replay node driving Gazebo WindEffects
+
+ src/aerocanyon/aerocanyon/wind_field_node.py | 101 +++++++++++++++++++++++++++
+ 1 file changed, 101 insertions(+)
+
+diff --git a/src/aerocanyon/aerocanyon/wind_field_node.py b/src/aerocanyon/aerocanyon/wind_field_node.py
+new file mode 100644
+index 0000000..11ceb63
+--- /dev/null
++++ b/src/aerocanyon/aerocanyon/wind_field_node.py
+@@ -0,0 +1,101 @@
++"""Replay the canyon wind field into Gazebo at the vehicle's position.
++
++Gazebo's WindEffects plugin models a GLOBALLY UNIFORM wind. Rather than
++write a new plugin, this node looks the field up at the vehicle's position
++and republishes that as the global wind at CONTROL_HZ. A single vehicle
++therefore experiences the correct spatially varying field.
++
++ponytail: single-vehicle only -- the global wind topic is driven from one
++drone's position. Multi-vehicle needs a real per-link wind plugin.
++
++ros_gz_interfaces has no Wind message, so this cannot go through
++parameter_bridge; the node publishes to Gazebo directly via gz.transport13.
++"""
++import numpy as np
++import rclpy
++from geometry_msgs.msg import Vector3Stamped
++from gz.msgs10.wind_pb2 import Wind
++from gz.transport13 import Node as GzNode
++from px4_msgs.msg import VehicleLocalPosition
++from rclpy.node import Node
++from rclpy.qos import qos_profile_sensor_data
++
++from . import constants as C
++from . import frames
++from .canyon_field import DrydenGust, WindGrid
++
++
++class WindFieldNode(Node):
++
++    def __init__(self):
++        super().__init__('wind_field_node')
++        self.declare_parameter('data_dir', '')
++        self.declare_parameter('turbulence_sigma', 1.5)
++        self.declare_parameter('seed', 0)
++
++        data_dir = self.get_parameter('data_dir').value
++        if not data_dir:
++            from ament_index_python.packages import get_package_share_directory
++            data_dir = get_package_share_directory('aerocanyon') + '/data'
++        self.grid = WindGrid.load(data_dir)
++        self.get_logger().info(f'loaded wind grid from {data_dir}')
++
++        dt = 1.0 / C.CONTROL_HZ
++        self.gust = DrydenGust(
++            dt=dt,
++            sigma=float(self.get_parameter('turbulence_sigma').value),
++            seed=int(self.get_parameter('seed').value),
++        )
++
++        self.pos_enu = np.zeros(3)
++        self.airspeed = 1.0
++
++        self.create_subscription(
++            VehicleLocalPosition, '/fmu/out/vehicle_local_position',
++            self._on_position, qos_profile_sensor_data)
++
++        self.truth_pub = self.create_publisher(
++            Vector3Stamped, C.TOPIC_WIND_TRUTH, 10)
++
++        self.gz = GzNode()
++        self.gz_pub = self.gz.advertise(C.GZ_WIND_TOPIC, Wind)
++
++        self.create_timer(dt, self._tick)
++
++    def _on_position(self, msg):
++        # PX4 local position is NED; the grid is ENU.
++        self.pos_enu = frames.ned_to_enu(np.array([msg.x, msg.y, msg.z]))
++        self.airspeed = float(np.linalg.norm([msg.vx, msg.vy, msg.vz]))
++
++    def _tick(self):
++        wind_enu = self.grid.at(self.pos_enu) + self.gust.step(self.airspeed)
++
++        msg = Wind()
++        msg.linear_velocity.x = float(wind_enu[0])
++        msg.linear_velocity.y = float(wind_enu[1])
++        msg.linear_velocity.z = float(wind_enu[2])
++        msg.enable_wind = True
++        self.gz_pub.publish(msg)
++
++        wind_ned = frames.enu_to_ned(wind_enu)
++        out = Vector3Stamped()
++        out.header.stamp = self.get_clock().now().to_msg()
++        out.header.frame_id = 'ned'
++        out.vector.x, out.vector.y, out.vector.z = (float(v) for v in wind_ned)
++        self.truth_pub.publish(out)
++
++
++def main(args=None):
++    rclpy.init(args=args)
++    node = WindFieldNode()
++    try:
++        rclpy.spin(node)
++    except KeyboardInterrupt:
++        pass
++    finally:
++        node.destroy_node()
++        rclpy.shutdown()
++
++
++if __name__ == '__main__':
++    main()

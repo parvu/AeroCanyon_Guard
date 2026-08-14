@@ -1,0 +1,477 @@
+# Task 9 Review Package (FINAL TASK)
+
+Commits: c7b7cca..9c9bc4f
+
+9c9bc4f feat(aerocanyon): close the FO-PINN/CBF loop and generate trial figures
+
+ README.md                                    |  86 +++++++++++++++++++++
+ src/aerocanyon/aerocanyon/controller_node.py |  40 +++++++++-
+ src/aerocanyon/aerocanyon/plot_results.py    | 111 +++++++++++++++++++++++++++
+ src/aerocanyon/aerocanyon/run_trial.py       |  83 ++++++++++++++++++++
+ 4 files changed, 318 insertions(+), 2 deletions(-)
+
+diff --git a/README.md b/README.md
+index 2c06bb2..fa4839e 100644
+--- a/README.md
++++ b/README.md
+@@ -96,10 +96,96 @@ chmod +x QGroundControl.AppImage   # first time only
+ ```
+ 
+ PX4 SITL broadcasts MAVLink on UDP port 14550 by default, so QGC
+ auto-detects and connects to the vehicle within a few seconds — no manual
+ connection setup needed. Fly it from QGC's own controls (arm, takeoff,
+ manual/position/offboard modes) as you would with any PX4 vehicle.
+ 
+ The PINN telemetry launch (Terminal 3 above) can be run alongside QGC too,
+ if you want `/pinn/input_state` while flying from QGC — the DDS agent is
+ only needed for that, not for QGC itself.
++
++## AeroCanyon-Guard
++
++`src/aerocanyon` is a separate scenario from the wind-arena package above: a
++tilt-rotor VTOL transiting a canyon of six box buildings under a spatially
++varying urban wind field, with a fractional-order PINN estimating the
++disturbance and a CBF safety filter keeping the vehicle off the buildings
++and away from stall.
++
++### PX4 patches required
++
++Same pattern as the wind-arena setup, applied to the tilt-rotor airframe
++and the generated canyon world instead:
++
++- `Tools/simulation/gz/models/tiltrotor/model.sdf` — add
++  `<enable_wind>true</enable_wind>` as the first child of `<link
++  name='base_link'>` (WindEffects only applies force to links that opt in).
++- `Tools/simulation/gz/worlds/urban_canyon.sdf` — a copy of this repo's
++  generated world (see below), placed inside `PX4-Autopilot` so PX4 can
++  find it by name.
++- `NAV_DLL_ACT` set to `0` (`param set NAV_DLL_ACT 0` + `param save` in the
++  PX4 shell), same reason as the wind-arena setup: offboard control needs
++  to arm without a GCS connected.
++- **Airframe env var correction:** the airframe file is
++  `4020_gz_tiltrotor`, and PX4 matches `PX4_SIM_MODEL` against that
++  filename suffix — so use `PX4_SIM_MODEL=gz_tiltrotor`, not `tiltrotor`.
++
++### Regenerate the world and the wind grid
++
++```bash
++cd ~/ros2_pinn_sim
++source /opt/ros/jazzy/setup.bash && source install/setup.bash
++python3 -m aerocanyon.canyon_geometry        # writes worlds/urban_canyon.sdf
++python3 -m aerocanyon.canyon_field           # writes data/wind_grid.npy
++cp src/aerocanyon/worlds/urban_canyon.sdf \
++   ~/PX4-Autopilot/Tools/simulation/gz/worlds/urban_canyon.sdf
++```
++
++### Train the FO-PINN wind estimator
++
++Collect baseline trials first (see below), then:
++
++```bash
++source .venv/bin/activate
++PYTHONPATH=src/aerocanyon python -m aerocanyon.train_pinn trials/train*_baseline.csv --alpha 1.0
++```
++
++`docs/alpha_sweep.txt` records the alpha-vs-skill sweep used to pick the
++fractional order; re-run it against real flight data before trusting the
++checkpoint (see `task-8-report.md` — the shipped checkpoint was trained on
++synthetic stand-in data because no live PX4 process was available in that
++task's environment).
++
++### Run the paired baseline/treatment trial
++
++```bash
++cd ~/ros2_pinn_sim
++source /opt/ros/jazzy/setup.bash && source install/setup.bash
++colcon build --symlink-install --packages-select aerocanyon
++python3 -m aerocanyon.run_trial --trial compare --duration 60
++source .venv/bin/activate
++PYTHONPATH=src/aerocanyon python -m aerocanyon.plot_results --trial compare
++```
++
++`run_trial.py` spawns PX4 SITL and the Micro-XRCE-DDS-Agent, runs the
++baseline mission, tears everything down, then repeats for the treatment
++(FO-PINN + CBF) mission against the same wind seed — PX4's EKF and mission
++state don't reset cleanly in place, so each trial gets a fresh PX4 process.
++Add `--gui` to watch it fly (used for the demo recording).
++
++### View the figures
++
++`plot_results.py` writes two figures to `figures/`:
++
++- `comparison.png` — overlaid baseline/treatment trajectories through the
++  canyon plus a bar chart of RMS lateral (east) deviation, with the
++  percentage reduction in the chart title.
++- `cbf_intervention.png` — the barrier value `h(t)` and the filter's
++  active/inactive flag over the treatment flight, showing when and how
++  often the CBF had to intervene.
++
++Both print their headline numbers to stdout as well, including the RMS
++lateral deviation reduction percentage — treat that number honestly: if
++it's small or negative, confirm `cbf_active` is non-zero and that the PINN
++estimate correlates with wind truth before concluding the pipeline needs
++retuning.
+diff --git a/src/aerocanyon/aerocanyon/controller_node.py b/src/aerocanyon/aerocanyon/controller_node.py
+index 120c615..d7e8b2a 100644
+--- a/src/aerocanyon/aerocanyon/controller_node.py
++++ b/src/aerocanyon/aerocanyon/controller_node.py
+@@ -3,25 +3,28 @@ reference; treatment mode adds PINN feedforward behind the CBF filter.
+ 
+ The offboard arm/engage sequence follows the pattern already proven in
+ px4_teleop/teleop_keyboard.py: stream setpoints for a beat BEFORE
+ requesting offboard mode, because PX4 rejects the mode switch if no
+ setpoint stream is already present.
+ """
+ import numpy as np
+ import rclpy
+ from geometry_msgs.msg import Vector3Stamped
+ from px4_msgs.msg import (OffboardControlMode, TrajectorySetpoint,
+-                          VehicleCommand, VehicleLocalPosition, VehicleStatus)
++                          VehicleAttitude, VehicleCommand,
++                          VehicleLocalPosition, VehicleStatus)
+ from rclpy.node import Node
+ from rclpy.qos import qos_profile_sensor_data
+ 
+ from . import constants as C
++from .cbf_filter import CBFFilter
++from .constants import MASS_KG
+ from .mission import Mission
+ 
+ SETPOINTS_BEFORE_OFFBOARD = 20  # PX4 needs an existing stream to accept the mode
+ 
+ 
+ class ControllerNode(Node):
+ 
+     def __init__(self):
+         super().__init__('controller_node')
+         self.declare_parameter('mode', 'baseline')
+@@ -33,68 +36,85 @@ class ControllerNode(Node):
+         self.mission = Mission()
+         self.tick = 0
+         self.start_time = None
+         self.armed = False
+         self.done_logged = False
+         self.wind_est = np.zeros(3)
+ 
+         self.pos = np.zeros(3)
+         self.vel = np.zeros(3)
+ 
++        self.cbf = CBFFilter()
++        self.quat = np.array([1.0, 0.0, 0.0, 0.0])
++        self.wind_truth = np.zeros(3)
++        self.cbf_pub = self.create_publisher(
++            Vector3Stamped, C.TOPIC_CBF_DIAG, 10)
++
+         self.sp_pub = self.create_publisher(
+             TrajectorySetpoint, '/fmu/in/trajectory_setpoint', 10)
+         self.mode_pub = self.create_publisher(
+             OffboardControlMode, '/fmu/in/offboard_control_mode', 10)
+         self.cmd_pub = self.create_publisher(
+             VehicleCommand, '/fmu/in/vehicle_command', 10)
+         self.desired_pub = self.create_publisher(
+             Vector3Stamped, C.TOPIC_SETPOINT_DESIRED, 10)
+ 
+         self.create_subscription(
+             VehicleLocalPosition, '/fmu/out/vehicle_local_position',
+             self._on_position, qos_profile_sensor_data)
+         self.create_subscription(
+             VehicleStatus, '/fmu/out/vehicle_status',
+             self._on_status, qos_profile_sensor_data)
+         self.create_subscription(
+             Vector3Stamped, C.TOPIC_WIND_EST, self._on_wind_est, 10)
++        self.create_subscription(
++            VehicleAttitude, '/fmu/out/vehicle_attitude',
++            self._on_attitude, qos_profile_sensor_data)
++        self.create_subscription(
++            Vector3Stamped, C.TOPIC_WIND_TRUTH, self._on_wind_truth, 10)
+ 
+         self.create_timer(1.0 / C.CONTROL_HZ, self._tick)
+ 
+     def _on_position(self, msg):
+         self.pos = np.array([msg.x, msg.y, msg.z])
+         self.vel = np.array([msg.vx, msg.vy, msg.vz])
+ 
+     def _on_status(self, msg):
+         self.armed = msg.arming_state == VehicleStatus.ARMING_STATE_ARMED
+ 
+     def _on_wind_est(self, msg):
+         self.wind_est = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
+ 
++    def _on_attitude(self, msg):
++        self.quat = np.array([msg.q[0], msg.q[1], msg.q[2], msg.q[3]])
++
++    def _on_wind_truth(self, msg):
++        self.wind_truth = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
++
+     def _send_command(self, command, param1=0.0, param2=0.0):
+         msg = VehicleCommand()
+         msg.command = command
+         msg.param1 = param1
+         msg.param2 = param2
+         msg.target_system = 1
+         msg.target_component = 1
+         msg.source_system = 1
+         msg.source_component = 1
+         msg.from_external = True
+         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+         self.cmd_pub.publish(msg)
+ 
+     def _publish_offboard_mode(self):
+         msg = OffboardControlMode()
+         msg.position = True
+         msg.velocity = False
+-        msg.acceleration = False
++        msg.acceleration = True
+         msg.attitude = False
+         msg.body_rate = False
+         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+         self.mode_pub.publish(msg)
+ 
+     def _tick(self):
+         self._publish_offboard_mode()
+ 
+         if self.tick == SETPOINTS_BEFORE_OFFBOARD:
+             # 1 = custom main mode, 6 = offboard
+@@ -108,20 +128,36 @@ class ControllerNode(Node):
+             elapsed = (self.get_clock().now() - self.start_time).nanoseconds / 1e9
+ 
+         target, done = self.mission.target(elapsed)
+         if done and not self.done_logged:
+             self.get_logger().info(f'mission complete at t={elapsed:.1f}s')
+             self.done_logged = True
+ 
+         sp = TrajectorySetpoint()
+         sp.position = [float(v) for v in target]
+         sp.yaw = 0.0  # nose along +north, down the canyon
++
++        if self.mode == 'treatment':
++            # The PINN estimates the disturbance FORCE; the feedforward is
++            # the acceleration that cancels it. Negative: we push back.
++            u_des = -self.wind_est / MASS_KG
++            u_safe, info = self.cbf.filter(
++                u_des, self.pos, self.vel, self.wind_truth, self.quat)
++            sp.acceleration = [float(v) for v in u_safe]
++
++            diag = Vector3Stamped()
++            diag.header.stamp = self.get_clock().now().to_msg()
++            diag.vector.x = 1.0 if info['active'] else 0.0
++            diag.vector.y = float(np.clip(info['h_min'], -1e3, 1e3))
++            diag.vector.z = 0.0 if info['feasible'] else 1.0
++            self.cbf_pub.publish(diag)
++
+         sp.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+         self.sp_pub.publish(sp)
+ 
+         desired = Vector3Stamped()
+         desired.header.stamp = self.get_clock().now().to_msg()
+         desired.vector.x, desired.vector.y, desired.vector.z = sp.position
+         self.desired_pub.publish(desired)
+ 
+         self.tick += 1
+ 
+diff --git a/src/aerocanyon/aerocanyon/plot_results.py b/src/aerocanyon/aerocanyon/plot_results.py
+new file mode 100644
+index 0000000..a53ef66
+--- /dev/null
++++ b/src/aerocanyon/aerocanyon/plot_results.py
+@@ -0,0 +1,111 @@
++"""Produce the two proposal figures from a pair of trial CSVs."""
++import argparse
++import pathlib
++
++import matplotlib
++matplotlib.use('Agg')
++import matplotlib.pyplot as plt  # noqa: E402
++import numpy as np  # noqa: E402
++import pandas as pd  # noqa: E402
++
++from . import canyon_geometry as cg  # noqa: E402
++
++
++def _flying(df):
++    """Rows where the vehicle is actually airborne and tracking."""
++    return df[(df[['qw', 'qx', 'qy', 'qz']].abs().sum(axis=1) > 0.5)
++              & (df.z < -2.0)]
++
++
++def lateral_deviation(df):
++    """RMS cross-track error. The mission runs along NED north, so the
++    east component IS the lateral deviation."""
++    return float(np.sqrt(np.mean(_flying(df).y ** 2)))
++
++
++def comparison_figure(base, treat, out):
++    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5),
++                                   gridspec_kw={'width_ratios': [2, 1]})
++
++    for b in cg.BUILDINGS:
++        # NED north = ENU x, NED east = ENU y.
++        ax1.add_patch(plt.Rectangle(
++            (b.cx - b.sx / 2, b.cy - b.sy / 2), b.sx, b.sy,
++            color='0.75', zorder=0))
++
++    bf, tf = _flying(base), _flying(treat)
++    ax1.plot(bf.x, bf.y, label='PX4 baseline', lw=2, color='#c1443c')
++    ax1.plot(tf.x, tf.y, label='FO-PINN + CBF', lw=2, color='#2b6cb0')
++    ax1.axhline(0.0, ls='--', c='0.4', lw=1, label='reference path')
++    ax1.set_xlabel('north [m]')
++    ax1.set_ylabel('east (lateral) [m]')
++    ax1.set_title('Canyon transit under urban wind')
++    ax1.legend()
++    ax1.set_aspect('equal')
++
++    db, dt = lateral_deviation(base), lateral_deviation(treat)
++    reduction = 100.0 * (db - dt) / db if db > 0 else 0.0
++    ax2.bar(['baseline', 'FO-PINN + CBF'], [db, dt],
++            color=['#c1443c', '#2b6cb0'])
++    ax2.set_ylabel('RMS lateral deviation [m]')
++    ax2.set_title(f'{reduction:.0f}% reduction')
++    for i, v in enumerate((db, dt)):
++        ax2.text(i, v, f'{v:.2f}', ha='center', va='bottom')
++
++    fig.tight_layout()
++    fig.savefig(out, dpi=150)
++    print(f'wrote {out}')
++    return {'baseline_rms': db, 'treatment_rms': dt, 'reduction_pct': reduction}
++
++
++def intervention_figure(treat, out):
++    df = _flying(treat)
++    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 6), sharex=True)
++
++    ax1.plot(df.t, df.cbf_h_min, color='#2b6cb0', lw=1.5,
++             label='min barrier value $h$')
++    ax1.axhline(0.0, color='#c1443c', ls='--', lw=1.5,
++                label='barrier boundary $h=0$')
++    ax1.fill_between(df.t, df.cbf_h_min.min(), 0.0, color='#c1443c', alpha=0.12)
++    ax1.set_ylabel('$h$ [m]')
++    ax1.legend(loc='upper right')
++    ax1.set_title('CBF safety filter activity during canyon transit')
++
++    ax2.fill_between(df.t, 0, df.cbf_active, step='mid',
++                     color='#c1443c', alpha=0.6)
++    ax2.set_ylabel('filter active')
++    ax2.set_xlabel('mission time [s]')
++    ax2.set_ylim(-0.05, 1.15)
++    ax2.set_yticks([0, 1])
++
++    fig.tight_layout()
++    fig.savefig(out, dpi=150)
++    print(f'wrote {out}')
++    pct = 100.0 * float(df.cbf_active.mean())
++    print(f'filter active for {pct:.1f}% of the flight; '
++          f'closest approach to the barrier: h={df.cbf_h_min.min():.2f} m')
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument('--trial', default='compare')
++    ap.add_argument('--trials-dir', default='trials')
++    ap.add_argument('--out-dir', default='figures')
++    args = ap.parse_args()
++
++    td = pathlib.Path(args.trials_dir)
++    out = pathlib.Path(args.out_dir)
++    out.mkdir(parents=True, exist_ok=True)
++
++    base = pd.read_csv(td / f'{args.trial}_baseline.csv')
++    treat = pd.read_csv(td / f'{args.trial}_treatment.csv')
++
++    m = comparison_figure(base, treat, out / 'comparison.png')
++    intervention_figure(treat, out / 'cbf_intervention.png')
++    print(f"\nRMS lateral deviation: baseline {m['baseline_rms']:.2f} m, "
++          f"treatment {m['treatment_rms']:.2f} m, "
++          f"reduction {m['reduction_pct']:.1f}%")
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/src/aerocanyon/aerocanyon/run_trial.py b/src/aerocanyon/aerocanyon/run_trial.py
+new file mode 100644
+index 0000000..434c8af
+--- /dev/null
++++ b/src/aerocanyon/aerocanyon/run_trial.py
+@@ -0,0 +1,83 @@
++"""Run one baseline and one treatment trial against the same wind seed.
++
++PX4 SITL is restarted between trials because its EKF and mission state do
++not reset cleanly in place, and a warm-started EKF would make the two runs
++incomparable.
++"""
++import argparse
++import os
++import pathlib
++import signal
++import subprocess
++import time
++
++PX4_DIR = pathlib.Path.home() / 'PX4-Autopilot'
++AGENT = pathlib.Path.home() / 'Micro-XRCE-DDS-Agent' / 'build' / 'MicroXRCEAgent'
++WS = pathlib.Path(__file__).resolve().parents[3]
++
++
++def _spawn(cmd, cwd=None, env=None):
++    return subprocess.Popen(cmd, shell=True, cwd=cwd, env=env,
++                            preexec_fn=os.setsid,
++                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++
++
++def _kill(proc):
++    if proc and proc.poll() is None:
++        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
++        try:
++            proc.wait(timeout=10)
++        except subprocess.TimeoutExpired:
++            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
++
++
++def run_one(mode, trial, duration, headless=True):
++    env = dict(os.environ,
++               # NOTE: the airframe file is 4020_gz_tiltrotor; PX4 matches
++               # PX4_SIM_MODEL against that suffix, so the bare 'tiltrotor'
++               # named in the original spec fails to boot (see task 2).
++               PX4_SIM_MODEL='gz_tiltrotor',
++               PX4_GZ_WORLD='urban_canyon',
++               GZ_IP='127.0.0.1')
++    if headless:
++        env['HEADLESS'] = '1'
++
++    px4 = _spawn('./build/px4_sitl_default/bin/px4 -d', cwd=PX4_DIR, env=env)
++    agent = _spawn(f'{AGENT} udp4 -p 8888')
++    time.sleep(15)  # PX4 boot + EKF convergence
++
++    launch = (f'bash -lc "source /opt/ros/jazzy/setup.bash && '
++              f'source {WS}/install/setup.bash && '
++              f'ros2 launch aerocanyon canyon_sim.launch.py '
++              f'mode:={mode} trial:={trial}"')
++    nodes = _spawn(launch, cwd=WS)
++
++    time.sleep(duration)
++
++    for p in (nodes, agent, px4):
++        _kill(p)
++    time.sleep(3)
++
++    csv = WS / 'trials' / f'{trial}_{mode}.csv'
++    if not csv.exists() or csv.stat().st_size < 1000:
++        raise SystemExit(
++            f'trial {trial}/{mode} produced no usable log at {csv} -- '
++            'aborting rather than reporting a figure built on nothing')
++    print(f'{mode}: wrote {csv} ({csv.stat().st_size} bytes)')
++    return csv
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument('--trial', default='compare')
++    ap.add_argument('--duration', type=float, default=60.0)
++    ap.add_argument('--gui', action='store_true',
++                    help='show the Gazebo GUI (use this for the demo video)')
++    args = ap.parse_args()
++    for mode in ('baseline', 'treatment'):
++        run_one(mode, args.trial, args.duration, headless=not args.gui)
++    print('both trials complete; now run plot_results')
++
++
++if __name__ == '__main__':
++    main()
