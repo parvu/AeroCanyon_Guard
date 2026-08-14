@@ -35,30 +35,25 @@ Apply these edits to `PX4-Autopilot`:
    <enable_wind>true</enable_wind>
    ```
 
-2. **Fix the motor command topic.** The stock tiltrotor model's four
-   `MulticopterMotorModel` plugins subscribe to `command/motor_speed`, but
-   PX4's `gz_bridge` publishes on the model-namespaced
-   `gazebo/command/motor_speed`. With the mismatch the vehicle spawns and
-   even arms, but the motors never spin and it never leaves the ground:
-   ```bash
-   sed -i 's#<commandSubTopic>command/motor_speed</commandSubTopic>#<commandSubTopic>gazebo/command/motor_speed</commandSubTopic>#' \
-     ~/PX4-Autopilot/Tools/simulation/gz/models/tiltrotor/model.sdf
-   ```
-
-3. **Place the canyon world:**
+2. **Place the canyon world:**
    ```bash
    cp ~/ros2_pinn_sim/src/aerocanyon/worlds/urban_canyon.sdf \
       ~/PX4-Autopilot/Tools/simulation/gz/worlds/urban_canyon.sdf
    ```
 
-4. **Disable GCS requirement for offboard arming:**
+3. **Disable GCS requirement for offboard arming:**
    ```bash
    # In PX4 shell:
    param set NAV_DLL_ACT 0
    param save
    ```
 
-(The airframe file `4020_gz_tiltrotor` already has SITL sensor checks disabled.)
+The airframe file `4020_gz_tiltrotor` already has SITL sensor checks
+disabled, and the stock tiltrotor model's motor topic already matches
+what PX4's `gz_bridge` publishes -- neither needs editing. See
+[Known-good arming and telemetry configuration](#known-good-arming-and-telemetry-configuration)
+below for the pitfalls that look like they need a patch here but don't
+(and the ones that actually do, elsewhere in the stack).
 
 ## Build this workspace
 
@@ -113,6 +108,11 @@ export R="build/px4_sitl_default/rootfs/"
 export GZ_IP=127.0.0.1
 
 # Terminal 1: Gazebo headless
+# MUST source gz_env.sh first (sets GZ_SIM_RESOURCE_PATH) -- without it
+# gz-sim can't resolve model://tiltrotor and the vehicle silently never
+# spawns (nothing shows up in `gz model --list`, no error visible unless
+# you check the server's own stderr for "Unable to find uri[...]").
+source build/px4_sitl_default/rootfs/gz_env.sh
 gz sim -v 2 Tools/simulation/gz/worlds/urban_canyon.sdf -r -s &
 sleep 5
 
@@ -144,7 +144,8 @@ see [View the figures](#view-the-figures) below for what's in them.
 On native Linux or with WSL2 X11 forwarding ([VcXsrv](https://sourceforge.net/projects/vcxsrv/), X410):
 
 ```bash
-# Same as above, but replace Terminal 1 with:
+# Same as above (including `source build/px4_sitl_default/rootfs/gz_env.sh`),
+# but replace Terminal 1's gz sim line with:
 export DISPLAY=:0  # or your WSL2 host IP
 gz sim -v 2 Tools/simulation/gz/worlds/urban_canyon.sdf -r -s -g &
 ```
@@ -152,9 +153,9 @@ gz sim -v 2 Tools/simulation/gz/worlds/urban_canyon.sdf -r -s -g &
 The `-g` flag opens a Gazebo GUI window; omit it for headless (saves ~100MB RAM).
 
 **SITL-specific PX4 configuration:** see
-[Known-good arming configuration](#known-good-arming-configuration) below —
-it's the single source of truth for the airframe parameters; don't
-duplicate them here, they've drifted out of sync with reality before.
+[Known-good arming and telemetry configuration](#known-good-arming-and-telemetry-configuration)
+below — it's the single source of truth for the airframe parameters;
+don't duplicate them here, they've drifted out of sync with reality before.
 
 **Output:**
 
@@ -182,10 +183,11 @@ retuning.
 
 ### Known-good arming and telemetry configuration
 
-Five mistakes will silently prevent the vehicle from arming, moving, or
+Six mistakes will silently prevent the vehicle from arming, moving, or
 producing usable telemetry (motors spin but the vehicle never lifts,
-arming is outright denied, the vehicle sits there armed and idle, or it
-flies just fine while every logged position stays at zero):
+arming is outright denied, the vehicle sits there armed and idle, it
+flies just fine while every logged position stays at zero, or nothing
+ever spawns at all):
 
 1. **Missing `<spherical_coordinates>` in the world.** Without it, Gazebo's
    simulated magnetometer/GPS have no reference location, and PX4's EKF
@@ -246,6 +248,19 @@ flies just fine while every logged position stays at zero):
    residual saw no real acceleration signal. Same fix everywhere: point
    the subscription at the versioned topic name; `px4_msgs` uses the same
    message class for both, so nothing else changes.
+6. **Gazebo launched without `GZ_SIM_RESOURCE_PATH` set** (i.e. without
+   sourcing `build/px4_sitl_default/rootfs/gz_env.sh` first). PX4's own spawn
+   request asks for a fixed entity name (`allow_renaming: false`); if
+   gz-sim can't resolve `model://tiltrotor` it logs `[Err]
+   [UserCommands.cc:928] ... Unable to find uri[file:///tiltrotor/model.sdf]`
+   to its own stderr and the create call just fails — no vehicle ever
+   appears, `gz model --list` shows only the world's static geometry, and
+   nothing else in the stack (PX4, the trial scripts) surfaces an error,
+   because from their side the request was sent and nothing crashed. This
+   is easy to miss because it's silent from every angle except the Gazebo
+   server's own log. `run_trial.py` never launches Gazebo itself (see the
+   top of that file) — sourcing `gz_env.sh` before your own `gz sim`
+   command is on you.
 
 If you edit airframe parameters (item 2) and arming still fails the same
 way, the parameter store may have a stale saved value from a previous run
