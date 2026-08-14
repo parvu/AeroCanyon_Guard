@@ -2,7 +2,17 @@
 
 PX4 SITL is restarted between trials because its EKF and mission state do
 not reset cleanly in place, and a warm-started EKF would make the two runs
-incomparable.
+incomparable. Gazebo itself, however, is NOT restarted between trials --
+it's started once, externally (see the repo README), and every PX4
+restart just reconnects gz_bridge to whatever's already in the world. PX4
+tries to (re-)spawn its model with allow_renaming:false on every start; if
+the previous trial's vehicle entity is still sitting wherever that flight
+ended, the spawn silently fails (its stdout is discarded) and gz_bridge
+just attaches to the stale, displaced entity instead -- so the next trial
+starts mid-canyon at whatever attitude/velocity the last one ended with,
+not from the canyon entry. Removing the stale entity first lets PX4's own
+spawn create a genuinely fresh one at the model's default pose with zero
+velocity.
 """
 import argparse
 import os
@@ -11,9 +21,26 @@ import signal
 import subprocess
 import time
 
+from gz.msgs10.boolean_pb2 import Boolean
+from gz.msgs10.entity_pb2 import Entity
+from gz.transport13 import Node as GzNode
+
+from . import constants as C
+
 PX4_DIR = pathlib.Path.home() / 'PX4-Autopilot'
 AGENT = pathlib.Path.home() / 'Micro-XRCE-DDS-Agent' / 'build' / 'MicroXRCEAgent'
 WS = pathlib.Path(__file__).resolve().parents[3]
+
+
+def _reset_gazebo_model():
+    """Remove the tiltrotor entity left over from a previous trial, if any,
+    so the upcoming PX4 restart spawns a fresh one at the default pose
+    instead of silently reattaching to wherever the last flight ended.
+    A no-op (result is False) the first time nothing has spawned yet."""
+    node = GzNode()
+    req = Entity(name=C.MODEL_NAME, type=Entity.MODEL)
+    node.request(f'/world/{C.WORLD_NAME}/remove', req, Entity, Boolean, 2000)
+    time.sleep(1)  # let Gazebo actually process the removal before PX4's own create races it
 
 
 def _spawn(cmd, cwd=None, env=None):
@@ -32,6 +59,8 @@ def _kill(proc):
 
 
 def run_one(mode, trial, duration, headless=True):
+    _reset_gazebo_model()
+
     env = dict(os.environ,
                # NOTE: the airframe file is 4020_gz_tiltrotor; PX4 matches
                # PX4_SIM_MODEL against that suffix, so the bare 'tiltrotor'
