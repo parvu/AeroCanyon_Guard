@@ -14,7 +14,7 @@ setup(
         ('share/' + package_name + '/worlds', glob('worlds/*.sdf')),
         ('share/' + package_name + '/data', glob('data/*')),
     ],
-    install_requires=['setuptools'],
+    install_requires=['setuptools', 'numpy', 'scipy', 'torch', 'pandas', 'matplotlib'],
     zip_safe=True,
     maintainer='Conf. Petrisor Parvu',
     maintainer_email='petrisor.parvu@upb.ro',

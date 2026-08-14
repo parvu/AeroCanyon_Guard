@@ -10,7 +10,13 @@
   <exec_depend>rclpy</exec_depend>
   <exec_depend>px4_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>numpy</exec_depend>
+  <exec_depend>scipy</exec_depend>
+  <exec_depend>torch</exec_depend>
+  <exec_depend>pandas</exec_depend>
+  <exec_depend>matplotlib</exec_depend>
+  <exec_depend>ros-jazzy-gz-msgs10</exec_depend>
+  <exec_depend>ros-jazzy-gz-transport13</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
