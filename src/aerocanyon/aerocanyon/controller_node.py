@@ -35,6 +35,15 @@ class ControllerNode(Node):
         self.get_logger().info(f'controller mode: {self.mode}')
 
         self.mission = Mission()
+        # NED yaw (0 = north, +pi/2 = east) pointing down the canyon's
+        # actual travel direction -- do NOT hardcode this to 0.0. The
+        # canyon corridor runs along Gazebo ENU +x (east, see
+        # canyon_geometry.BUILDINGS), not north, so a fixed yaw=0.0 here
+        # previously pointed the nose north while the mission pulled the
+        # vehicle east: the vehicle would take off facing the wrong way
+        # and visibly snap ~90 degrees once flight caught up to it.
+        self.cruise_yaw = float(np.arctan2(
+            self.mission.direction[1], self.mission.direction[0]))
         self.tick = 0
         self.start_time = None
         self.armed = False
@@ -148,7 +157,7 @@ class ControllerNode(Node):
 
         sp = TrajectorySetpoint()
         sp.position = [float(v) for v in target]
-        sp.yaw = 0.0  # nose along +north, down the canyon
+        sp.yaw = self.cruise_yaw  # nose down the canyon's actual travel direction
 
         if self.mode == 'treatment':
             # The PINN estimates the disturbance FORCE; the feedforward is
