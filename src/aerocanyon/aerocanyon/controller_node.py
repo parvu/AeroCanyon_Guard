@@ -156,7 +156,8 @@ class ControllerNode(Node):
 
         desired = Vector3Stamped()
         desired.header.stamp = self.get_clock().now().to_msg()
-        desired.vector.x, desired.vector.y, desired.vector.z = sp.position
+        desired.vector.x, desired.vector.y, desired.vector.z = (
+            float(target[0]), float(target[1]), float(target[2]))
         self.desired_pub.publish(desired)
 
         self.tick += 1
