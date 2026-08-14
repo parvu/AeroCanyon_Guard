@@ -50,7 +50,7 @@ class FoPinnNode(Node):
         self.accel = np.zeros(3)
 
         self.create_subscription(
-            VehicleLocalPosition, '/fmu/out/vehicle_local_position',
+            VehicleLocalPosition, '/fmu/out/vehicle_local_position_v1',
             self._on_position, qos_profile_sensor_data)
         self.create_subscription(
             VehicleAttitude, '/fmu/out/vehicle_attitude',

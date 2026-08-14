@@ -180,11 +180,12 @@ it's small or negative, confirm `cbf_active` is non-zero and that the PINN
 estimate correlates with wind truth before concluding the pipeline needs
 retuning.
 
-### Known-good arming configuration
+### Known-good arming and telemetry configuration
 
-Four mistakes will silently prevent the vehicle from arming or moving
-(motors spin but the vehicle never lifts, arming is outright denied, or
-the vehicle just sits there armed and idle):
+Five mistakes will silently prevent the vehicle from arming, moving, or
+producing usable telemetry (motors spin but the vehicle never lifts,
+arming is outright denied, the vehicle sits there armed and idle, or it
+flies just fine while every logged position stays at zero):
 
 1. **Missing `<spherical_coordinates>` in the world.** Without it, Gazebo's
    simulated magnetometer/GPS have no reference location, and PX4's EKF
@@ -230,6 +231,21 @@ the vehicle just sits there armed and idle):
    dead, so PX4 never even received the arm/offboard request.
    `test_controller_node.py` now drives the real tick loop specifically to
    catch this class of bug.
+5. **Unversioned `/fmu/out/vehicle_local_position` and `/fmu/out/vehicle_status`
+   topic names don't exist on this PX4 build** — only the versioned
+   `vehicle_local_position_v1` and `vehicle_status_v4` are actually
+   published (`ros2 topic list | grep /fmu/out` while the sim is running
+   to check on any other PX4 checkout). Subscribing to the unversioned
+   name doesn't error — `ros2 topic echo` just warns "does not appear to
+   be published yet" and the callback is never invoked, so the field stays
+   at its zero-initialized default forever. This silently zeroed out
+   position in `controller_node`, `trial_logger`, `wind_field_node`, and
+   `fo_pinn_node` at once: the mission still flew (it doesn't feed position
+   back into anything), but every logged trajectory was flat, `plot_results`
+   computed RMS deviation from all-zero position, and the PINN's physics
+   residual saw no real acceleration signal. Same fix everywhere: point
+   the subscription at the versioned topic name; `px4_msgs` uses the same
+   message class for both, so nothing else changes.
 
 If you edit airframe parameters (item 2) and arming still fails the same
 way, the parameter store may have a stale saved value from a previous run

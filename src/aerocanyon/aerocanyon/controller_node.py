@@ -59,10 +59,10 @@ class ControllerNode(Node):
             Vector3Stamped, C.TOPIC_SETPOINT_DESIRED, 10)
 
         self.create_subscription(
-            VehicleLocalPosition, '/fmu/out/vehicle_local_position',
+            VehicleLocalPosition, '/fmu/out/vehicle_local_position_v1',
             self._on_position, qos_profile_sensor_data)
         self.create_subscription(
-            VehicleStatus, '/fmu/out/vehicle_status',
+            VehicleStatus, '/fmu/out/vehicle_status_v4',
             self._on_status, qos_profile_sensor_data)
         self.create_subscription(
             Vector3Stamped, C.TOPIC_WIND_EST, self._on_wind_est, 10)

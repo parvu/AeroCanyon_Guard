@@ -51,7 +51,7 @@ class WindFieldNode(Node):
         self.airspeed = 1.0
 
         self.create_subscription(
-            VehicleLocalPosition, '/fmu/out/vehicle_local_position',
+            VehicleLocalPosition, '/fmu/out/vehicle_local_position_v1',
             self._on_position, qos_profile_sensor_data)
 
         self.truth_pub = self.create_publisher(
