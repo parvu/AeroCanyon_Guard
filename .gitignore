@@ -11,3 +11,4 @@ __pycache__/
 
 # ROS logs
 .ros/
+trials/
