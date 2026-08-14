@@ -126,12 +126,18 @@ export PX4_GZ_WORLD=urban_canyon
 ./build/px4_sitl_default/bin/px4 &
 sleep 15
 
-# Terminal 4: Trials (generates baseline + treatment CSVs and figures)
+# Terminal 4: run the trial, then plot it
 cd ~/ros2_pinn_sim
 source /opt/ros/jazzy/setup.bash && source install/setup.bash
 source .venv/bin/activate
 python3 -m aerocanyon.run_trial --trial live_full --duration 180
+python3 -m aerocanyon.plot_results --trial live_full
 ```
+
+`plot_results` reads `trials/live_full_baseline.csv` and
+`trials/live_full_treatment.csv` (the same `--trial` name used for the run)
+and writes `figures/comparison.png` and `figures/cbf_intervention.png` —
+see [View the figures](#view-the-figures) below for what's in them.
 
 **GUI mode (requires X11 display server):**
 
@@ -145,17 +151,10 @@ gz sim -v 2 Tools/simulation/gz/worlds/urban_canyon.sdf -r -s -g &
 
 The `-g` flag opens a Gazebo GUI window; omit it for headless (saves ~100MB RAM).
 
-**SITL-specific PX4 configuration:**
-
-The airframe file (`build/px4_sitl_default/rootfs/etc/init.d-posix/airframes/4020_gz_tiltrotor`)
-has been configured to disable sensor checks inappropriate for simulation:
-
-- `COM_ARM_WO_GPS=1` — arm without GPS lock
-- `SYS_HAS_MAG=0`, `SYS_HAS_BARO=0` — disable mag/baro requirements
-- `COM_DISARM_LAND=0`, `SYS_FAILURE_EN=0` — disable failsafe systems for clean SITL
-
-These allow the vehicle to arm and fly automatically during trials without
-preflight check delays.
+**SITL-specific PX4 configuration:** see
+[Known-good arming configuration](#known-good-arming-configuration) below —
+it's the single source of truth for the airframe parameters; don't
+duplicate them here, they've drifted out of sync with reality before.
 
 **Output:**
 
@@ -183,8 +182,9 @@ retuning.
 
 ### Known-good arming configuration
 
-Two mistakes will silently prevent the vehicle from arming (motors spin
-but the vehicle never lifts, or arming is outright denied):
+Four mistakes will silently prevent the vehicle from arming or moving
+(motors spin but the vehicle never lifts, arming is outright denied, or
+the vehicle just sits there armed and idle):
 
 1. **Missing `<spherical_coordinates>` in the world.** Without it, Gazebo's
    simulated magnetometer/GPS have no reference location, and PX4's EKF
@@ -209,16 +209,33 @@ but the vehicle never lifts, or arming is outright denied):
    circuit-breaker magic value for the SITL-only "system power unavailable"
    check.)
 
-If you edit airframe parameters and arming still fails the same way, the
-parameter store may have a stale saved value from a previous run —
-`param set-default` only takes effect when nothing has been saved yet:
+3. **Wrong motor command topic on the tiltrotor model.** Its four
+   `MulticopterMotorModel` plugins must use
+   `<commandSubTopic>command/motor_speed</commandSubTopic>` — the same
+   value the stock `x500` model ships with. `gz-sim` scopes that relative
+   topic under the model's own namespace, matching PX4's `gz_bridge`
+   publisher (`/<model_name>/command/motor_speed`). Verify with
+   `gz topic -i -t /tiltrotor_0/command/motor_speed` while the sim is
+   running — it should show one publisher and four subscribers. Get this
+   wrong and the vehicle spawns and even arms, but the motors never spin.
+4. **Not an SDF/parameter issue at all:** the vehicle can arm cleanly via
+   the PX4 shell yet the actual mission never moves anything. That was
+   `controller_node` crashing on its very first control tick — see the
+   commit fixing it (`2455ea8`) — because `TrajectorySetpoint.position`
+   (a `float32[3]` PX4 field) round-trips through rosidl as a numpy array,
+   and unpacking it into a `geometry_msgs/Vector3` (float64) field handed
+   `numpy.float32` scalars to rclpy's serializer, which aborts the whole
+   process with a C-level assertion. No Python traceback, no ROS log, and
+   critically nothing in PX4's log either — the publisher was already
+   dead, so PX4 never even received the arm/offboard request.
+   `test_controller_node.py` now drives the real tick loop specifically to
+   catch this class of bug.
+
+If you edit airframe parameters (item 2) and arming still fails the same
+way, the parameter store may have a stale saved value from a previous run
+— `param set-default` only takes effect when nothing has been saved yet:
 ```bash
 rm -f build/px4_sitl_default/rootfs/parameters.bson \
       build/px4_sitl_default/rootfs/parameters_backup.bson
 rm -rf build/px4_sitl_default/rootfs/eeprom
 ```
-
-Also confirm the tiltrotor model's motor plugins subscribe to
-`gazebo/command/motor_speed` (matching PX4's `gz_bridge` publish topic),
-not the bare `command/motor_speed` some templates ship with — otherwise
-the vehicle spawns and arms but the motors never receive commands.
