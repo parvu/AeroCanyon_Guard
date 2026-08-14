@@ -1,0 +1,379 @@
+<?xml version="1.0" ?>
+<sdf version="1.8">
+  <world name="urban_canyon">
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics" />
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands" />
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster" />
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu" />
+    <plugin filename="gz-sim-air-pressure-system" name="gz::sim::systems::AirPressure" />
+    <plugin filename="gz-sim-magnetometer-system" name="gz::sim::systems::Magnetometer" />
+    <plugin filename="gz-sim-navsat-system" name="gz::sim::systems::NavSat" />
+
+    <!-- Sistemul global de vânt -->
+    <plugin filename="gz-sim-wind-effects-system" name="gz::sim::systems::WindEffects">
+      <force_approximation_threshold>0.001</force_approximation_threshold>
+      <default_wind><linear>0.0 0.0 0.0</linear></default_wind>
+    </plugin>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+          <material><ambient>0.2 0.2 0.2 1</ambient><diffuse>0.2 0.2 0.2 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="pinn_drone">
+      <pose>0 0 1.0 0 0 0</pose>
+
+      <!--  Pluginul Aerodinamic LiftDrag — pe fiecare elice, nu pe corp.
+           Pe corp, suprafata "forward" ramane fixa fata de yaw-ul dronei,
+           deci un vant constant produce un cuplu de yaw constant care se
+           cupleaza cu bucla de control si diverge exponential. Pe elice,
+           axa "forward" se roteste odata cu elicea (>>1 rad/s), deci forta
+           se mediaza in timp in loc sa se acumuleze intr-o directie fixa. -->
+      <plugin filename="gz-sim-lift-drag-system" name="gz::sim::systems::LiftDrag">
+        <a0>0.05</a0><cla>4.75</cla><cda>0.5</cda><alpha_stall>0.33</alpha_stall>
+        <cla_stall>-1.5</cla_stall><cda_stall>1.0</cda_stall><cp>0 0 0</cp><area>0.01</area>
+        <air_density>1.225</air_density><forward>1 0 0</forward><up>0 0 1</up>
+        <link_name>rotor_0</link_name>
+      </plugin>
+      <plugin filename="gz-sim-lift-drag-system" name="gz::sim::systems::LiftDrag">
+        <a0>0.05</a0><cla>4.75</cla><cda>0.5</cda><alpha_stall>0.33</alpha_stall>
+        <cla_stall>-1.5</cla_stall><cda_stall>1.0</cda_stall><cp>0 0 0</cp><area>0.01</area>
+        <air_density>1.225</air_density><forward>1 0 0</forward><up>0 0 1</up>
+        <link_name>rotor_1</link_name>
+      </plugin>
+      <plugin filename="gz-sim-lift-drag-system" name="gz::sim::systems::LiftDrag">
+        <a0>0.05</a0><cla>4.75</cla><cda>0.5</cda><alpha_stall>0.33</alpha_stall>
+        <cla_stall>-1.5</cla_stall><cda_stall>1.0</cda_stall><cp>0 0 0</cp><area>0.01</area>
+        <air_density>1.225</air_density><forward>1 0 0</forward><up>0 0 1</up>
+        <link_name>rotor_2</link_name>
+      </plugin>
+      <plugin filename="gz-sim-lift-drag-system" name="gz::sim::systems::LiftDrag">
+        <a0>0.05</a0><cla>4.75</cla><cda>0.5</cda><alpha_stall>0.33</alpha_stall>
+        <cla_stall>-1.5</cla_stall><cda_stall>1.0</cda_stall><cp>0 0 0</cp><area>0.01</area>
+        <air_density>1.225</air_density><forward>1 0 0</forward><up>0 0 1</up>
+        <link_name>rotor_3</link_name>
+      </plugin>
+
+      <!-- Plugin de control pentru traducerea Twist -> Viteze Motoare -->
+      <plugin filename="gz-sim-multicopter-control-system" name="gz::sim::systems::MulticopterVelocityControl">
+        <robotNamespace>pinn_drone</robotNamespace>
+        <commandSubTopic>cmd_vel</commandSubTopic>
+        <enableRollPitchTorqueInertiaCompensation>false</enableRollPitchTorqueInertiaCompensation>
+        <comLinkName>base_link</comLinkName>
+
+        <!-- Cistigurile pe yaw sunt mult mai mici decat pe roll/pitch,
+             la fel ca in exemplul de referinta (X3: attitudeGain 2 3 0.15,
+             angularRateGain 0.4 0.52 0.18). Yaw-ul e actuat doar prin cuplul
+             de reactie al elicelor (mult mai slab decat roll/pitch, care
+             foloseste bratul de parghie), deci acelasi cistig pe toate cele
+             3 axe supra-actioneaza yaw-ul si diverge. -->
+        <velocityGain>1.5 1.5 1.5</velocityGain>
+        <attitudeGain>1.5 1.5 0.1</attitudeGain>
+        <angularRateGain>0.3 0.3 0.13</angularRateGain>
+        <maximumLinearAcceleration>2 2 2</maximumLinearAcceleration>
+        <maximumLinearVelocity>5 5 5</maximumLinearVelocity>
+        <maximumAngularVelocity>3 3 1.5</maximumAngularVelocity>
+
+       <rotorConfiguration>
+          <rotor>
+            <id>0</id>
+            <jointName>joint_rotor_0</jointName>
+            <direction>1</direction>
+            <turningDirection>cw</turningDirection>
+            <forceConstant>0.00000584</forceConstant>
+            <momentConstant>0.016</momentConstant>
+            <maxRotVelocity>1200</maxRotVelocity>
+            <x>0.2</x><y>0.2</y><z>0.05</z>
+          </rotor>
+          <rotor>
+            <id>1</id>
+            <jointName>joint_rotor_1</jointName>
+            <direction>1</direction>
+            <turningDirection>cw</turningDirection>
+            <forceConstant>0.00000584</forceConstant>
+            <momentConstant>0.016</momentConstant>
+            <maxRotVelocity>1200</maxRotVelocity>
+            <x>-0.2</x><y>-0.2</y><z>0.05</z>
+          </rotor>
+          <rotor>
+            <id>2</id>
+            <jointName>joint_rotor_2</jointName>
+            <direction>-1</direction>
+            <turningDirection>ccw</turningDirection>
+            <forceConstant>0.00000584</forceConstant>
+            <momentConstant>0.016</momentConstant>
+            <maxRotVelocity>1200</maxRotVelocity>
+            <x>0.2</x><y>-0.2</y><z>0.05</z>
+          </rotor>
+          <rotor>
+            <id>3</id>
+            <jointName>joint_rotor_3</jointName>
+            <direction>-1</direction>
+            <turningDirection>ccw</turningDirection>
+            <forceConstant>0.00000584</forceConstant>
+            <momentConstant>0.016</momentConstant>
+            <maxRotVelocity>1200</maxRotVelocity>
+            <x>-0.2</x><y>0.2</y><z>0.05</z>
+          </rotor>
+        </rotorConfiguration>
+      </plugin>
+
+      <!-- Corpul Principal al Dronei -->
+      <link name="base_link">
+        <enable_wind>true</enable_wind>
+        <inertial>
+          <mass>1.5</mass>
+          <inertia>
+            <ixx>0.08</ixx><ixy>0</ixy><ixz>0</ixz>
+            <iyy>0.08</iyy><iyz>0</iyz><izz>0.12</izz>
+          </inertia>
+        </inertial>
+        <collision name="collision">
+          <geometry><box><size>0.4 0.4 0.1</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.4 0.4 0.1</size></box></geometry>
+          <material><ambient>0.0 0.0 0.8 1</ambient><diffuse>0.0 0.0 0.8 1</diffuse></material>
+        </visual>
+
+        <!-- IMU Sensor — required by physics_bridge.cpp -->
+        <sensor name="imu_sensor" type="imu">
+          <always_on>1</always_on>
+          <update_rate>250</update_rate>
+          <imu>
+            <angular_velocity>
+              <x><noise type="gaussian"><mean>0</mean><stddev>0.0003394</stddev></noise></x>
+              <y><noise type="gaussian"><mean>0</mean><stddev>0.0003394</stddev></noise></y>
+              <z><noise type="gaussian"><mean>0</mean><stddev>0.0003394</stddev></noise></z>
+            </angular_velocity>
+            <linear_acceleration>
+              <x><noise type="gaussian"><mean>0</mean><stddev>0.017</stddev></noise></x>
+              <y><noise type="gaussian"><mean>0</mean><stddev>0.017</stddev></noise></y>
+              <z><noise type="gaussian"><mean>0</mean><stddev>0.017</stddev></noise></z>
+            </linear_acceleration>
+          </imu>
+        </sensor>
+      </link>
+
+      <!-- Linkuri Elice (Obligatorii pentru a elimina eroarea jointName) -->
+      <link name="rotor_0"><pose>0.2 0.2 0.05 0 0 0</pose><inertial><mass>0.01</mass><inertia><ixx>1e-5</ixx><iyy>1e-5</iyy><izz>1e-5</izz></inertia></inertial></link>
+      <link name="rotor_1"><pose>-0.2 -0.2 0.05 0 0 0</pose><inertial><mass>0.01</mass><inertia><ixx>1e-5</ixx><iyy>1e-5</iyy><izz>1e-5</izz></inertia></inertial></link>
+      <link name="rotor_2"><pose>0.2 -0.2 0.05 0 0 0</pose><inertial><mass>0.01</mass><inertia><ixx>1e-5</ixx><iyy>1e-5</iyy><izz>1e-5</izz></inertia></inertial></link>
+      <link name="rotor_3"><pose>-0.2 0.2 0.05 0 0 0</pose><inertial><mass>0.01</mass><inertia><ixx>1e-5</ixx><iyy>1e-5</iyy><izz>1e-5</izz></inertia></inertial></link>
+
+      <!-- Articulații (Joints) pentru Elice (OBLIGATORII) -->
+      <joint name="joint_rotor_0" type="revolute"><parent>base_link</parent><child>rotor_0</child><axis><xyz>0 0 1</xyz></axis></joint>
+      <joint name="joint_rotor_1" type="revolute"><parent>base_link</parent><child>rotor_1</child><axis><xyz>0 0 1</xyz></axis></joint>
+      <joint name="joint_rotor_2" type="revolute"><parent>base_link</parent><child>rotor_2</child><axis><xyz>0 0 1</xyz></axis></joint>
+      <joint name="joint_rotor_3" type="revolute"><parent>base_link</parent><child>rotor_3</child><axis><xyz>0 0 1</xyz></axis></joint>
+
+      <!-- MulticopterMotorModel plugins — these are the REQUIRED companion to
+           MulticopterVelocityControl. The velocity controller computes desired
+           motor speeds and publishes them on command/motor_speed (Actuators msg).
+           Each MotorModel reads its slot, applies thrust force + reaction torque
+           to the rotor link, and spins the joint. Without these, cmd_vel is
+           computed but never applied to the physics engine. -->
+      <plugin filename="gz-sim-multicopter-motor-model-system"
+              name="gz::sim::systems::MulticopterMotorModel">
+        <robotNamespace>pinn_drone</robotNamespace>
+        <jointName>joint_rotor_0</jointName>
+        <linkName>rotor_0</linkName>
+        <turningDirection>cw</turningDirection>
+        <timeConstantUp>0.0125</timeConstantUp>
+        <timeConstantDown>0.025</timeConstantDown>
+        <maxRotVelocity>1200</maxRotVelocity>
+        <motorConstant>0.00000584</motorConstant>
+        <momentConstant>0.016</momentConstant>
+        <commandSubTopic>gazebo/command/motor_speed</commandSubTopic>
+        <actuator_number>0</actuator_number>
+        <rotorDragCoefficient>0.000175</rotorDragCoefficient>
+        <rollingMomentCoefficient>1e-6</rollingMomentCoefficient>
+        <motorSpeedPubTopic>motor_speed/0</motorSpeedPubTopic>
+        <rotorVelocitySlowdownSim>10</rotorVelocitySlowdownSim>
+        <motorType>velocity</motorType>
+      </plugin>
+
+      <plugin filename="gz-sim-multicopter-motor-model-system"
+              name="gz::sim::systems::MulticopterMotorModel">
+        <robotNamespace>pinn_drone</robotNamespace>
+        <jointName>joint_rotor_1</jointName>
+        <linkName>rotor_1</linkName>
+        <turningDirection>cw</turningDirection>
+        <timeConstantUp>0.0125</timeConstantUp>
+        <timeConstantDown>0.025</timeConstantDown>
+        <maxRotVelocity>1200</maxRotVelocity>
+        <motorConstant>0.00000584</motorConstant>
+        <momentConstant>0.016</momentConstant>
+        <commandSubTopic>gazebo/command/motor_speed</commandSubTopic>
+        <actuator_number>1</actuator_number>
+        <rotorDragCoefficient>0.000175</rotorDragCoefficient>
+        <rollingMomentCoefficient>1e-6</rollingMomentCoefficient>
+        <motorSpeedPubTopic>motor_speed/1</motorSpeedPubTopic>
+        <rotorVelocitySlowdownSim>10</rotorVelocitySlowdownSim>
+        <motorType>velocity</motorType>
+      </plugin>
+
+      <plugin filename="gz-sim-multicopter-motor-model-system"
+              name="gz::sim::systems::MulticopterMotorModel">
+        <robotNamespace>pinn_drone</robotNamespace>
+        <jointName>joint_rotor_2</jointName>
+        <linkName>rotor_2</linkName>
+        <turningDirection>ccw</turningDirection>
+        <timeConstantUp>0.0125</timeConstantUp>
+        <timeConstantDown>0.025</timeConstantDown>
+        <maxRotVelocity>1200</maxRotVelocity>
+        <motorConstant>0.00000584</motorConstant>
+        <momentConstant>0.016</momentConstant>
+        <commandSubTopic>gazebo/command/motor_speed</commandSubTopic>
+        <actuator_number>2</actuator_number>
+        <rotorDragCoefficient>0.000175</rotorDragCoefficient>
+        <rollingMomentCoefficient>1e-6</rollingMomentCoefficient>
+        <motorSpeedPubTopic>motor_speed/2</motorSpeedPubTopic>
+        <rotorVelocitySlowdownSim>10</rotorVelocitySlowdownSim>
+        <motorType>velocity</motorType>
+      </plugin>
+
+      <plugin filename="gz-sim-multicopter-motor-model-system"
+              name="gz::sim::systems::MulticopterMotorModel">
+        <robotNamespace>pinn_drone</robotNamespace>
+        <jointName>joint_rotor_3</jointName>
+        <linkName>rotor_3</linkName>
+        <turningDirection>ccw</turningDirection>
+        <timeConstantUp>0.0125</timeConstantUp>
+        <timeConstantDown>0.025</timeConstantDown>
+        <maxRotVelocity>1200</maxRotVelocity>
+        <motorConstant>0.00000584</motorConstant>
+        <momentConstant>0.016</momentConstant>
+        <commandSubTopic>gazebo/command/motor_speed</commandSubTopic>
+        <actuator_number>3</actuator_number>
+        <rotorDragCoefficient>0.000175</rotorDragCoefficient>
+        <rollingMomentCoefficient>1e-6</rollingMomentCoefficient>
+        <motorSpeedPubTopic>motor_speed/3</motorSpeedPubTopic>
+        <rotorVelocitySlowdownSim>10</rotorVelocitySlowdownSim>
+        <motorType>velocity</motorType>
+      </plugin>
+
+    </model>
+
+    
+    <model name="tower_0_n">
+      <static>true</static>
+      <pose>-45.0 20.0 22.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>20.0 16.0 45.0</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>20.0 16.0 45.0</size></box></geometry>
+          <material>
+            <ambient>0.4 0.42 0.45 1</ambient>
+            <diffuse>0.5 0.52 0.55 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="tower_0_s">
+      <static>true</static>
+      <pose>-45.0 -20.0 22.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>20.0 16.0 45.0</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>20.0 16.0 45.0</size></box></geometry>
+          <material>
+            <ambient>0.4 0.42 0.45 1</ambient>
+            <diffuse>0.5 0.52 0.55 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="tower_1_n">
+      <static>true</static>
+      <pose>0.0 20.0 30.0 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>20.0 16.0 60.0</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>20.0 16.0 60.0</size></box></geometry>
+          <material>
+            <ambient>0.4 0.42 0.45 1</ambient>
+            <diffuse>0.5 0.52 0.55 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="tower_1_s">
+      <static>true</static>
+      <pose>0.0 -20.0 30.0 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>20.0 16.0 60.0</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>20.0 16.0 60.0</size></box></geometry>
+          <material>
+            <ambient>0.4 0.42 0.45 1</ambient>
+            <diffuse>0.5 0.52 0.55 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="tower_2_n">
+      <static>true</static>
+      <pose>45.0 20.0 19.0 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>20.0 16.0 38.0</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>20.0 16.0 38.0</size></box></geometry>
+          <material>
+            <ambient>0.4 0.42 0.45 1</ambient>
+            <diffuse>0.5 0.52 0.55 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="tower_2_s">
+      <static>true</static>
+      <pose>45.0 -20.0 19.0 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>20.0 16.0 38.0</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>20.0 16.0 38.0</size></box></geometry>
+          <material>
+            <ambient>0.4 0.42 0.45 1</ambient>
+            <diffuse>0.5 0.52 0.55 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+  </world>
+</sdf>
