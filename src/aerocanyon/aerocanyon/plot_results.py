@@ -25,20 +25,37 @@ def lateral_deviation(df):
     return float(np.sqrt(np.mean(_flying(df).x ** 2)))
 
 
+def building_plot_rect(b):
+    """(x, y, width, height) for building b, in the same local-NED-frame
+    (east, north) coordinates the trajectory plot uses.
+
+    x/y in the trial CSV are PX4's LOCAL NED position, origin at wherever
+    the EKF initialised -- which, since the vehicle spawns at CANYON_ENTRY
+    (see run_trial.SPAWN_XYZ), is CANYON_ENTRY itself, not the world's
+    absolute origin. Verified live: at mission start (target pinned at
+    CANYON_ENTRY, i.e. local NED east=-90) the vehicle's actual logged
+    position reads local east=0. canyon_geometry.BUILDINGS is in
+    world-absolute ENU, so it has to be shifted by CANYON_ENTRY's own
+    position to land in the same frame as the trajectory -- otherwise the
+    buildings render ~90 m away from where the vehicle actually was in
+    Gazebo.
+
+    b.cx/b.cy are ENU east/north, which are numerically identical to NED
+    east/north (frames.ned_to_enu only reorders components and negates
+    up->down -- it never changes an east or north value), matching the
+    trajectory plot's (east, north) axis order.
+    """
+    east0, north0 = float(cg.CANYON_ENTRY[0]), float(cg.CANYON_ENTRY[1])
+    return (b.cx - east0 - b.sx / 2, b.cy - north0 - b.sy / 2, b.sx, b.sy)
+
+
 def comparison_figure(base, treat, out):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5),
                                    gridspec_kw={'width_ratios': [2, 1]})
 
     for b in cg.BUILDINGS:
-        # b.cx/b.cy are ENU east/north, which are numerically identical to
-        # NED east/north (frames.ned_to_enu only reorders components and
-        # negates up->down -- it never changes an east or north value).
-        # The trajectory below is plotted as (east, north) too, so this
-        # must match that axis order or the buildings render rotated 90
-        # degrees relative to the flight path they're supposed to bound.
-        ax1.add_patch(plt.Rectangle(
-            (b.cx - b.sx / 2, b.cy - b.sy / 2), b.sx, b.sy,
-            color='0.75', zorder=0))
+        x, y, w, h = building_plot_rect(b)
+        ax1.add_patch(plt.Rectangle((x, y), w, h, color='0.75', zorder=0))
 
     bf, tf = _flying(base), _flying(treat)
     ax1.plot(bf.y, bf.x, label='PX4 baseline', lw=2, color='#c1443c')
