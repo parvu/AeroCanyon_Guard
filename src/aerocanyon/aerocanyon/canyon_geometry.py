@@ -37,10 +37,16 @@ BUILDINGS = [
 # Half-width of the clear corridor between the two rows.
 CANYON_HALF_WIDTH = _ROW_OFFSET - _DEPTH / 2.0
 
-# Transit waypoints, clear of the towers at both ends. z = 25 m puts the
-# vehicle in the shear layer rather than above the roofline.
-CANYON_ENTRY = np.array([-90.0, 0.0, 25.0])
-CANYON_EXIT = np.array([110.0, 0.0, 25.0])
+# Transit waypoints, clear of the towers at both ends and symmetric about
+# the tower group's own centre (the towers themselves already span
+# x in [-55, 55], centred at x=0 -- see BUILDINGS above -- and the ground
+# plane is centred at the origin too, so +-100 keeps everything, including
+# the vehicle's own spawn point (run_trial.SPAWN_XYZ, derived from
+# CANYON_ENTRY), centred on the ground plane rather than offset toward one
+# end). z = 25 m puts the vehicle in the shear layer rather than above the
+# roofline.
+CANYON_ENTRY = np.array([-100.0, 0.0, 25.0])
+CANYON_EXIT = np.array([100.0, 0.0, 25.0])
 
 
 def _box_distance_and_normal(p, b):
@@ -94,8 +100,8 @@ def to_sdf():
         <visual name="visual">
           <geometry><box><size>{b.sx} {b.sy} {b.sz}</size></box></geometry>
           <material>
-            <ambient>0.4 0.42 0.45 1</ambient>
-            <diffuse>0.5 0.52 0.55 1</diffuse>
+            <ambient>0.76 0.69 0.55 1</ambient>
+            <diffuse>0.83 0.76 0.61 1</diffuse>
           </material>
         </visual>
       </link>

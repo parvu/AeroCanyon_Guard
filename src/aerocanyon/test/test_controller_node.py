@@ -245,7 +245,12 @@ def test_lands_in_place_once_position_clears_the_canyon_exit_by_the_margin():
     # Both modes land where they are once clear of the canyon -- see
     # LAND_CLEARANCE_M's comment for why flying anywhere first (native
     # RTL, or an earlier custom fly-home-and-land design) is no longer
-    # needed now that each leg gets its own fresh Gazebo/PX4 process.
+    # needed now that each leg gets its own fresh Gazebo/PX4 process --
+    # and why landing is handed off to PX4's own AUTO_LAND rather than
+    # flown under this node's own control: a self-controlled descent held
+    # heading correctly, but its own disarm logic was verified live to be
+    # unsafe (a rejected disarm-while-airborne request could leave the
+    # vehicle with no control input at all, mid-air).
     from aerocanyon.mission import Mission
     distance = Mission().distance
     for mode in ('baseline', 'treatment'):

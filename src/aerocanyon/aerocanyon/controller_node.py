@@ -42,22 +42,35 @@ ENABLE_VTOL_TRANSITION = False
 LAND_CLEARANCE_M = 2.0
 
 # Earlier designs tried flying the vehicle all the way back to the spawn
-# point before landing -- first via PX4's native RTL (VEHICLE_CMD_NAV_
-# RETURN_TO_LAUNCH: engages AUTO_RTL correctly but, verified live, never
-# actually navigates back toward home in this SITL configuration, drifting
-# to ~1900m instead of turning around), then via a custom offboard
-# fly-home-and-descend state machine (worked, but needed wind feedforward
-# to fight the canyon's ~12-14 m/s crosswind on the way back, and added a
-# lot of complexity for what run_trial.py no longer needs). That
-# complexity existed to solve one problem: a vehicle left drifting or
-# crashed when the next leg's PX4 process booted, since Gazebo and the
-# vehicle entity used to stay alive across both legs. Now that each leg
-# gets its own fresh `gz sim` + PX4 process (run_trial.run_leg) with
-# nothing shared between legs at all, THAT problem no longer exists --
-# wherever this leg's vehicle ends up is irrelevant to the next leg's
-# boot. So: just land in place. PX4's own AUTO_LAND was verified live
-# (manually, from QGroundControl) to fly a clean, controlled, real
-# touchdown -- there's no reason to fly anywhere first.
+# point before landing via native RTL (VEHICLE_CMD_NAV_RETURN_TO_LAUNCH:
+# engages AUTO_RTL correctly but, verified live, never actually navigates
+# back toward home in this SITL configuration, drifting to ~1900m instead
+# of turning around). That complexity existed to solve one problem: a
+# vehicle left drifting or crashed when the next leg's PX4 process
+# booted, since Gazebo and the vehicle entity used to stay alive across
+# both legs. Now that each leg gets its own fresh `gz sim` + PX4 process
+# (run_trial.run_leg) with nothing shared between legs at all, THAT
+# problem no longer exists -- wherever this leg's vehicle ends up is
+# irrelevant to the next leg's boot. So: just land in place, handed off
+# to PX4's own VEHICLE_CMD_NAV_LAND / AUTO_LAND.
+#
+# A version of this node tried descending under its OWN offboard control
+# instead (freezing the position at the clearance point, target z=0)
+# specifically to keep the heading locked -- AUTO_LAND was verified live
+# to visibly turn the vehicle during the descent, off whatever heading it
+# had at clearance. That self-controlled descent held heading correctly,
+# but its own disarm logic (needed since nothing else would ever stop it)
+# proved unsafe: verified live, repeatedly, that the vehicle could
+# destabilise into a violent, uncontrolled tumble -- most likely because
+# VEHICLE_CMD_COMPONENT_ARM_DISARM without PX4's force parameter can be
+# silently REJECTED while airborne, and this node stopped publishing
+# setpoints the moment it (wrongly) believed the disarm had succeeded,
+# leaving the vehicle under thrust with no control input at all. AUTO_LAND
+# -- PX4's own, extensively field-tested landing logic, including its own
+# correct handling of when disarming is actually safe -- doesn't have
+# that failure mode. A turn during descent is a cosmetic issue; loss of
+# control is not, so this hands off to AUTO_LAND unconditionally now,
+# heading be damned.
 
 
 class ControllerNode(Node):
@@ -230,7 +243,7 @@ class ControllerNode(Node):
         # flag, so landing only fires once the vehicle has actually
         # cleared the canyon -- wind or CBF deviation could otherwise have
         # it trigger while still between the buildings.
-        if (engaged and self.pos[1] >= self.mission.distance + LAND_CLEARANCE_M):
+        if engaged and self.pos[1] >= self.mission.distance + LAND_CLEARANCE_M:
             self._send_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
             self.land_requested = True
             self.get_logger().info(
@@ -248,11 +261,11 @@ class ControllerNode(Node):
         # own authority to move the vehicle. Verified live: with this
         # unset, cruise velocity never got anywhere near the mission's
         # 12 m/s (capped around 2-6 m/s), and a large reverse position
-        # setpoint (tried in an earlier fly-home-and-land design, since
-        # removed -- see LAND_CLEARANCE_M above) produced no turnaround at
-        # all -- the vehicle just kept drifting the same direction it was
-        # already moving. Explicitly marking both NaN is what actually
-        # hands full authority to the position controller.
+        # setpoint (tried in an earlier fly-home-and-land design -- see
+        # LAND_CLEARANCE_M above) produced no turnaround at all -- the
+        # vehicle just kept drifting the same direction it was already
+        # moving. Explicitly marking both NaN is what actually hands full
+        # authority to the position controller.
         sp.velocity = [float('nan')] * 3
         sp.acceleration = [float('nan')] * 3
         sp.yaw = self.cruise_yaw  # nose down the canyon's actual travel direction
@@ -260,6 +273,8 @@ class ControllerNode(Node):
         if self.mode == 'treatment':
             # The PINN estimates the disturbance FORCE; the feedforward is
             # the acceleration that cancels it. Negative: we push back.
+            # Only reached during the actual transit -- landing hands off
+            # to AUTO_LAND above and returns before this point.
             u_des = -self.wind_est / MASS_KG
             u_safe, info = self.cbf.filter(
                 u_des, self.pos, self.vel, self.wind_truth, self.quat)

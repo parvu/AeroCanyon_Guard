@@ -247,3 +247,48 @@ attempted: adjusting the `base_link_collision` contact `<ode>` stiffness/
 damping (`kp`/`kd`/`max_vel` in `model.sdf`), or checking whether the
 flip correlates with spawn `min_depth`/initial penetration rather than
 with any PX4-side event at all.
+
+### Canyon geometry: symmetric entry/exit, ground/tower colours
+
+`CANYON_ENTRY`/`CANYON_EXIT` were `[-90, 0, 25]`/`[110, 0, 25]` --
+asymmetric around the tower group's own centre (the towers themselves
+already span x in [-55, 55], centred at x=0, and the ground plane is
+centred at the origin too). Changed to `±100` so the whole layout,
+including the vehicle's spawn point (`run_trial.SPAWN_XYZ`, derived from
+`CANYON_ENTRY`), is centred on the ground plane rather than offset
+toward the exit end. Mission distance is unchanged (still 200m). Ground
+plane recoloured green, towers beige (`canyon_geometry.to_sdf`,
+`worlds/_template.sdf`) -- purely cosmetic.
+
+### AUTO_LAND turns the vehicle's heading during descent (accepted)
+
+Landing hands off to PX4's own `VEHICLE_CMD_NAV_LAND`/`AUTO_LAND`
+(`controller_node.LAND_CLEARANCE_M`), which can visibly turn the vehicle
+off whatever heading it had at the moment landing was requested -- worth
+knowing if you're watching a trial fly and the heading change looks
+surprising. A self-controlled descent was tried instead specifically to
+avoid this (freeze the position at the clearance point, keep publishing
+`cruise_yaw` every tick under this node's own offboard control, same
+NaN-authority setpoint pattern as the whole transit) and it DID hold
+heading correctly. But its own disarm logic proved genuinely unsafe:
+verified live, repeatedly, that the vehicle could destabilise into a
+violent, uncontrolled tumble (roll/pitch/yaw all swinging wildly,
+climbing back up to 60m instead of landing) after sitting near the
+ground for 20-30+ seconds. The most likely mechanism:
+`VEHICLE_CMD_COMPONENT_ARM_DISARM` without PX4's force parameter can be
+silently REJECTED while PX4 doesn't consider the vehicle landed, and
+this node's own logic stopped publishing setpoints the moment it
+(wrongly) assumed the disarm had succeeded -- leaving the vehicle
+airborne under thrust with zero control input. Neither an instantaneous
+`|z|`/speed threshold, a sustained multi-second settle check, nor an
+unconditional timeout backstop closed this gap reliably enough to trust
+live. AUTO_LAND -- PX4's own, field-tested landing logic, including its
+own correct judgement of when disarming is actually safe -- doesn't have
+this failure mode, and was verified live (repeatedly, across baseline
+and treatment) to always land flat and level and disarm cleanly, even
+though the heading can turn on the way down. A turn during descent is
+cosmetic; loss of control is not. If heading-locked landing is revisited
+later, the disarm-safety problem (not the heading problem) is what
+actually needs solving first -- e.g. investigating PX4's force-disarm
+parameter (mavlink `PARAM2=21196` convention) rather than another
+settle-detection heuristic.

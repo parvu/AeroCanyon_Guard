@@ -47,10 +47,10 @@ def building_plot_rect(b):
     the EKF initialised -- which, since the vehicle spawns at CANYON_ENTRY
     (see run_trial.SPAWN_XYZ), is CANYON_ENTRY itself, not the world's
     absolute origin. Verified live: at mission start (target pinned at
-    CANYON_ENTRY, i.e. local NED east=-90) the vehicle's actual logged
-    position reads local east=0. canyon_geometry.BUILDINGS is in
-    world-absolute ENU, so it has to be shifted by CANYON_ENTRY's own
-    position to land in the same frame as the trajectory -- otherwise the
+    CANYON_ENTRY) the vehicle's actual logged position reads local
+    east=0. canyon_geometry.BUILDINGS is in world-absolute ENU, so it has
+    to be shifted by CANYON_ENTRY's own position to land in the same
+    frame as the trajectory -- otherwise the
     buildings render ~90 m away from where the vehicle actually was in
     Gazebo.
 

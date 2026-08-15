@@ -45,7 +45,7 @@
         </collision>
         <visual name="visual">
           <geometry><plane><normal>0 0 1</normal><size>300 150</size></plane></geometry>
-          <material><ambient>0.2 0.2 0.2 1</ambient><diffuse>0.2 0.2 0.2 1</diffuse></material>
+          <material><ambient>0.16 0.45 0.16 1</ambient><diffuse>0.16 0.45 0.16 1</diffuse></material>
         </visual>
       </link>
     </model>

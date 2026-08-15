@@ -134,10 +134,15 @@ vehicle all the way back to the spawn point before landing, to make sure
 the next leg's PX4 process wouldn't inherit a drifting or crashed
 vehicle's state; that's no longer necessary now that each leg gets its
 own fresh Gazebo/PX4 process with nothing shared between legs at all
-(see above), so landing in place is simpler and just as safe. The VTOL
-fixed-wing transition stays disabled (`controller_node.
-ENABLE_VTOL_TRANSITION = False`) for both legs — the whole flight flies
-in stable multicopter mode; see History.md for why.
+(see above), so landing in place is simpler and just as safe. Landing
+itself is handed off entirely to PX4's own `AUTO_LAND` -- it may turn
+the vehicle's heading during the descent, but always lands flat/level
+and disarms reliably; see History.md for why a heading-locked
+self-controlled descent was tried and rejected (verified live to be
+capable of losing control entirely). The VTOL fixed-wing transition
+stays disabled (`controller_node.ENABLE_VTOL_TRANSITION = False`) for
+both legs — the whole flight flies in stable multicopter mode; see
+History.md for why.
 
 ```bash
 cd ~/ros2_pinn_sim
@@ -192,7 +197,7 @@ sleep 2
 export R="build/px4_sitl_default/rootfs/"
 export PX4_SIM_MODEL=gz_tiltrotor
 export PX4_GZ_WORLD=urban_canyon
-export PX4_GZ_MODEL_POSE="-90,0,0.246,0,0,0"  # ground, at the canyon entry -- see run_trial.py's SPAWN_POSE
+export PX4_GZ_MODEL_POSE="-100,0,0.246,0,0,0"  # ground, at the canyon entry -- see run_trial.py's SPAWN_POSE
 ./build/px4_sitl_default/bin/px4 &
 sleep 15
 ```
