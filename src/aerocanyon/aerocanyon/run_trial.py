@@ -36,14 +36,18 @@ boot.
 
 set_pose only resets position, not velocity or attitude -- so a vehicle
 that is still moving (or worse, has crashed) when this process kills PX4
-between legs carries that state into the next leg's boot. controller_node
-now flies a genuine return-to-start-and-land before this function ever
-kills PX4 for that reason: the intermittent failure of the treatment leg
-to arm/fly was traced to exactly this -- the baseline leg's vehicle either
-crashing mid-flight or simply not being at rest at the spawn point when
-the next PX4 process starts. Landing for real, not just clearing the
-canyon or hitting a wall-clock timeout, is what makes the next leg's spawn
-position and initial state actually match what PX4/the EKF expect.
+between legs carries that state into the next leg's boot, if that boot
+reuses the same Gazebo world/entity. It no longer does by default (see
+run_leg above): each leg gets its own fresh Gazebo process, so whatever
+state the previous leg's vehicle ended up in is simply gone when that
+leg's Gazebo process is killed. controller_node accordingly just lands
+where it is once it clears the canyon (VEHICLE_CMD_NAV_LAND, see
+LAND_CLEARANCE_M in controller_node.py) rather than flying anywhere
+first -- an earlier design flew a full return-to-spawn-and-land, back
+when that mattered for the next leg's boot state; it no longer does.
+_reset_gazebo_model/_recreate_gazebo_model below are what still matter
+for the manual/external-Gazebo flow (README), where a single Gazebo
+process IS reused across runs.
 """
 import argparse
 import os
@@ -101,13 +105,25 @@ def _gazebo_env():
     return env
 
 
-def _spawn_gazebo(headless=True):
+def _spawn_gazebo():
     """Start a brand-new `gz sim` server for this leg -- see run_leg for
     why: a genuinely fresh Gazebo process, not just an in-world entity
     reset, gives PX4 nothing carried over from any previous leg at all
-    (no shared entity, no shared physics engine state)."""
-    flag = '' if headless else '-g'
-    proc = _spawn(f'gz sim -v 2 {WORLD_SDF} -r -s {flag}'.strip(),
+    (no shared entity, no shared physics engine state).
+
+    No `-s` (server-only/headless): dropped so every trial's GUI is
+    visible by default -- being able to actually watch a leg fly (e.g.
+    to see the intermittent spawn-time flip in History.md happen live,
+    or just to sanity-check a run) matters more here than the ~100MB RAM
+    a headless server would save. Needs a working X11 DISPLAY.
+
+    No separate `-g` flag either -- tried it (to offer an explicit
+    headless option), and verified live that `-g` makes gz-sim detach a
+    child that escapes the process-group kill in run_leg's teardown,
+    unlike the combined server+gui process this function actually
+    launches without it. Not worth the leak risk for a flag that would
+    now be redundant anyway."""
+    proc = _spawn(f'gz sim -v 2 {WORLD_SDF} -r',
                   cwd=PX4_DIR, env=_gazebo_env())
     time.sleep(5)  # matches the README's manual startup margin
     if proc.poll() is not None:
@@ -195,22 +211,23 @@ def _verify_px4_started(px4_proc, timeout_s=5):
 
 
 class _LandWatcher(RosNode):
-    """Watches vehicle_land_detected -- nothing else. controller_node flies
-    itself back to the spawn point and lands under its own offboard control
-    once it measures having cleared the canyon exit by RETURN_CLEARANCE_M
-    (see controller_node.py) -- it keeps streaming setpoints the whole way,
-    only disarming once it confirms landed at home. That means the mission
-    nodes (including trial_logger) can -- and should -- stay alive and
-    keep recording for the whole hold/transit/return/landing sequence; this
-    node only needs to watch for the landing to actually finish.
+    """Watches vehicle_land_detected -- nothing else. controller_node
+    requests PX4's own AUTO_LAND, in place, once it measures having
+    cleared the canyon exit by LAND_CLEARANCE_M (see controller_node.py),
+    and stops publishing its own offboard setpoint stream at that same
+    moment so it isn't fighting PX4's landing logic for control
+    authority. That means the mission nodes (including trial_logger) can
+    -- and should -- stay alive and keep recording for the whole
+    hold/transit/landing sequence; this node only needs to watch for the
+    landing to actually finish.
 
     landed requires having been AIRBORNE first: vehicle_land_detected.landed
     is true by default at boot (resting on the ground, motors off), so
     checking it alone reports "landed" before the vehicle has flown at
     all. Verified live: the vehicle never actually cleared the canyon or
-    got anywhere near RTL before this falsely signalled landed at ~1s in,
-    and the mission nodes (trial_logger included) got killed before they
-    had produced any real data."""
+    got anywhere near landing before this falsely signalled landed at ~1s
+    in, and the mission nodes (trial_logger included) got killed before
+    they had produced any real data."""
 
     def __init__(self):
         super().__init__('land_watcher')
@@ -260,7 +277,7 @@ def _kill(proc):
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
 
 
-def run_one(mode, trial, duration, headless=True, clean_respawn=False):
+def run_one(mode, trial, duration, clean_respawn=False):
     if clean_respawn:
         _recreate_gazebo_model()
     else:
@@ -274,8 +291,11 @@ def run_one(mode, trial, duration, headless=True, clean_respawn=False):
                PX4_GZ_WORLD='urban_canyon',
                PX4_GZ_MODEL_POSE=SPAWN_POSE,
                GZ_IP='127.0.0.1')
-    if headless:
-        env['HEADLESS'] = '1'
+    # No HEADLESS env var: it only controls whether PX4 starts its OWN
+    # Gazebo+gui (px4-rc.gzsim), which only happens if no world is
+    # already running. run_leg always starts Gazebo itself first, so PX4
+    # always finds "gazebo already running world" and never reaches that
+    # branch -- the env var would be a no-op either way.
 
     px4 = _spawn('./build/px4_sitl_default/bin/px4 -d', cwd=PX4_DIR, env=env)
     agent = _spawn(f'{AGENT} udp4 -p 8888')
@@ -293,11 +313,9 @@ def run_one(mode, trial, duration, headless=True, clean_respawn=False):
               f'mode:={mode} trial:={trial}"')
     nodes = _spawn(launch, cwd=WS)
 
-    # Baseline hands off to native PX4 RTL on clearing the canyon (no wind
-    # feedforward to fly itself home against the crosswind); treatment
-    # flies itself back to the spawn point and lands under its own
-    # offboard control, using the wind estimate the whole way. See
-    # controller_node.RETURN_CLEARANCE_M.
+    # Both modes hand off to PX4's own AUTO_LAND, in place, once
+    # controller_node measures clearing the canyon exit -- see
+    # controller_node.LAND_CLEARANCE_M.
     landed = _wait_for_landing(timeout_s=duration)
     if not landed:
         print(f'warning: {mode} did not confirm landed within {duration}s '
@@ -316,23 +334,24 @@ def run_one(mode, trial, duration, headless=True, clean_respawn=False):
     return csv
 
 
-def run_leg(mode, trial, duration, headless=True):
+def run_leg(mode, trial, duration):
     """Own one leg's entire Gazebo+PX4 lifecycle: spawn a fresh `gz sim`,
     run the leg, tear the world back down -- always, even if the leg
     raises. This is what main() runs as a separate OS process per leg
     (see `--mode`), so a leg's Gazebo/PX4/rclpy state can never leak into
     the next one."""
-    gz = _spawn_gazebo(headless=headless)
+    gz = _spawn_gazebo()
     try:
-        return run_one(mode, trial, duration, headless=headless)
+        return run_one(mode, trial, duration)
     finally:
         _kill(gz)
-        # Verified live, twice: gz-sim can leave behind a companion
-        # process (`gz sim -g`, no world argument) that's already
-        # reparented to init by the time _kill's killpg runs, so it
-        # survives the process-group kill above. -x matches the pattern
-        # against the WHOLE command line only, so this can't collide with
-        # our own real `gz sim -v 2 <world> -r -s -g` GUI invocation.
+        # Belt-and-suspenders: verified live that `gz sim ... -g` (the
+        # standalone gui-client flag, no longer used by _spawn_gazebo --
+        # see its docstring for why) can leave behind an orphaned
+        # companion process that escapes the process-group kill above.
+        # -x matches the pattern against the WHOLE command line only, so
+        # this can never collide with the combined server+gui process
+        # _spawn_gazebo actually launches.
         subprocess.run(['pkill', '-xf', 'gz sim -g'],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(2)
@@ -341,25 +360,22 @@ def run_leg(mode, trial, duration, headless=True):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--trial', default='compare')
-    ap.add_argument('--duration', type=float, default=120.0,
+    ap.add_argument('--duration', type=float, default=220.0,
                     help='max seconds to wait for a real landing before '
-                         'giving up and moving on anyway. Covers the hold '
-                         '(3s), the ~17s canyon transit, the ~17s flyback, '
-                         'and the descent+disarm at the spawn point, with '
-                         'margin. Baseline hands off to native PX4 RTL on '
-                         'clearing the canyon, which was verified live not '
-                         'to actually navigate home in this SITL '
-                         'configuration, so baseline will likely still time '
-                         'out here; treatment flies itself home under its '
-                         'own wind-compensated offboard control instead')
-    ap.add_argument('--gui', action='store_true',
-                    help='show the Gazebo GUI (use this for the demo video)')
+                         'giving up and moving on anyway. Both modes hand '
+                         'off to PX4\'s own AUTO_LAND, in place, once '
+                         'controller_node measures clearing the canyon '
+                         'exit -- covers the hold, the canyon transit '
+                         '(nominally ~17s of mission time, but real flight '
+                         'dynamics have taken 60-90s live), and the '
+                         'AUTO_LAND descent itself (~100s observed live, '
+                         'manually, from ~75m), with margin')
     ap.add_argument('--mode', choices=('baseline', 'treatment'), default=None,
                     help=argparse.SUPPRESS)  # internal: run_leg's own subprocess re-invokes with this set
     args = ap.parse_args()
 
     if args.mode:
-        run_leg(args.mode, args.trial, args.duration, headless=not args.gui)
+        run_leg(args.mode, args.trial, args.duration)
         return
 
     # Each leg gets its own OS process, and inside that its own fresh
@@ -369,8 +385,6 @@ def main():
         cmd = [sys.executable, '-m', 'aerocanyon.run_trial',
                '--mode', mode, '--trial', args.trial,
                '--duration', str(args.duration)]
-        if args.gui:
-            cmd.append('--gui')
         result = subprocess.run(cmd, cwd=WS)
         if result.returncode != 0:
             raise SystemExit(f'{mode} leg failed (exit code {result.returncode})')

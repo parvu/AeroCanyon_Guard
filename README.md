@@ -127,39 +127,31 @@ against a manually-started one and its own PX4 process dies immediately
 (it raises with a clear message if that happens, rather than failing
 silently).
 
-**Return-to-start behaviour:** each leg must genuinely fly back to the
-spawn point and land — not just clear the canyon or hit a wall-clock
-timeout — because the next leg's PX4 process reuses that same spawn
-pose, and a vehicle left drifting or crashed there is a likely cause of
-the *next* leg failing to arm/fly. Baseline hands off to PX4's own
-`VEHICLE_CMD_NAV_RETURN_TO_LAUNCH` on clearing the canyon (it has no
-wind feedforward to fly itself home against the canyon's own crosswind);
-treatment flies itself back and lands under its own offboard control,
-using the wind estimate the whole way home. **Known issue:** PX4's
-native RTL has been verified live to engage `AUTO_RTL` but not actually
-navigate back toward home in this SITL configuration when triggered
-from `controller_node`'s own offboard flow (it has, however, been seen
-to work correctly when triggered manually from QGroundControl on a
-vehicle that took off normally -- see History.md for that lead), so
-baseline currently still times out on `--duration` most runs. The VTOL
+**Landing behaviour:** both modes land in place (`VEHICLE_CMD_NAV_LAND`)
+once `controller_node` measures having actually cleared the canyon exit
+-- not just at a wall-clock timeout. An earlier design instead flew the
+vehicle all the way back to the spawn point before landing, to make sure
+the next leg's PX4 process wouldn't inherit a drifting or crashed
+vehicle's state; that's no longer necessary now that each leg gets its
+own fresh Gazebo/PX4 process with nothing shared between legs at all
+(see above), so landing in place is simpler and just as safe. The VTOL
 fixed-wing transition stays disabled (`controller_node.
-ENABLE_VTOL_TRANSITION = False`) for both legs — the whole flight,
-including the return, flies in stable multicopter mode; see History.md
-for why.
+ENABLE_VTOL_TRANSITION = False`) for both legs — the whole flight flies
+in stable multicopter mode; see History.md for why.
 
 ```bash
 cd ~/ros2_pinn_sim
 source /opt/ros/jazzy/setup.bash && source install/setup.bash
 source .venv/bin/activate
-python3 -m aerocanyon.run_trial --trial live_full  # --duration defaults to 120s, see --help
+python3 -m aerocanyon.run_trial --trial live_full  # --duration defaults to 220s, see --help
 python3 -m aerocanyon.plot_results --trial live_full
 ```
 
-Add `--gui` to watch each leg's Gazebo window as it runs (requires an
-X11 display server -- on WSL2, [VcXsrv](https://sourceforge.net/projects/vcxsrv/)
-or X410, and `export DISPLAY=:0` or your WSL2 host IP first); omit it
-for headless (recommended day-to-day, saves ~100MB RAM per leg and
-doesn't need a display).
+Each leg's Gazebo GUI is visible by default while it runs (needs a
+working X11 display server -- on WSL2, [VcXsrv](https://sourceforge.net/projects/vcxsrv/)
+or X410, and `export DISPLAY=:0` or your WSL2 host IP first) — useful
+for actually watching a trial fly, or catching the intermittent
+spawn-time attitude flip in History.md happening live.
 
 `plot_results` reads `trials/live_full_baseline.csv` and
 `trials/live_full_treatment.csv` (the same `--trial` name used for the run)

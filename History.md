@@ -151,6 +151,25 @@ results at once -- worth testing directly (e.g. briefly holding
 `AUTO_TAKEOFF` before switching to OFFBOARD) before writing off native
 RTL as fundamentally broken in this SITL configuration.
 
+### Land-in-place: why the return-to-start design above was replaced
+
+Everything in the section above -- native RTL, the custom fly-home state
+machine, the NaN fix, the wind-authority split between modes -- existed
+to solve one problem: a vehicle left drifting or crashed when the next
+leg's PX4 process booted, back when Gazebo and the vehicle entity stayed
+alive across both legs. Once each leg got its own fresh Gazebo/PX4
+process with nothing shared between legs at all (see the split-process
+section below), that problem stopped existing: wherever a leg's vehicle
+ends up when its own Gazebo process gets killed is irrelevant to the
+next leg's boot. So `controller_node` now just requests
+`VEHICLE_CMD_NAV_LAND` in place once it clears the canyon, for both
+modes uniformly -- no flying anywhere first. Verified live: this lands
+in ~90s total (hold + transit + descent) versus 150-220s+ for the old
+fly-home designs, and does so reliably rather than depending on native
+RTL actually working. `LAND_CLEARANCE_M`/`VEHICLE_CMD_NAV_LAND` replaced
+`RETURN_CLEARANCE_M`/`VEHICLE_CMD_NAV_RETURN_TO_LAUNCH` and the whole
+`returning`/`disarmed`/`rtl_handoff` state machine in `controller_node.py`.
+
 ### Split-process trial runner: why each leg gets its own Gazebo
 
 `main()` no longer runs both legs' `run_one()` calls in the same Python
@@ -168,14 +187,20 @@ enough runs yet to say -- it's a reasonable additional isolation
 guarantee regardless, since a leg's Gazebo/PX4 can no longer affect the
 next leg's boot at the OS-process level, not just at the entity level.
 
-One thing this surfaced immediately: `gz sim ... -s` occasionally
-leaves behind an already-orphaned companion process (`gz sim -g`, no
-world argument, reparented to init) that escapes the normal
-process-group kill on the main server -- observed live, twice.
-`run_leg`'s teardown now also sweeps for that exact command line
-(`pkill -xf 'gz sim -g'`, exact-match so it can't collide with a real
-`-g` GUI invocation) so a stray Gazebo process can never survive into
-the next leg's supposedly-fresh one.
+One thing this surfaced immediately: `gz sim ... -s` (server-only,
+headless) occasionally left behind an already-orphaned companion process
+(`gz sim -g`, no world argument, reparented to init) that escaped the
+normal process-group kill on the main server -- observed live, twice.
+`run_leg`'s teardown sweeps for that exact command line (`pkill -xf 'gz
+sim -g'`) so a stray Gazebo process can never survive into the next
+leg's supposedly-fresh one. `_spawn_gazebo` no longer passes `-s` at all
+(every trial's GUI is visible by default now, see below) or `-g` (tried
+using it for an explicit headless/GUI toggle; verified live that it
+makes gz-sim detach a *different* orphaned child that escapes the
+process-group kill just the same, so it was dropped rather than papered
+over with another exact-match pkill) -- the plain combined server+gui
+process `gz sim -v 2 <world> -r` launches has, so far, torn down cleanly
+every time.
 
 ### Intermittent spawn-time attitude flip (unresolved)
 
