@@ -24,6 +24,19 @@ from .mission import Mission
 SETPOINTS_BEFORE_OFFBOARD = 20  # PX4 needs an existing stream to accept the mode
 ENGAGE_RETRY_TICKS = 50  # retry the arm+offboard request once a second until it sticks
 
+# Requesting DO_VTOL_TRANSITION, even gated on measured forward speed
+# reaching 80% of cruise, produced a violent, self-reinforcing pitch
+# oscillation in live testing: a sudden climb (vz jumping to +8 m/s),
+# then a stall, then a drop down to ~2 m above the ground before
+# partially recovering. This is a real PX4 VTOL attitude/airspeed-control
+# tuning problem (transition ramp rate, FW pitch/airspeed gains), not a
+# logic bug fixable by adjusting the trigger condition -- it needs
+# careful iterative tuning against live telemetry, not a blind parameter
+# guess. Disabled until that tuning happens; the vehicle instead flies
+# the whole transit in stable multicopter mode, which is how every
+# verified-stable flight in this project's history has actually flown.
+ENABLE_VTOL_TRANSITION = False
+
 
 class ControllerNode(Node):
 
@@ -152,20 +165,26 @@ class ControllerNode(Node):
         if self.start_time is not None:
             elapsed = (self.get_clock().now() - self.start_time).nanoseconds / 1e9
 
-        if engaged and not self.vtol_transitioned and elapsed >= self.mission.hold_s:
+        if (ENABLE_VTOL_TRANSITION and engaged and not self.vtol_transitioned
+                and elapsed >= self.mission.hold_s):
             # The hold phase (elapsed < hold_s, target pinned at
             # CANYON_ENTRY) is the vertical climb to altitude -- takeoff.
-            # Once the mission starts moving the target forward, switch
-            # the airframe out of multicopter hover and into fixed-wing
-            # cruise. Gated on elapsed rather than measured altitude so
-            # the transition happens at the same mission time in both
-            # trials regardless of how wind affects the actual climb --
-            # matching every other schedule in Mission, which is a pure
-            # function of time, not of feedback.
-            self._send_command(VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION,
-                               float(VtolVehicleStatus.VEHICLE_VTOL_STATE_FW))
-            self.vtol_transitioned = True
-            self.get_logger().info('requested VTOL transition to fixed-wing')
+            # Transitioning to fixed-wing right at elapsed == hold_s
+            # (originally gated on elapsed alone, for determinism) stalled
+            # and crashed the vehicle every time: that instant is exactly
+            # when the target has JUST started moving off the pinned hold
+            # point, so horizontal speed is still ~0 -- a VTOL has no lift
+            # in FW mode without forward airspeed. Gate on measured ground
+            # speed reaching a safe margin below cruise instead, with a
+            # generous elapsed-time cap so a persistently low reading
+            # (e.g. stuck telemetry) can't withhold the transition forever.
+            speed = float(np.linalg.norm(self.vel[:2]))
+            if speed >= 0.8 * self.mission.speed or elapsed >= self.mission.hold_s + 15.0:
+                self._send_command(VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION,
+                                   float(VtolVehicleStatus.VEHICLE_VTOL_STATE_FW))
+                self.vtol_transitioned = True
+                self.get_logger().info(
+                    f'requested VTOL transition to fixed-wing at speed={speed:.1f} m/s')
 
         target, done = self.mission.target(elapsed)
         if done and not self.done_logged:

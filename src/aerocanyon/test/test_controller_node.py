@@ -13,6 +13,7 @@ import numpy as np
 import rclpy
 from rclpy.duration import Duration
 
+import aerocanyon.controller_node as controller_node
 from aerocanyon.controller_node import (ENGAGE_RETRY_TICKS,
                                         SETPOINTS_BEFORE_OFFBOARD,
                                         ControllerNode)
@@ -122,17 +123,20 @@ def test_treatment_mode_also_survives_the_tick_loop():
     assert len(sent) >= 1
 
 
-def _run_ticks_already_engaged(n, elapsed_at_start_s):
+def _run_ticks_already_engaged(n, elapsed_at_start_s, vel=(0.0, 0.0, 0.0)):
     """Like _run_ticks, but fakes the vehicle as already armed + offboard
     (as if _on_status had already received confirmation) with the mission
-    clock already elapsed_at_start_s into the flight, so tests can reach
-    the post-hold cruise phase without waiting on real wall-clock time."""
+    clock already elapsed_at_start_s into the flight and a fixed measured
+    velocity, so tests can reach the post-hold cruise phase and control
+    the VTOL transition's speed gate without waiting on real wall-clock
+    time or real physics."""
     rclpy.init(args=[])
     try:
         node = ControllerNode()
         node.armed = True
         node.offboard_engaged = True
         node.start_time = node.get_clock().now() - Duration(seconds=elapsed_at_start_s)
+        node.vel = np.array(vel, dtype=float)
         sent = []
         real_send = node._send_command
 
@@ -149,29 +153,68 @@ def _run_ticks_already_engaged(n, elapsed_at_start_s):
         rclpy.shutdown()
 
 
-def test_requests_vtol_transition_to_fixed_wing_after_the_hold_phase():
+def test_vtol_transition_is_disabled_by_default():
+    # Live testing found that requesting DO_VTOL_TRANSITION -- even gated
+    # on measured forward speed reaching cruise -- caused a violent pitch
+    # oscillation that dropped the vehicle to within ~2 m of the ground
+    # before partially recovering. This is a real PX4 attitude/airspeed
+    # tuning problem, not something a trigger-condition tweak fixes, so
+    # the feature is disabled until that tuning happens. This test is the
+    # safety net: it must keep failing (loudly, in review) if someone
+    # flips ENABLE_VTOL_TRANSITION back on without re-verifying stability.
+    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=20.0, vel=(12.0, 0.0, 0.0))
+    transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
+    assert transitions == [], (
+        'ENABLE_VTOL_TRANSITION must stay False until the pitch instability '
+        'seen in live testing (climb to a stall, drop to ~2m altitude) is '
+        'actually fixed by tuning PX4 VTOL transition/attitude parameters')
+
+
+def test_requests_vtol_transition_to_fixed_wing_after_the_hold_phase(monkeypatch):
+    monkeypatch.setattr(controller_node, 'ENABLE_VTOL_TRANSITION', True)
     # elapsed starts just before hold_s (3.0s default): the transition
     # must not fire during the vertical-climb/hold phase...
-    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=2.9)
+    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=2.9, vel=(12.0, 0.0, 0.0))
     transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
     assert transitions == [], 'must not transition to fixed-wing before the hold phase ends'
 
 
-def test_vtol_transition_fires_once_cruise_starts():
-    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=3.1)
+def test_vtol_transition_fires_once_cruise_speed_is_reached(monkeypatch):
+    monkeypatch.setattr(controller_node, 'ENABLE_VTOL_TRANSITION', True)
+    # Regression: transitioning at elapsed == hold_s alone (with no speed
+    # check) stalled and crashed the vehicle every time, because that
+    # instant is exactly when the target has JUST started moving off the
+    # pinned hold point -- horizontal speed is still ~0 then, and a VTOL
+    # has no lift in fixed-wing mode without forward airspeed.
+    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=3.1, vel=(12.0, 0.0, 0.0))
     transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
     assert len(transitions) == 1, 'must request the VTOL transition exactly once'
+
+
+def test_vtol_transition_does_not_fire_at_low_speed_even_after_the_hold_phase(monkeypatch):
+    monkeypatch.setattr(controller_node, 'ENABLE_VTOL_TRANSITION', True)
+    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=3.1, vel=(0.5, 0.0, 0.0))
+    transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
+    assert transitions == [], 'must wait for real forward speed, not just elapsed time'
+
+
+def test_vtol_transition_fires_anyway_after_the_timeout_cap_even_at_zero_speed(monkeypatch):
+    monkeypatch.setattr(controller_node, 'ENABLE_VTOL_TRANSITION', True)
+    # A stuck-at-zero velocity reading (e.g. the same telemetry-topic bug
+    # fixed elsewhere in this project) must not withhold the transition
+    # forever -- there's a generous elapsed-time cap as a fallback.
+    sent = _run_ticks_already_engaged(1, elapsed_at_start_s=20.0, vel=(0.0, 0.0, 0.0))
+    transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
+    assert len(transitions) == 1, 'must transition anyway once the timeout cap is reached'
     _, param1, _ = transitions[0]
     assert param1 == float(VtolVehicleStatus.VEHICLE_VTOL_STATE_FW)
 
 
 if __name__ == '__main__':
-    test_tick_loop_survives_past_first_tick()
-    test_requests_offboard_mode_and_arm_after_setpoint_stream()
-    test_does_not_request_offboard_before_the_setpoint_stream_is_established()
-    test_retries_arm_request_until_engaged()
-    test_yaw_points_down_the_canyons_actual_travel_direction()
-    test_treatment_mode_also_survives_the_tick_loop()
-    test_requests_vtol_transition_to_fixed_wing_after_the_hold_phase()
-    test_vtol_transition_fires_once_cruise_starts()
-    print('ok')
+    # Several tests above need pytest's monkeypatch fixture (to flip
+    # ENABLE_VTOL_TRANSITION on for the duration of one test), so this
+    # file needs pytest as its runner rather than a plain function-call
+    # list -- `pytest <this file>` is the real entry point either way.
+    import sys
+    import pytest as _pytest
+    sys.exit(_pytest.main([__file__, '-q']))
