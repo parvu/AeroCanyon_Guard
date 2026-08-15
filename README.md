@@ -176,6 +176,7 @@ sleep 2
 export R="build/px4_sitl_default/rootfs/"
 export PX4_SIM_MODEL=gz_tiltrotor
 export PX4_GZ_WORLD=urban_canyon
+export PX4_GZ_MODEL_POSE="-90,0,0.246,0,0,0"  # ground, at the canyon entry -- see run_trial.py's SPAWN_POSE
 ./build/px4_sitl_default/bin/px4 &
 sleep 15
 ```
