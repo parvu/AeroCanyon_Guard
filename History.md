@@ -93,3 +93,90 @@ rm -f build/px4_sitl_default/rootfs/parameters.bson \
       build/px4_sitl_default/rootfs/parameters_backup.bson
 rm -rf build/px4_sitl_default/rootfs/eeprom
 ```
+
+### Return-to-start: why baseline and treatment fly home differently
+
+The original design had `controller_node` request PX4's native
+`VEHICLE_CMD_NAV_RETURN_TO_LAUNCH` once it measured clearing the canyon
+exit. Verified live, twice: `nav_state` correctly engages `AUTO_RTL`
+(`vtol_vehicle_status` stays MC throughout, ruling out the transition
+instability below), but the vehicle never actually turns back — local
+east kept increasing in the same direction the whole flight, out to
+~1900 m over a 360 s window, right through PX4's own 60 m
+`RTL_RETURN_ALT` climb. Root cause not confirmed (`COM_ARM_WO_GPS=1` may
+be skipping normal home-position initialisation), and still unresolved.
+
+The replacement — flying itself home under the same proven offboard
+position control used for the outbound transit — surfaced two more real
+bugs before it worked at all:
+
+- **`TrajectorySetpoint.velocity`/`.acceleration` must be `NaN`, not
+  left at their zero default.** The message's own doc comment says
+  "setting a value to NaN means the state should not be controlled" —
+  `sp.velocity`/`sp.acceleration` were never set, which ROS2 defaults to
+  `[0.0, 0.0, 0.0]`, not `NaN`. PX4 read that as an explicit
+  hold-zero-velocity/zero-acceleration command layered on top of the
+  position setpoint, fighting the position controller's own authority
+  the entire time — verified live: cruise velocity never got anywhere
+  near the mission's 12 m/s (capped around 2-6 m/s), and a large reverse
+  position setpoint produced no turnaround at all. Explicitly marking
+  both `NaN` (`controller_node.py`, in `_tick`'s `TrajectorySetpoint`
+  construction) is what hands full authority back to the position
+  controller.
+- **The canyon crosswind (~12-14 m/s) is close to the mission's own
+  12 m/s cruise speed.** Baseline intentionally carries no wind
+  feedforward — that's the comparison being measured — and even after
+  the NaN fix, baseline's un-compensated position control still could
+  not make headway flying home against a headwind that strong; it kept
+  drifting further away instead of turning back. That's what splits the
+  two modes: baseline hands off to native RTL (no better, but no worse,
+  and doesn't need wind compensation to attempt it), while treatment —
+  which already estimates wind for the CBF/PINN feedforward — reuses
+  that estimate during the return leg too, since getting home safely
+  isn't part of the baseline/treatment comparison being scienced.
+
+### Intermittent spawn-time attitude flip (unresolved)
+
+Live testing occasionally (roughly 1 run in 3-4) shows `vehicle_attitude`
+reporting the tiltrotor flipped ~180° in roll immediately on spawn or
+teleport-reset — as early as t≈0.1s, with the vehicle still essentially
+at rest (near-zero altitude change, near-zero velocity at the instant of
+the flip). Once flipped, the vehicle stays flipped for the rest of that
+recording; it never self-corrects.
+
+What this **isn't**, ruled out by inspecting the actual telemetry rather
+than guessing:
+- **Not this project's axis-conversion code.** `frames.py`'s NED/ENU
+  swap and `cbf_filter.py`'s `quat_to_rotmat`/`body_z_in_ned` were
+  audited and are self-consistent (verified: a global quaternion sign
+  flip q → -q cancels out of the roll/pitch/yaw formula used to inspect
+  this, so it isn't a sign-convention artifact in the inspection either).
+  `vehicle_attitude` comes straight from PX4's own EKF; this project
+  only reads it.
+- **Not arm-time motor torque.** The flip has been observed at t≈0.1s,
+  before `controller_node` has sent any arm command (PX4 has already
+  been running for 10+ seconds by the time it does) and before PX4's own
+  `COM_SPOOLUP_TIME` window would even apply. Doubling `COM_SPOOLUP_TIME`
+  (1.0s → 3.0s) live, as a targeted test, made no difference.
+- **Not specific to teleporting the same long-lived entity.** Tried
+  recreating the entity outright (`run_trial._recreate_gazebo_model()`,
+  wired in as `run_one(..., clean_respawn=True)`) on the theory that
+  physics state carried over from repeated `set_pose` teleports was the
+  cause. Confirmed live that this instead reproduces, deterministically,
+  the *other* known failure mode: every `/fmu/out` telemetry topic frozen
+  at exactly zero for the whole flight (see the module docstring in
+  `run_trial.py` for why recreating the entity is unreliable in the
+  first place). `_recreate_gazebo_model()` is kept in the code, unused,
+  specifically so this dead end doesn't get re-tried blind.
+- `_reset_gazebo_model()` now resets orientation (identity quaternion),
+  not just position, on every teleport — this can't prevent the initial
+  flip, but it stops one flipped leg from starting the *next* leg still
+  upside-down at the spawn point.
+
+Current best guess: a Gazebo contact-physics settling issue specific to
+this vehicle's collision geometry at spawn, not a PX4/EKF or project-code
+bug — but this is unconfirmed. Next things worth trying, not yet
+attempted: adjusting the `base_link_collision` contact `<ode>` stiffness/
+damping (`kp`/`kd`/`max_vel` in `model.sdf`), or checking whether the
+flip correlates with spawn `min_depth`/initial penetration rather than
+with any PX4-side event at all.

@@ -38,8 +38,8 @@ ENGAGE_RETRY_TICKS = 50  # retry the arm+offboard request once a second until it
 ENABLE_VTOL_TRANSITION = False
 
 # How far past the canyon exit (measured position, not the open-loop
-# mission schedule) the vehicle must actually be before RTL is requested.
-RTL_CLEARANCE_M = 2.0
+# mission schedule) the vehicle must actually be before it turns back.
+RETURN_CLEARANCE_M = 2.0
 
 # VEHICLE_CMD_NAV_RETURN_TO_LAUNCH does engage nav_state=AUTO_RTL (verified
 # live: vtol_vehicle_status stayed MC throughout, ruling out a repeat of
@@ -50,11 +50,27 @@ RTL_CLEARANCE_M = 2.0
 # canyon), never turning back, right through PX4's own 60 m RTL_RETURN_ALT
 # climb. This looks like a home-position problem (COM_ARM_WO_GPS=1 may be
 # skipping normal home-position initialisation), not something a trigger
-# condition can fix, and not safe to leave running unattended while
-# unexplained. Disabled until root-caused; the vehicle instead keeps
-# flying the open-loop mission (hovering at the final target once
-# Mission.target() reports done) with no attempt at an autonomous return.
-ENABLE_RTL_ON_CLEARANCE = False
+# condition can fix. Rather than keep chasing PX4's own RTL, the vehicle
+# flies itself home using the SAME offboard position control already
+# proven for the outbound transit: re-target mission.start (the proven
+# vector that reliably parks the vehicle back at the spawn point -- see
+# the empirical note on HOME_RADIUS_M below), then descend and disarm.
+# This also matters beyond just closing the trial cleanly: a vehicle left
+# hovering or drifting when the next leg's PX4 process boots is a
+# plausible cause of that leg failing to arm/fly (residual velocity
+# carried through the position-only set_pose teleport in
+# run_trial._reset_gazebo_model, or simply not being where the next leg's
+# EKF expects home to be) -- so treatment must never start until baseline
+# has genuinely landed, not just cleared the canyon.
+#
+# HOME_RADIUS_M / LANDED_ALT_M / LANDED_SPEED_MPS below reuse the same
+# empirically-verified fact as the hold phase: commanding mission.start
+# (not a derived "home" coordinate) reliably brings self.pos to within a
+# few metres of local NED (0, 0, ...), so proximity is checked against
+# (0, 0) rather than against mission.start itself.
+HOME_RADIUS_M = 3.0  # horizontal distance from home at which to start descending
+LANDED_ALT_M = 0.5  # |z| below this counts as "on the ground" (NED, down-positive)
+LANDED_SPEED_MPS = 0.3  # ground speed below this, at LANDED_ALT_M, counts as landed
 
 
 class ControllerNode(Node):
@@ -82,7 +98,9 @@ class ControllerNode(Node):
         self.armed = False
         self.offboard_engaged = False
         self.vtol_transitioned = False
-        self.rtl_requested = False
+        self.returning = False
+        self.disarmed = False
+        self.rtl_handoff = False
         self.done_logged = False
         self.wind_est = np.zeros(3)
 
@@ -161,11 +179,11 @@ class ControllerNode(Node):
         self.mode_pub.publish(msg)
 
     def _tick(self):
-        if self.rtl_requested:
-            # Hand off entirely to PX4's own RTL/land logic. Continuing to
-            # publish an offboard setpoint stream here would fight it for
-            # control authority the moment nav_state leaves OFFBOARD --
-            # this node's job is done once it's asked to go home.
+        if self.disarmed or self.rtl_handoff:
+            # Either we flew ourselves home, landed, and disarmed (the
+            # treatment-mode return), or baseline handed off to PX4's own
+            # RTL on clearing the canyon -- either way there is nothing
+            # left for this node to command.
             self.tick += 1
             return
 
@@ -225,22 +243,74 @@ class ControllerNode(Node):
         # "east distance travelled from the entry" directly, and
         # mission.distance is exactly that distance to the exit. Gated on
         # measured position, not the open-loop mission schedule's `done`
-        # flag, so RTL only fires once the vehicle has actually cleared
-        # the canyon -- wind or CBF deviation could otherwise have it
-        # trigger while still between the buildings.
-        if (ENABLE_RTL_ON_CLEARANCE and engaged
-                and self.pos[1] >= self.mission.distance + RTL_CLEARANCE_M):
-            self._send_command(VehicleCommand.VEHICLE_CMD_NAV_RETURN_TO_LAUNCH)
-            self.rtl_requested = True
+        # flag, so the turn-back only fires once the vehicle has actually
+        # cleared the canyon -- wind or CBF deviation could otherwise have
+        # it trigger while still between the buildings.
+        if (not self.returning and engaged
+                and self.pos[1] >= self.mission.distance + RETURN_CLEARANCE_M):
+            self.returning = True
+            if self.mode == 'baseline':
+                # Baseline has no wind feedforward (that's the comparison
+                # being measured), and our own fly-home-and-land state
+                # machine needs it: verified live that without wind
+                # compensation, the position controller alone could not
+                # make headway against the canyon's ~12-14 m/s crosswind
+                # on the way back, and just kept drifting further away.
+                # Hand off to PX4's own RTL instead -- simpler, and this
+                # node no longer owns control authority once it hands off.
+                self._send_command(VehicleCommand.VEHICLE_CMD_NAV_RETURN_TO_LAUNCH)
+                self.rtl_handoff = True
+                self.get_logger().info(
+                    f'cleared canyon by {RETURN_CLEARANCE_M}m -- '
+                    'requested native RTL (baseline)')
+                self.tick += 1
+                return
             self.get_logger().info(
-                f'cleared canyon by {RTL_CLEARANCE_M}m -- requested RTL')
-            self.tick += 1
-            return
+                f'cleared canyon by {RETURN_CLEARANCE_M}m -- returning to start')
+
+        if self.returning:  # only reached in treatment mode -- baseline returns above
+            home_range = float(np.linalg.norm(self.pos[:2]))
+            if home_range <= HOME_RADIUS_M:
+                # Over the spawn point -- descend straight down onto it.
+                target = np.array(
+                    [self.mission.start[0], self.mission.start[1], 0.0])
+            else:
+                # Not home yet -- fly back at cruise altitude using the
+                # same proven vector the hold phase parks on.
+                target = self.mission.start.copy()
+
+            speed = float(np.linalg.norm(self.vel))
+            if (engaged and home_range <= HOME_RADIUS_M
+                    and abs(self.pos[2]) <= LANDED_ALT_M
+                    and speed <= LANDED_SPEED_MPS):
+                self._send_command(
+                    VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 0.0)
+                self.disarmed = True
+                self.get_logger().info('landed at home -- disarming')
+                self.tick += 1
+                return
 
         sp = TrajectorySetpoint()
         sp.position = [float(v) for v in target]
+        # TrajectorySetpoint.msg: "setting a value to NaN means the state
+        # should not be controlled". velocity/acceleration default to
+        # [0.0, 0.0, 0.0], NOT NaN -- left alone, that is read by PX4 as an
+        # explicit hold-zero-velocity/zero-acceleration command layered on
+        # top of the position setpoint, fighting the position controller's
+        # own authority to move the vehicle. Verified live: with this
+        # unset, cruise velocity never got anywhere near the mission's
+        # 12 m/s (capped around 2-6 m/s), and a large reverse position
+        # setpoint (the return-to-start target) produced no turnaround at
+        # all -- the vehicle just kept drifting the same direction it was
+        # already moving. Explicitly marking both NaN is what actually
+        # hands full authority to the position controller.
+        sp.velocity = [float('nan')] * 3
+        sp.acceleration = [float('nan')] * 3
         sp.yaw = self.cruise_yaw  # nose down the canyon's actual travel direction
 
+        # Baseline never reaches here once returning=True -- it hands off
+        # to native RTL above instead (no wind feedforward available to
+        # fly itself home against the canyon's ~12-14 m/s crosswind).
         if self.mode == 'treatment':
             # The PINN estimates the disturbance FORCE; the feedforward is
             # the acceleration that cancels it. Negative: we push back.

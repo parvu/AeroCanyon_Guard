@@ -48,6 +48,13 @@ Apply these edits to `PX4-Autopilot`:
    param save
    ```
 
+4. **White `base_link` visual (cosmetic, optional):** in
+   `Tools/simulation/gz/models/tiltrotor/model.sdf`, `base_link_visual`'s
+   `<material>` is changed from the stock dark grey to white
+   (`<ambient>`/`<diffuse>` both `1.0 1.0 1.0 1.0`) — purely for
+   visibility against the canyon buildings in the demo video/GUI, no
+   effect on simulation behaviour.
+
 The airframe file `4020_gz_tiltrotor` already has SITL sensor checks
 disabled, and the stock tiltrotor model's motor topic already matches
 what PX4's `gz_bridge` publishes -- neither needs editing. See
@@ -104,16 +111,35 @@ task's environment).
 `run_trial.py` spawns and owns PX4 SITL and the Micro-XRCE-DDS-Agent
 itself (killing and restarting both between the baseline and treatment
 legs, since PX4's EKF and mission state don't reset cleanly in place) —
-**only Gazebo is external.** Do not also start PX4 or the DDS agent by
-hand: `run_trial.py`'s own spawn of either will silently lose the port/
-instance-0-lock race against a manually-started one, its own PX4 process
-dies immediately, and — because `run_one()` unconditionally deletes the
-previous trial's vehicle entity before every restart (see the module
-docstring) — the vehicle then has nothing left to respawn it and is just
-gone from the sim for the rest of the trial. (This used to fail
-silently; `run_trial.py` now raises immediately with a clear message if
-the vehicle doesn't reappear within a few seconds, so a stray manual PX4
-shows up as an error instead of a mysteriously empty world.)
+**only Gazebo is external.** Between legs it teleports the same
+long-lived vehicle entity back to the spawn pose (position and
+orientation) via Gazebo's `set_pose` rather than destroying and
+recreating it — the module docstring explains why recreating it is
+unreliable (it froze telemetry solid on the next PX4 boot, verified
+live). Do not also start PX4 or the DDS agent by hand: `run_trial.py`'s
+own spawn of either will silently lose the port/instance-0-lock race
+against a manually-started one and its own PX4 process dies immediately.
+(This used to fail silently; `run_trial.py` now raises immediately with
+a clear message if PX4 doesn't stay up, so a stray manual PX4 shows up
+as an error instead of a mysteriously empty world.)
+
+**Return-to-start behaviour:** each leg must genuinely fly back to the
+spawn point and land — not just clear the canyon or hit a wall-clock
+timeout — because the next leg's PX4 process reuses that same spawn
+pose, and a vehicle left drifting or crashed there is a likely cause of
+the *next* leg failing to arm/fly. Baseline hands off to PX4's own
+`VEHICLE_CMD_NAV_RETURN_TO_LAUNCH` on clearing the canyon (it has no
+wind feedforward to fly itself home against the canyon's own crosswind);
+treatment flies itself back and lands under its own offboard control,
+using the wind estimate the whole way home. **Known issue:** PX4's
+native RTL has been verified live to engage `AUTO_RTL` but not actually
+navigate back toward home in this SITL configuration, so baseline
+currently still times out on `--duration` most runs; see
+[History.md](History.md) for what's been ruled out. The VTOL
+fixed-wing transition stays disabled (`controller_node.
+ENABLE_VTOL_TRANSITION = False`) for both legs — the whole flight,
+including the return, flies in stable multicopter mode; see History.md
+for why.
 
 ```bash
 cd ~/PX4-Autopilot
@@ -133,7 +159,7 @@ sleep 5
 cd ~/ros2_pinn_sim
 source /opt/ros/jazzy/setup.bash && source install/setup.bash
 source .venv/bin/activate
-python3 -m aerocanyon.run_trial --trial live_full --duration 180
+python3 -m aerocanyon.run_trial --trial live_full  # --duration defaults to 120s, see --help
 python3 -m aerocanyon.plot_results --trial live_full
 ```
 

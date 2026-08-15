@@ -26,6 +26,17 @@ to fail every leg after the first (harmlessly, same as before the
 remove-based fix existed) and gz_bridge just reattaches to the one
 long-lived entity, exactly as it did on the very first, always-reliable
 boot.
+
+set_pose only resets position, not velocity or attitude -- so a vehicle
+that is still moving (or worse, has crashed) when this process kills PX4
+between legs carries that state into the next leg's boot. controller_node
+now flies a genuine return-to-start-and-land before this function ever
+kills PX4 for that reason: the intermittent failure of the treatment leg
+to arm/fly was traced to exactly this -- the baseline leg's vehicle either
+crashing mid-flight or simply not being at rest at the spawn point when
+the next PX4 process starts. Landing for real, not just clearing the
+canyon or hitting a wall-clock timeout, is what makes the next leg's spawn
+position and initial state actually match what PX4/the EKF expect.
 """
 import argparse
 import os
@@ -35,6 +46,7 @@ import subprocess
 import time
 
 import rclpy
+from gz.msgs10.entity_pb2 import Entity
 from gz.msgs10.pose_pb2 import Pose
 from gz.msgs10.boolean_pb2 import Boolean
 from gz.transport13 import Node as GzNode
@@ -70,11 +82,51 @@ def _reset_gazebo_model():
     velocity (set_pose has no twist field), so the vehicle may carry a
     small residual velocity into the first tick or two of the next leg;
     that's a minor, bounded imperfection next to the alternative of
-    telemetry not working at all."""
+    telemetry not working at all.
+
+    ORIENTATION is reset explicitly (identity quaternion -- level,
+    yaw=0), not left alone. Verified live: vehicle_attitude occasionally
+    reports the vehicle flipped ~180 degrees in roll immediately on
+    spawn/settle -- as early as t=0.1s, before this project's own code has
+    sent an arm command and before PX4 itself considers the vehicle
+    armable, so it isn't an arm-time motor-torque event (COM_SPOOLUP_TIME
+    was tried live and made no difference) and it isn't this project's
+    own axis-conversion code (frames.py's NED/ENU swap and quat_to_rotmat
+    were checked and are self-consistent). The timing instead points at
+    physics-state carried over from repeatedly teleporting the SAME
+    long-lived entity via set_pose rather than a genuinely fresh spawn --
+    see _recreate_gazebo_model() below for the (riskier) alternative that
+    tests that theory directly. Previously, set_pose only touched
+    position, so a leg that ended flipped over stayed flipped over
+    through the teleport and started the NEXT leg still upside-down at
+    the spawn point -- turning one bad moment into a permanently-broken
+    trial. Forcing orientation level on every reset can't fix the initial
+    flip, but it stops it from persisting across legs."""
     node = GzNode()
     x, y, z = SPAWN_XYZ
-    req = Pose(name=C.MODEL_NAME, position={'x': x, 'y': y, 'z': z})
+    req = Pose(name=C.MODEL_NAME, position={'x': x, 'y': y, 'z': z},
+               orientation={'w': 1.0, 'x': 0.0, 'y': 0.0, 'z': 0.0})
     node.request(f'/world/{C.WORLD_NAME}/set_pose', req, Pose, Boolean, 2000)
+    time.sleep(1)
+
+
+def _recreate_gazebo_model():
+    """Remove the tiltrotor entity outright instead of teleporting it, so
+    PX4's own create-on-boot call produces a genuinely fresh entity with
+    no carried-over physics state, on the theory that the live-observed
+    spawn-time flip (see _reset_gazebo_model) comes from repeatedly
+    teleporting the same long-lived body rather than from arming/motor
+    torque. TRIED LIVE as run_one's clean_respawn and CONFIRMED to
+    reproduce the exact failure the module docstring already warned
+    about: every /fmu/out telemetry topic (position AND attitude) came
+    back frozen at exactly zero for the entire flight, on the very next
+    PX4 boot after the remove. That trades an intermittent flip for a
+    guaranteed dead trial, so run_one/main do NOT call this -- it is kept
+    here, unused, as a documented dead end so nobody re-tries it without
+    reading this first."""
+    node = GzNode()
+    req = Entity(name=C.MODEL_NAME, type=Entity.MODEL)
+    node.request(f'/world/{C.WORLD_NAME}/remove', req, Entity, Boolean, 2000)
     time.sleep(1)
 
 
@@ -99,13 +151,13 @@ def _verify_px4_started(px4_proc, timeout_s=5):
 
 
 class _LandWatcher(RosNode):
-    """Watches vehicle_land_detected -- nothing else. controller_node
-    requests RTL itself once it measures having cleared the canyon exit by
-    RTL_CLEARANCE_M (see controller_node.py), and stops publishing its
-    offboard setpoint stream at that same moment so it isn't fighting
-    PX4's RTL/land logic for control authority. That means the mission
+    """Watches vehicle_land_detected -- nothing else. controller_node flies
+    itself back to the spawn point and lands under its own offboard control
+    once it measures having cleared the canyon exit by RETURN_CLEARANCE_M
+    (see controller_node.py) -- it keeps streaming setpoints the whole way,
+    only disarming once it confirms landed at home. That means the mission
     nodes (including trial_logger) can -- and should -- stay alive and
-    keep recording for the whole hold/transit/RTL/landing sequence; this
+    keep recording for the whole hold/transit/return/landing sequence; this
     node only needs to watch for the landing to actually finish.
 
     landed requires having been AIRBORNE first: vehicle_land_detected.landed
@@ -164,8 +216,11 @@ def _kill(proc):
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
 
 
-def run_one(mode, trial, duration, headless=True):
-    _reset_gazebo_model()
+def run_one(mode, trial, duration, headless=True, clean_respawn=False):
+    if clean_respawn:
+        _recreate_gazebo_model()
+    else:
+        _reset_gazebo_model()
 
     env = dict(os.environ,
                # NOTE: the airframe file is 4020_gz_tiltrotor; PX4 matches
@@ -194,15 +249,11 @@ def run_one(mode, trial, duration, headless=True):
               f'mode:={mode} trial:={trial}"')
     nodes = _spawn(launch, cwd=WS)
 
-    # controller_node.ENABLE_RTL_ON_CLEARANCE is False by default (RTL
-    # engages AUTO_RTL but was verified live to not actually navigate back
-    # toward home in this SITL configuration -- see that flag's comment),
-    # so _wait_for_landing here will simply time out every run at
-    # `duration` while the vehicle flies its mission and then hovers at
-    # the final target. That's still the right call to make (vs. killing
-    # PX4 on an arbitrary clock tick): if the flag is ever turned back on
-    # after the underlying RTL/home-position problem is fixed, this
-    # starts recording the landing correctly with no further changes here.
+    # Baseline hands off to native PX4 RTL on clearing the canyon (no wind
+    # feedforward to fly itself home against the crosswind); treatment
+    # flies itself back to the spawn point and lands under its own
+    # offboard control, using the wind estimate the whole way. See
+    # controller_node.RETURN_CLEARANCE_M.
     landed = _wait_for_landing(timeout_s=duration)
     if not landed:
         print(f'warning: {mode} did not confirm landed within {duration}s '
@@ -224,19 +275,17 @@ def run_one(mode, trial, duration, headless=True):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--trial', default='compare')
-    ap.add_argument('--duration', type=float, default=90.0,
+    ap.add_argument('--duration', type=float, default=120.0,
                     help='max seconds to wait for a real landing before '
-                         'giving up and moving on anyway. Autonomous RTL on '
-                         'clearing the canyon (controller_node.'
-                         'ENABLE_RTL_ON_CLEARANCE) is currently disabled -- '
-                         'verified live that PX4 engages AUTO_RTL but does '
-                         'not actually navigate back toward home in this '
-                         'SITL configuration -- so this will time out on '
-                         'every run with the vehicle hovering at the final '
-                         'mission target; bump this back up (RTL, once '
-                         'working, needs several minutes: climb to PX4\'s '
-                         'default RTL_RETURN_ALT of 60m, fly back, land) if '
-                         'the flag is re-enabled after that gets fixed')
+                         'giving up and moving on anyway. Covers the hold '
+                         '(3s), the ~17s canyon transit, the ~17s flyback, '
+                         'and the descent+disarm at the spawn point, with '
+                         'margin. Baseline hands off to native PX4 RTL on '
+                         'clearing the canyon, which was verified live not '
+                         'to actually navigate home in this SITL '
+                         'configuration, so baseline will likely still time '
+                         'out here; treatment flies itself home under its '
+                         'own wind-compensated offboard control instead')
     ap.add_argument('--gui', action='store_true',
                     help='show the Gazebo GUI (use this for the demo video)')
     args = ap.parse_args()

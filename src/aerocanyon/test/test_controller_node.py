@@ -212,71 +212,138 @@ def test_vtol_transition_fires_anyway_after_the_timeout_cap_even_at_zero_speed(m
     assert param1 == float(VtolVehicleStatus.VEHICLE_VTOL_STATE_FW)
 
 
-def test_rtl_on_clearance_is_disabled_by_default():
-    # VEHICLE_CMD_NAV_RETURN_TO_LAUNCH does engage nav_state=AUTO_RTL, but
-    # verified live over a full flight that it does not actually navigate
-    # back toward home in this SITL configuration -- local east kept
-    # increasing in the same direction the whole time, all the way out to
-    # ~1900m (vs. the ~200m canyon), never turning back. Disabled until
-    # root-caused (see the ENABLE_RTL_ON_CLEARANCE comment). This test is
-    # the safety net: it must keep failing (loudly, in review) if someone
-    # flips the flag back on without first fixing that.
-    from aerocanyon.mission import Mission
-    distance = Mission().distance
-    sent = _run_ticks_already_engaged(
-        1, elapsed_at_start_s=30.0, pos=(0.0, distance + 100.0, 0.0))
-    rtl_cmds = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_NAV_RETURN_TO_LAUNCH]
-    assert rtl_cmds == [], (
-        'ENABLE_RTL_ON_CLEARANCE must stay False until RTL actually navigating '
-        'back to home (not just engaging AUTO_RTL) is verified live')
-
-
-def test_rtl_requested_once_position_clears_the_canyon_exit_by_the_margin(monkeypatch):
-    monkeypatch.setattr(controller_node, 'ENABLE_RTL_ON_CLEARANCE', True)
-    from aerocanyon.controller_node import RTL_CLEARANCE_M
-    from aerocanyon.mission import Mission
-    distance = Mission().distance
-    sent = _run_ticks_already_engaged(
-        1, elapsed_at_start_s=30.0, pos=(0.0, distance + RTL_CLEARANCE_M, 0.0))
-    rtl_cmds = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_NAV_RETURN_TO_LAUNCH]
-    assert len(rtl_cmds) == 1, 'must request RTL exactly once on clearing the canyon'
-
-
-def test_rtl_not_requested_before_clearing_the_canyon_by_the_margin(monkeypatch):
-    monkeypatch.setattr(controller_node, 'ENABLE_RTL_ON_CLEARANCE', True)
-    from aerocanyon.mission import Mission
-    distance = Mission().distance
-    # 1m short of the required clearance margin.
-    sent = _run_ticks_already_engaged(
-        5, elapsed_at_start_s=30.0, pos=(0.0, distance + 1.0, 0.0))
-    rtl_cmds = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_NAV_RETURN_TO_LAUNCH]
-    assert rtl_cmds == [], 'must not RTL until actually 2m clear of the canyon exit'
-
-
-def test_no_more_setpoints_published_once_rtl_is_requested(monkeypatch):
-    # Once RTL is requested, controller_node must stop publishing its own
-    # offboard setpoint stream -- continuing to stream would fight PX4's
-    # RTL/land logic for control authority the moment nav_state leaves
-    # OFFBOARD.
-    monkeypatch.setattr(controller_node, 'ENABLE_RTL_ON_CLEARANCE', True)
-    from aerocanyon.mission import Mission
-    distance = Mission().distance
+def _run_returning_ticks(n, pos, vel=(0.0, 0.0, 0.0), returning=False, mode='treatment'):
+    """Like _run_ticks_already_engaged, but also exposes the live node
+    (not just the sent commands) so return/land tests can inspect
+    node.returning/node.disarmed/node.rtl_handoff and the actually-published
+    setpoints. Defaults to treatment mode -- baseline hands off to native
+    RTL instead of running this state machine, see the rtl_handoff tests
+    below."""
     rclpy.init(args=[])
     try:
         node = ControllerNode()
+        node.mode = mode
         node.armed = True
         node.offboard_engaged = True
         node.start_time = node.get_clock().now() - Duration(seconds=30.0)
-        node.pos = np.array([0.0, distance + 2.0, 0.0])
+        node.vel = np.array(vel, dtype=float)
+        node.pos = np.array(pos, dtype=float)
+        node.returning = returning
+        sent = []
+        real_send = node._send_command
+        node._send_command = lambda command, param1=0.0, param2=0.0: (
+            sent.append((command, param1, param2)), real_send(command, param1, param2))[0]
         setpoints = []
         real_publish = node.sp_pub.publish
         node.sp_pub.publish = lambda msg: (setpoints.append(msg), real_publish(msg))[0]
 
-        node._tick()  # this tick requests RTL
+        for _ in range(n):
+            node._tick()
+        result = (sent, setpoints, node.returning, node.disarmed)
+        node.destroy_node()
+        return result
+    finally:
+        rclpy.shutdown()
+
+
+def test_baseline_hands_off_to_native_rtl_once_position_clears_the_canyon_exit():
+    # Baseline has no wind feedforward (that's the comparison being
+    # measured), and live testing found the canyon crosswind (~12-14 m/s,
+    # close to the mission's own 12 m/s cruise speed) is too strong for
+    # baseline's un-compensated position control to fly home against --
+    # it just kept drifting further away instead of turning back. Baseline
+    # hands off to PX4's own RTL on clearing the canyon instead.
+    from aerocanyon.mission import Mission
+    distance = Mission().distance
+    sent, setpoints, returning, _ = _run_returning_ticks(
+        2, pos=(0.0, distance + controller_node.RETURN_CLEARANCE_M, 0.0), mode='baseline')
+    assert returning
+    rtl_cmds = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_NAV_RETURN_TO_LAUNCH]
+    assert len(rtl_cmds) == 1, 'must request native RTL exactly once on clearing the canyon'
+    assert setpoints == [], (
+        'must stop publishing its own setpoint stream once handed off to RTL -- '
+        'continuing would fight PX4 for control authority')
+
+
+def test_treatment_turns_back_once_position_clears_the_canyon_exit_by_the_margin():
+    from aerocanyon.mission import Mission
+    distance = Mission().distance
+    _, setpoints, returning, _ = _run_returning_ticks(
+        1, pos=(0.0, distance + controller_node.RETURN_CLEARANCE_M, 0.0), mode='treatment')
+    assert returning, 'must start returning once actually 2m clear of the canyon exit'
+    assert setpoints, 'must keep publishing setpoints while returning (no PX4 handoff)'
+    start = Mission().start
+    np.testing.assert_allclose(
+        [setpoints[-1].position[0], setpoints[-1].position[1]], start[:2], atol=1e-6)
+
+
+def test_does_not_turn_back_before_clearing_the_canyon_by_the_margin():
+    from aerocanyon.mission import Mission
+    distance = Mission().distance
+    # 1m short of the required clearance margin.
+    _, _, returning, _ = _run_returning_ticks(5, pos=(0.0, distance + 1.0, 0.0))
+    assert not returning, 'must not turn back until actually 2m clear of the canyon exit'
+
+
+def test_descends_once_over_the_spawn_point_but_not_yet_landed():
+    from aerocanyon.mission import Mission
+    start = Mission().start
+    # Home range 2m (< HOME_RADIUS_M) but still at cruise altitude.
+    _, setpoints, returning, disarmed = _run_returning_ticks(
+        1, pos=(0.0, 2.0, -25.0), returning=True)
+    assert returning and not disarmed
+    assert setpoints
+    sp = setpoints[-1]
+    assert abs(sp.position[0] - start[0]) < 1e-6
+    assert abs(sp.position[1] - start[1]) < 1e-6
+    assert sp.position[2] == 0.0, 'must command ground level (z=0) once over the spawn point'
+
+
+def test_disarms_once_landed_at_home():
+    _, _, returning, disarmed = _run_returning_ticks(
+        1, pos=(0.0, 1.0, 0.05), vel=(0.0, 0.0, 0.1), returning=True)
+    assert returning and disarmed, 'must disarm once home, near-ground, and slow'
+
+
+def test_disarm_command_sent_with_param1_zero():
+    sent, _, _, disarmed = _run_returning_ticks(
+        1, pos=(0.0, 1.0, 0.05), vel=(0.0, 0.0, 0.1), returning=True)
+    assert disarmed
+    disarm_cmds = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM]
+    assert len(disarm_cmds) == 1
+    _, param1, _ = disarm_cmds[0]
+    assert param1 == 0.0, 'param1=0 disarms; 1 would arm'
+
+
+def test_does_not_disarm_while_still_descending():
+    _, _, _, disarmed = _run_returning_ticks(
+        1, pos=(0.0, 1.0, -10.0), vel=(0.0, 0.0, 0.1), returning=True)
+    assert not disarmed, 'must not disarm while still well above the ground'
+
+
+def test_no_more_setpoints_published_once_disarmed():
+    # Once disarmed, controller_node must stop publishing its own offboard
+    # setpoint stream -- there is nothing left to command.
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        node.mode = 'treatment'
+        node.armed = True
+        node.offboard_engaged = True
+        node.start_time = node.get_clock().now() - Duration(seconds=30.0)
+        node.returning = True
+        node.pos = np.array([0.0, 1.0, 0.05])
+        node.vel = np.array([0.0, 0.0, 0.1])
+        setpoints = []
+        real_publish = node.sp_pub.publish
+        node.sp_pub.publish = lambda msg: (setpoints.append(msg), real_publish(msg))[0]
+
+        node._tick()  # this tick disarms
         node._tick()  # this tick must be a no-op past the early return
         node._tick()
 
-        assert setpoints == [], 'must not publish TrajectorySetpoint after requesting RTL'
+        assert node.disarmed
+        assert setpoints == [], 'must not publish TrajectorySetpoint after disarming'
         node.destroy_node()
     finally:
         rclpy.shutdown()
