@@ -32,10 +32,37 @@ def test_command_driving_into_a_building_is_modified():
     assert frames.ned_to_enu(out)[1] < frames.ned_to_enu(u_ned)[1]
 
 
-def test_filter_reports_the_minimum_barrier_value():
+def test_filter_reports_the_obstacle_barrier_value():
     f = cbf_filter.CBFFilter()
     _, info = f.filter(np.zeros(3), CLEAR_NED, np.zeros(3), np.zeros(3), LEVEL)
-    assert np.isfinite(info['h_min'])
+    assert np.isfinite(info['h_obstacle'])
+
+
+def test_stall_barrier_is_disabled_by_default():
+    # Regression: leaving this on unconditionally was verified live to
+    # report angle-of-attack near 90 degrees for the vast majority of
+    # ordinary multicopter flight (there's no wing, so there's no stall),
+    # and its h (radians) used to get silently combined with the obstacle
+    # h (metres) into one misleading number. It's a fixed-wing-only
+    # concern, so it must stay off unless a caller opts in.
+    f = cbf_filter.CBFFilter()
+    assert not f.enable_stall
+    _, info = f.filter(np.zeros(3), CLEAR_NED, np.array([15.0, 0.0, 0.0]),
+                       np.zeros(3), LEVEL)
+    assert info['h_stall'] is None
+
+
+def test_stall_barrier_reports_separately_when_enabled():
+    # Non-zero alpha (descending relative air, as in
+    # test_angle_of_attack_grows_when_descending_air_hits_from_below) --
+    # at exactly alpha=0 the gradient's sign(alpha) term is degenerately
+    # zero and the row gets dropped regardless of enable_stall, which
+    # would make this test pass for the wrong reason.
+    f = cbf_filter.CBFFilter(enable_stall=True)
+    _, info = f.filter(np.zeros(3), CLEAR_NED, np.array([15.0, 0.0, -3.0]),
+                       np.zeros(3), LEVEL)
+    assert info['h_stall'] is not None
+    assert np.isfinite(info['h_stall'])
 
 
 def test_angle_of_attack_is_zero_in_level_forward_flight():

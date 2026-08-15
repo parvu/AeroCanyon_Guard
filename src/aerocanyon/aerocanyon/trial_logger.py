@@ -25,7 +25,7 @@ COLUMNS = [
     'wind_true_n', 'wind_true_e', 'wind_true_d',
     'wind_est_n', 'wind_est_e', 'wind_est_d',
     'sp_n', 'sp_e', 'sp_d',
-    'cbf_active', 'cbf_h_min',
+    'cbf_active', 'cbf_h_obstacle',
 ]
 
 
@@ -93,8 +93,9 @@ class TrialLogger(Node):
         self.row.update(sp_n=m.vector.x, sp_e=m.vector.y, sp_d=m.vector.z)
 
     def _on_cbf(self, m):
-        # x = 1.0 if the filter modified the command, y = smallest barrier value
-        self.row.update(cbf_active=m.vector.x, cbf_h_min=m.vector.y)
+        # x = 1.0 if the filter modified the command, y = obstacle barrier
+        # value (metres) -- never the stall barrier, see cbf_filter.py.
+        self.row.update(cbf_active=m.vector.x, cbf_h_obstacle=m.vector.y)
 
     def _write(self):
         self.row['t'] = (self.get_clock().now() - self.t0).nanoseconds / 1e9

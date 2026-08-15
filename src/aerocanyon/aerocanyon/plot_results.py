@@ -100,11 +100,11 @@ def intervention_figure(treat, out):
     df = _flying(treat)
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 6), sharex=True)
 
-    ax1.plot(df.t, df.cbf_h_min, color='#2b6cb0', lw=1.5,
-             label='min barrier value $h$')
+    ax1.plot(df.t, df.cbf_h_obstacle, color='#2b6cb0', lw=1.5,
+             label='obstacle barrier value $h$')
     ax1.axhline(0.0, color='#c1443c', ls='--', lw=1.5,
                 label='barrier boundary $h=0$')
-    ax1.fill_between(df.t, df.cbf_h_min.min(), 0.0, color='#c1443c', alpha=0.12)
+    ax1.fill_between(df.t, df.cbf_h_obstacle.min(), 0.0, color='#c1443c', alpha=0.12)
     ax1.set_ylabel('$h$ [m]')
     ax1.legend(loc='upper right')
     ax1.set_title('CBF safety filter activity during canyon transit')
@@ -121,7 +121,7 @@ def intervention_figure(treat, out):
     print(f'wrote {out}')
     pct = 100.0 * float(df.cbf_active.mean())
     print(f'filter active for {pct:.1f}% of the flight; '
-          f'closest approach to the barrier: h={df.cbf_h_min.min():.2f} m')
+          f'closest approach to a building: h={df.cbf_h_obstacle.min():.2f} m')
 
 
 def main():

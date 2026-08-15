@@ -7,8 +7,9 @@ intervention figure readable: every deviation from u_des is a barrier
 doing work.
 
 Barriers:
-  h1  obstacle    distance to the nearest building surface
-  h2  stall       alpha_stall - angle of attack
+  h1  obstacle    distance to the nearest building surface (metres)
+  h2  stall       alpha_stall - angle of attack (radians) -- fixed-wing
+                  only, see enable_stall below
   h3  slew        limit on how fast the commanded acceleration may change
 
 The obstacle barrier has relative degree 2 with respect to acceleration,
@@ -16,6 +17,21 @@ so it uses the high-order form
     grad(h).u >= -k1*h - k2*hdot
 The boxes make grad(h) piecewise constant, so the second-order geometry
 term vanishes exactly rather than being approximated away.
+
+enable_stall defaults to False: "stall" (loss of wing lift past a critical
+angle of attack) isn't a phenomenon a multicopter has -- there's no wing.
+It only applies while the vehicle is actually flying fixed-wing, i.e. when
+controller_node.ENABLE_VTOL_TRANSITION is True. Verified live with it on
+unconditionally: measured angle-of-attack sits near 90 degrees for the
+vast majority of ordinary multicopter flight (completely normal -- the
+body's "forward" axis has nothing to do with the resultant airspeed
+direction when thrust, not a wing, is providing lift), so h_stall
+(radians) was deeply negative almost continuously. filter() used to fold
+that straight into the same h_min as h_obstacle (metres) via a bare
+min() -- meters and radians combined with no unit reconciliation -- which
+is why "closest approach to the barrier" printed an identical, physically
+meaningless value across unrelated trials. h_obstacle and h_stall are
+reported separately now specifically so that mixing can't happen again.
 
 ponytail: SLSQP for a 3-variable QP -- measured at 2.9 ms, well inside the
 20 ms control period. Move to a dedicated QP solver only if the constraint
@@ -59,9 +75,10 @@ def angle_of_attack(vel_ned, wind_ned, q):
 
 class CBFFilter:
 
-    def __init__(self, params=None, dt=1.0 / CONTROL_HZ):
+    def __init__(self, params=None, dt=1.0 / CONTROL_HZ, enable_stall=False):
         self.p = params or CBFParams()
         self.dt = float(dt)
+        self.enable_stall = bool(enable_stall)
         self.last_safe = np.zeros(3)
         self.last_u = np.zeros(3)
         self._force_infeasible = False  # test hook only
@@ -101,9 +118,14 @@ class CBFFilter:
         return grad_h, -self.p.k_stall * h, h
 
     def filter(self, u_des, pos_ned, vel_ned, wind_ned, q):
-        """Return (u_safe, info). All accelerations are NED, m/s^2."""
+        """Return (u_safe, info). All accelerations are NED, m/s^2.
+
+        info['h_obstacle'] (metres) and info['h_stall'] (radians, None
+        unless enable_stall) are kept separate deliberately -- see the
+        module docstring for why combining them into one number is wrong.
+        """
         u_des = np.asarray(u_des, dtype=float)
-        info = {'active': False, 'h_min': np.inf, 'feasible': True}
+        info = {'active': False, 'h_obstacle': np.inf, 'h_stall': None, 'feasible': True}
 
         if not np.all(np.isfinite(u_des)):
             info['feasible'] = False
@@ -112,12 +134,13 @@ class CBFFilter:
         rows = []
         a_obs, b_obs, h_obs = self._obstacle_constraint(pos_ned, vel_ned)
         rows.append((a_obs, b_obs))
-        info['h_min'] = min(info['h_min'], h_obs)
+        info['h_obstacle'] = h_obs
 
-        a_stall, b_stall, h_stall = self._stall_constraint(vel_ned, wind_ned, q)
-        if np.linalg.norm(a_stall) > self.p.eps:
-            rows.append((a_stall, b_stall))
-            info['h_min'] = min(info['h_min'], h_stall)
+        if self.enable_stall:
+            a_stall, b_stall, h_stall = self._stall_constraint(vel_ned, wind_ned, q)
+            if np.linalg.norm(a_stall) > self.p.eps:
+                rows.append((a_stall, b_stall))
+                info['h_stall'] = h_stall
 
         # On the first call, don't apply slew limits since we don't know the
         # true previous acceleration state. Use large but finite bounds

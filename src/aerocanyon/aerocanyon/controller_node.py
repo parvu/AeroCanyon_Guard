@@ -105,7 +105,12 @@ class ControllerNode(Node):
         self.pos = np.zeros(3)
         self.vel = np.zeros(3)
 
-        self.cbf = CBFFilter()
+        # The CBF's stall barrier is a fixed-wing (loss-of-lift) concept --
+        # only meaningful while the vehicle is actually flying fixed-wing,
+        # i.e. tied to the same flag as the VTOL transition itself. See
+        # cbf_filter.py's module docstring for why leaving it on
+        # unconditionally corrupted the safety diagnostic.
+        self.cbf = CBFFilter(enable_stall=ENABLE_VTOL_TRANSITION)
         self.quat = np.array([1.0, 0.0, 0.0, 0.0])
         self.wind_truth = np.zeros(3)
         self.cbf_pub = self.create_publisher(
@@ -283,7 +288,9 @@ class ControllerNode(Node):
             diag = Vector3Stamped()
             diag.header.stamp = self.get_clock().now().to_msg()
             diag.vector.x = 1.0 if info['active'] else 0.0
-            diag.vector.y = float(np.clip(info['h_min'], -1e3, 1e3))
+            # Obstacle barrier only (metres) -- see cbf_filter.py for why
+            # this must never be combined with the stall barrier (radians).
+            diag.vector.y = float(np.clip(info['h_obstacle'], -1e3, 1e3))
             diag.vector.z = 0.0 if info['feasible'] else 1.0
             self.cbf_pub.publish(diag)
 
