@@ -1,0 +1,162 @@
+#!/bin/sh
+#
+# @name VTOL Tricopter
+#
+# @type VTOL Tiltrotor
+#
+# Tricopter VTOL in the style of the E-flite Convergence (PX4's real-hardware
+# airframe 13012, which has never shipped a simulation model): two tilting
+# front rotors plus one fixed vertical rear rotor. Derived from
+# 4020_gz_tiltrotor -- see Tools/simulation/gz/models/tricopter, which is the
+# stock quad tiltrotor model with one rear rotor removed and the other moved
+# to the centreline.
+#
+# Yaw in hover comes from DIFFERENTIAL TILT of the two front rotors
+# (CA_SV_TL*_CT = 1), not from rotor drag-torque differential: with a single
+# rear rotor its reaction torque is inherently unbalanced and has to be
+# trimmed continuously by the tilt servos. That is also how the real
+# Convergence flies.
+#
+
+. ${R}etc/init.d/rc.vtol_defaults
+
+PX4_SIMULATOR=${PX4_SIMULATOR:=gz}
+PX4_GZ_WORLD=${PX4_GZ_WORLD:=default}
+PX4_SIM_MODEL=${PX4_SIM_MODEL:=tricopter}
+
+param set-default SIM_GZ_EN 1 # Gazebo bridge
+
+param set-default MAV_TYPE 21
+
+param set-default CA_AIRFRAME 3
+
+# Geometry matches the model.sdf link poses, converted from Gazebo FLU
+# (x fwd, y left) to PX4 FRD (x fwd, y right): front pair at x=+0.35,
+# y=+-0.35; rear rotor on the centreline at x=-0.35, y=0.
+param set-default CA_ROTOR_COUNT 3
+# Rotor 0: front right, CCW, tilted by servo 1
+param set-default CA_ROTOR0_PX 0.35
+param set-default CA_ROTOR0_PY 0.35
+param set-default CA_ROTOR0_KM 0.05
+param set-default CA_ROTOR0_TILT 1
+# Rotor 1: front left, CW, tilted by servo 2
+param set-default CA_ROTOR1_PX 0.35
+param set-default CA_ROTOR1_PY -0.35
+param set-default CA_ROTOR1_KM -0.05
+param set-default CA_ROTOR1_TILT 2
+# Rotor 2: rear centre, CCW, fixed vertical (stopped in forward flight)
+param set-default CA_ROTOR2_PX -0.35
+param set-default CA_ROTOR2_PY 0.0
+param set-default CA_ROTOR2_KM 0.05
+param set-default CA_ROTOR2_TILT 0
+
+# Tilt servos travel -15..90 deg rather than the stock 0..90. The negative
+# end is what gives hover yaw authority in BOTH directions: at a vertical
+# hover tilt the allocator has to be able to tilt one nacelle back as well as
+# the other forward to trim the rear rotor's torque. The gz joint limits in
+# model.sdf were widened to match. Normalised tilt therefore maps as
+# 0 -> -15 deg, 1 -> +90 deg, which is what the VT_TILT_* values below encode.
+param set-default CA_SV_TL_COUNT 2
+param set-default CA_SV_TL0_MINA -15
+param set-default CA_SV_TL0_MAXA 90
+param set-default CA_SV_TL0_TD 0
+param set-default CA_SV_TL0_CT 1
+param set-default CA_SV_TL1_MINA -15
+param set-default CA_SV_TL1_MAXA 90
+param set-default CA_SV_TL1_TD 0
+param set-default CA_SV_TL1_CT 1
+
+param set-default CA_SV_CS0_TRQ_R -0.5
+param set-default CA_SV_CS0_TYPE 1
+param set-default CA_SV_CS1_TRQ_R 0.5
+param set-default CA_SV_CS1_TYPE 2
+param set-default CA_SV_CS2_TRQ_P 1
+param set-default CA_SV_CS2_TYPE 3
+param set-default CA_SV_CS_COUNT 3
+
+param set-default SIM_GZ_EC_FUNC1 101
+param set-default SIM_GZ_EC_FUNC2 102
+param set-default SIM_GZ_EC_FUNC3 103
+
+param set-default SIM_GZ_EC_MIN1 10
+param set-default SIM_GZ_EC_MIN2 10
+param set-default SIM_GZ_EC_MIN3 10
+
+param set-default SIM_GZ_EC_MAX1 1500
+param set-default SIM_GZ_EC_MAX2 1500
+param set-default SIM_GZ_EC_MAX3 1500
+
+param set-default SIM_GZ_SV_FUNC1 201
+param set-default SIM_GZ_SV_FUNC2 202
+param set-default SIM_GZ_SV_FUNC3 203
+param set-default SIM_GZ_SV_FUNC4 204
+param set-default SIM_GZ_SV_FUNC5 205
+
+# Must match CA_SV_TL0/TL1 above -- these are the same two tilt servos seen
+# from the simulator side (SIM_GZ_SV_* is 1-based, model.sdf's servo_N topics
+# are 0-based, so channel 4 is servo_3 and channel 5 is servo_4).
+param set-default SIM_GZ_SV_MAXA4 90
+param set-default SIM_GZ_SV_MINA4 -15
+param set-default SIM_GZ_SV_MAXA5 90
+param set-default SIM_GZ_SV_MINA5 -15
+
+param set-default NPFG_PERIOD 12
+param set-default FW_PR_FF 0.2
+param set-default FW_PR_P 0.9
+param set-default FW_PSP_OFF 2
+param set-default FW_P_LIM_MIN -15
+param set-default FW_RR_FF 0.1
+param set-default FW_RR_P 0.3
+param set-default FW_THR_TRIM 0.38
+param set-default FW_THR_MAX 0.6
+param set-default FW_THR_MIN 0.05
+param set-default FW_T_CLMB_MAX 8
+param set-default FW_T_SINK_MAX 2.7
+param set-default FW_T_SINK_MIN 2.2
+
+param set-default MC_AIRMODE 1
+# Yaw gains are DELIBERATELY far below the stock tiltrotor's (P 0.4 / I 0.1).
+# On a quad, yaw comes from rotor drag-torque differential, which responds as
+# fast as the props can change RPM. Here it comes from tilting two nacelles
+# with position servos -- a much lower-bandwidth actuator -- so the stock
+# gains drive an unstable oscillation: verified live at P=0.4, the vehicle
+# spun at +-8..15 rad/s with the sign flipping every cycle and flew 1050 m off
+# course. Authority was never the issue (the rear rotor's untrimmed torque is
+# ~0.84 Nm, needing only ~4 deg of differential tilt out of the +-15 available);
+# it is purely loop bandwidth. Capping the yaw-rate setpoint matters for the
+# same reason -- the stock 200 deg/s is a rate these servos cannot deliver.
+param set-default MC_YAWRATE_P 0.12
+param set-default MC_YAWRATE_I 0.02
+param set-default MC_YAWRATE_D 0.004
+param set-default MPC_MAN_Y_MAX 60
+param set-default MC_YAWRATE_MAX 60
+
+param set-default MPC_XY_VEL_P_ACC 3
+param set-default MPC_XY_VEL_I_ACC 4
+param set-default MPC_XY_VEL_D_ACC 0.1
+
+param set-default MIS_TAKEOFF_ALT 10
+
+param set-default VT_FWD_THRUST_EN 4
+param set-default VT_FWD_THRUST_SC 0.6
+param set-default VT_TYPE 1
+# Normalised against the -15..90 deg servo range above:
+#   MC    0.143 -> 0 deg   (rotors vertical in hover, with tilt room both ways)
+#   TRANS 0.571 -> 45 deg  (the partial-tilt accelerate phase)
+#   FW    1.0   -> 90 deg  (fully forward; the rear rotor stops)
+param set-default VT_TILT_MC 0.143
+param set-default VT_TILT_TRANS 0.571
+param set-default VT_TILT_FW 1.0
+
+# SITL: disable preflight checks that don't apply to simulation.
+# NOTE: do NOT disable SYS_HAS_MAG / SYS_HAS_BARO -- Gazebo simulates both
+# sensors via the Magnetometer/AirPressure world plugins, and the EKF needs
+# the simulated mag for yaw alignment ("no heading reference" otherwise).
+# SYS_HAS_NUM_ASPD is 1: the world file loads gz-sim-air-speed-system, so the
+# model's airspeed sensor actually publishes (see the aerocanyon repo's
+# worlds/_template.sdf).
+param set-default COM_ARM_WO_GPS 1
+param set-default SYS_HAS_NUM_ASPD 1
+param set-default CBRK_SUPPLY_CHK 894281
+param set-default COM_DISARM_LAND 0
+param set-default NAV_DLL_ACT 0

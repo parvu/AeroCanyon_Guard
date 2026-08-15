@@ -9,7 +9,7 @@ import numpy as np
 from . import canyon_geometry as cg
 from . import frames
 
-CRUISE_SPEED = 12.0  # m/s along the canyon; inside the tiltrotor's transition band
+CRUISE_SPEED = 12.0  # m/s along the canyon; inside the tricopter's transition band
 
 WAYPOINTS_NED = [
     frames.enu_to_ned(cg.CANYON_ENTRY),

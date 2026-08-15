@@ -19,7 +19,7 @@ from .fo_pinn import (STATE_KEYS, FractionalMemory, WindEstimator, total_loss)
 RHO = 1.225
 CD_A = 0.12  # drag area, m^2. Calibration knob -- see the note in the plan.
 
-# The tiltrotor's wing halves carry their own gz-sim-lift-drag-system
+# The tricopter's wing halves carry their own gz-sim-lift-drag-system
 # plugins in PX4-Autopilot's model.sdf (base_link, two wing-half
 # surfaces), generating a real aerodynamic LIFT force -- perpendicular to
 # the relative airflow -- that CD_A's isotropic drag model cannot
