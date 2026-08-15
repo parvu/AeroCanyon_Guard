@@ -12,3 +12,6 @@ __pycache__/
 # ROS logs
 .ros/
 trials/
+
+# superpowers:subagent-driven-development scratch workspace
+.superpowers/sdd/
