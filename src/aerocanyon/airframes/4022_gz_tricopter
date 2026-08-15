@@ -17,6 +17,19 @@
 # trimmed continuously by the tilt servos. That is also how the real
 # Convergence flies.
 #
+# SCALE IS DELIBERATELY NOT THE REAL AIRCRAFT'S. The real E-flite Convergence
+# is 0.962 kg / 0.762 m span / ~0.14 m^2 wing (specs recovered from the
+# ArduPilot SITL_Models RealFlight model, which is the only Convergence asset
+# that exists anywhere -- no Gazebo/gz model has ever shipped, in PX4's full
+# git history or elsewhere). This model keeps the 5.115 kg template-derived
+# scale instead, and only adopts the Convergence LAYOUT. Two reasons: the
+# rotor positions here (+-0.35 m track) already sit close to the real 0.762 m
+# span, and this project's entire calibration -- wind-field magnitudes, the
+# 12 m/s cruise, canyon dimensions, CBF margins, the trained wind estimator --
+# assumes a ~5 kg vehicle. A 0.96 kg foam airframe is thrown around far more
+# by the same wind field, which would change the experiment itself. Rescale
+# only alongside re-deriving all of that (and re-tuning the yaw loop below).
+#
 
 . ${R}etc/init.d/rc.vtol_defaults
 
