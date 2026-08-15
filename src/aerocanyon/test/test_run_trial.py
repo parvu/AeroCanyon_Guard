@@ -15,12 +15,15 @@ two pieces of non-trivial logic that can be verified without either:
 import subprocess
 
 import pytest
+import rclpy
 
 from gz.msgs10.boolean_pb2 import Boolean
 from gz.msgs10.pose_pb2 import Pose
+from px4_msgs.msg import VehicleLandDetected
 
 from aerocanyon import constants as C
-from aerocanyon.run_trial import SPAWN_XYZ, _reset_gazebo_model, _verify_px4_started
+from aerocanyon.run_trial import (SPAWN_XYZ, _LandWatcher, _reset_gazebo_model,
+                                  _verify_px4_started, _wait_for_landing)
 
 
 def test_reset_gazebo_model_teleports_the_right_entity_to_the_spawn_pose(monkeypatch):
@@ -65,3 +68,59 @@ def test_verify_px4_started_fails_loudly_when_px4_exited_immediately(monkeypatch
     proc.wait()
     with pytest.raises(SystemExit, match='PX4 exited immediately'):
         _verify_px4_started(proc, timeout_s=0)
+
+
+def test_land_watcher_ignores_the_landed_at_boot_default():
+    # Regression: vehicle_land_detected.landed is true by DEFAULT at boot
+    # (resting on the ground, motors off, before the vehicle has ever
+    # flown). Treating that as "landed" made _wait_for_landing return
+    # almost instantly every time -- verified live: nodes (including
+    # trial_logger) got killed ~1.4s after starting, before the vehicle
+    # had even armed, let alone flown the mission and produced any data.
+    rclpy.init(args=[])
+    try:
+        node = _LandWatcher()
+        node._on_land(VehicleLandDetected(landed=True))  # the boot-default reading
+        assert node.landed is False, (
+            'landed=True with no prior airborne reading must not count as '
+            'actually landed -- that is just the vehicle sitting on the ground')
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+
+
+def test_land_watcher_confirms_landed_after_a_real_airborne_to_landed_transition():
+    rclpy.init(args=[])
+    try:
+        node = _LandWatcher()
+        node._on_land(VehicleLandDetected(landed=False))  # took off
+        assert node.landed is False
+        node._on_land(VehicleLandDetected(landed=True))  # touched back down
+        assert node.landed is True
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+
+
+def test_wait_for_landing_times_out_without_a_real_px4_peer():
+    # No PX4 is running in this test, so vehicle_land_detected never
+    # arrives -- exercises the real production code path (no mocking)
+    # end to end and confirms it returns False rather than hanging.
+    landed = _wait_for_landing(timeout_s=1)
+    assert landed is False
+
+
+def test_wait_for_landing_returns_true_once_a_real_landing_is_observed(monkeypatch):
+    # controller_node -- not this function -- is what actually sends RTL
+    # now (once it measures having cleared the canyon exit), so this only
+    # needs to prove it detects a genuine airborne-then-landed transition
+    # and returns promptly rather than waiting out the full timeout.
+    class _FakeNode(_LandWatcher):
+        def __init__(self):
+            super().__init__()
+            self._on_land(VehicleLandDetected(landed=False))
+            self._on_land(VehicleLandDetected(landed=True))
+
+    monkeypatch.setattr('aerocanyon.run_trial._LandWatcher', _FakeNode)
+    landed = _wait_for_landing(timeout_s=30)
+    assert landed is True

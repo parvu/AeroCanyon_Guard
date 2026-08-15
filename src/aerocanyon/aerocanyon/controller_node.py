@@ -37,6 +37,25 @@ ENGAGE_RETRY_TICKS = 50  # retry the arm+offboard request once a second until it
 # verified-stable flight in this project's history has actually flown.
 ENABLE_VTOL_TRANSITION = False
 
+# How far past the canyon exit (measured position, not the open-loop
+# mission schedule) the vehicle must actually be before RTL is requested.
+RTL_CLEARANCE_M = 2.0
+
+# VEHICLE_CMD_NAV_RETURN_TO_LAUNCH does engage nav_state=AUTO_RTL (verified
+# live: vtol_vehicle_status stayed MC throughout, ruling out a repeat of
+# the VTOL-transition instability above), but in this SITL configuration
+# it does not actually navigate the vehicle back toward home -- verified
+# live over a full flight: local east kept increasing in the same
+# direction the whole time, all the way out to ~1900 m (versus the ~200 m
+# canyon), never turning back, right through PX4's own 60 m RTL_RETURN_ALT
+# climb. This looks like a home-position problem (COM_ARM_WO_GPS=1 may be
+# skipping normal home-position initialisation), not something a trigger
+# condition can fix, and not safe to leave running unattended while
+# unexplained. Disabled until root-caused; the vehicle instead keeps
+# flying the open-loop mission (hovering at the final target once
+# Mission.target() reports done) with no attempt at an autonomous return.
+ENABLE_RTL_ON_CLEARANCE = False
+
 
 class ControllerNode(Node):
 
@@ -63,6 +82,7 @@ class ControllerNode(Node):
         self.armed = False
         self.offboard_engaged = False
         self.vtol_transitioned = False
+        self.rtl_requested = False
         self.done_logged = False
         self.wind_est = np.zeros(3)
 
@@ -141,6 +161,14 @@ class ControllerNode(Node):
         self.mode_pub.publish(msg)
 
     def _tick(self):
+        if self.rtl_requested:
+            # Hand off entirely to PX4's own RTL/land logic. Continuing to
+            # publish an offboard setpoint stream here would fight it for
+            # control authority the moment nav_state leaves OFFBOARD --
+            # this node's job is done once it's asked to go home.
+            self.tick += 1
+            return
+
         self._publish_offboard_mode()
 
         engaged = self.armed and self.offboard_engaged
@@ -190,6 +218,24 @@ class ControllerNode(Node):
         if done and not self.done_logged:
             self.get_logger().info(f'mission complete at t={elapsed:.1f}s')
             self.done_logged = True
+
+        # self.pos[1] is local NED east -- since the vehicle spawns at
+        # CANYON_ENTRY (run_trial.SPAWN_XYZ), PX4's local origin sits
+        # there too (verified live), so self.pos[1] already reads as
+        # "east distance travelled from the entry" directly, and
+        # mission.distance is exactly that distance to the exit. Gated on
+        # measured position, not the open-loop mission schedule's `done`
+        # flag, so RTL only fires once the vehicle has actually cleared
+        # the canyon -- wind or CBF deviation could otherwise have it
+        # trigger while still between the buildings.
+        if (ENABLE_RTL_ON_CLEARANCE and engaged
+                and self.pos[1] >= self.mission.distance + RTL_CLEARANCE_M):
+            self._send_command(VehicleCommand.VEHICLE_CMD_NAV_RETURN_TO_LAUNCH)
+            self.rtl_requested = True
+            self.get_logger().info(
+                f'cleared canyon by {RTL_CLEARANCE_M}m -- requested RTL')
+            self.tick += 1
+            return
 
         sp = TrajectorySetpoint()
         sp.position = [float(v) for v in target]

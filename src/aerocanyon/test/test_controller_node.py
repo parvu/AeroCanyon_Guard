@@ -123,13 +123,14 @@ def test_treatment_mode_also_survives_the_tick_loop():
     assert len(sent) >= 1
 
 
-def _run_ticks_already_engaged(n, elapsed_at_start_s, vel=(0.0, 0.0, 0.0)):
+def _run_ticks_already_engaged(n, elapsed_at_start_s, vel=(0.0, 0.0, 0.0),
+                               pos=(0.0, 0.0, 0.0)):
     """Like _run_ticks, but fakes the vehicle as already armed + offboard
     (as if _on_status had already received confirmation) with the mission
-    clock already elapsed_at_start_s into the flight and a fixed measured
-    velocity, so tests can reach the post-hold cruise phase and control
-    the VTOL transition's speed gate without waiting on real wall-clock
-    time or real physics."""
+    clock already elapsed_at_start_s into the flight and fixed measured
+    velocity/position, so tests can reach the post-hold cruise phase and
+    control the VTOL transition's speed gate / RTL's position gate
+    without waiting on real wall-clock time or real physics."""
     rclpy.init(args=[])
     try:
         node = ControllerNode()
@@ -137,6 +138,7 @@ def _run_ticks_already_engaged(n, elapsed_at_start_s, vel=(0.0, 0.0, 0.0)):
         node.offboard_engaged = True
         node.start_time = node.get_clock().now() - Duration(seconds=elapsed_at_start_s)
         node.vel = np.array(vel, dtype=float)
+        node.pos = np.array(pos, dtype=float)
         sent = []
         real_send = node._send_command
 
@@ -208,6 +210,76 @@ def test_vtol_transition_fires_anyway_after_the_timeout_cap_even_at_zero_speed(m
     assert len(transitions) == 1, 'must transition anyway once the timeout cap is reached'
     _, param1, _ = transitions[0]
     assert param1 == float(VtolVehicleStatus.VEHICLE_VTOL_STATE_FW)
+
+
+def test_rtl_on_clearance_is_disabled_by_default():
+    # VEHICLE_CMD_NAV_RETURN_TO_LAUNCH does engage nav_state=AUTO_RTL, but
+    # verified live over a full flight that it does not actually navigate
+    # back toward home in this SITL configuration -- local east kept
+    # increasing in the same direction the whole time, all the way out to
+    # ~1900m (vs. the ~200m canyon), never turning back. Disabled until
+    # root-caused (see the ENABLE_RTL_ON_CLEARANCE comment). This test is
+    # the safety net: it must keep failing (loudly, in review) if someone
+    # flips the flag back on without first fixing that.
+    from aerocanyon.mission import Mission
+    distance = Mission().distance
+    sent = _run_ticks_already_engaged(
+        1, elapsed_at_start_s=30.0, pos=(0.0, distance + 100.0, 0.0))
+    rtl_cmds = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_NAV_RETURN_TO_LAUNCH]
+    assert rtl_cmds == [], (
+        'ENABLE_RTL_ON_CLEARANCE must stay False until RTL actually navigating '
+        'back to home (not just engaging AUTO_RTL) is verified live')
+
+
+def test_rtl_requested_once_position_clears_the_canyon_exit_by_the_margin(monkeypatch):
+    monkeypatch.setattr(controller_node, 'ENABLE_RTL_ON_CLEARANCE', True)
+    from aerocanyon.controller_node import RTL_CLEARANCE_M
+    from aerocanyon.mission import Mission
+    distance = Mission().distance
+    sent = _run_ticks_already_engaged(
+        1, elapsed_at_start_s=30.0, pos=(0.0, distance + RTL_CLEARANCE_M, 0.0))
+    rtl_cmds = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_NAV_RETURN_TO_LAUNCH]
+    assert len(rtl_cmds) == 1, 'must request RTL exactly once on clearing the canyon'
+
+
+def test_rtl_not_requested_before_clearing_the_canyon_by_the_margin(monkeypatch):
+    monkeypatch.setattr(controller_node, 'ENABLE_RTL_ON_CLEARANCE', True)
+    from aerocanyon.mission import Mission
+    distance = Mission().distance
+    # 1m short of the required clearance margin.
+    sent = _run_ticks_already_engaged(
+        5, elapsed_at_start_s=30.0, pos=(0.0, distance + 1.0, 0.0))
+    rtl_cmds = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_NAV_RETURN_TO_LAUNCH]
+    assert rtl_cmds == [], 'must not RTL until actually 2m clear of the canyon exit'
+
+
+def test_no_more_setpoints_published_once_rtl_is_requested(monkeypatch):
+    # Once RTL is requested, controller_node must stop publishing its own
+    # offboard setpoint stream -- continuing to stream would fight PX4's
+    # RTL/land logic for control authority the moment nav_state leaves
+    # OFFBOARD.
+    monkeypatch.setattr(controller_node, 'ENABLE_RTL_ON_CLEARANCE', True)
+    from aerocanyon.mission import Mission
+    distance = Mission().distance
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        node.armed = True
+        node.offboard_engaged = True
+        node.start_time = node.get_clock().now() - Duration(seconds=30.0)
+        node.pos = np.array([0.0, distance + 2.0, 0.0])
+        setpoints = []
+        real_publish = node.sp_pub.publish
+        node.sp_pub.publish = lambda msg: (setpoints.append(msg), real_publish(msg))[0]
+
+        node._tick()  # this tick requests RTL
+        node._tick()  # this tick must be a no-op past the early return
+        node._tick()
+
+        assert setpoints == [], 'must not publish TrajectorySetpoint after requesting RTL'
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':
