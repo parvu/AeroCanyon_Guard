@@ -18,9 +18,11 @@ def _flying(df):
 
 
 def lateral_deviation(df):
-    """RMS cross-track error. The mission runs along NED north, so the
-    east component IS the lateral deviation."""
-    return float(np.sqrt(np.mean(_flying(df).y ** 2)))
+    """RMS cross-track error. The mission runs along NED east (see
+    Mission.direction / canyon_geometry.BUILDINGS -- the corridor is laid
+    out along Gazebo ENU +x), so the north component IS the lateral
+    deviation, not east."""
+    return float(np.sqrt(np.mean(_flying(df).x ** 2)))
 
 
 def comparison_figure(base, treat, out):
@@ -28,17 +30,22 @@ def comparison_figure(base, treat, out):
                                    gridspec_kw={'width_ratios': [2, 1]})
 
     for b in cg.BUILDINGS:
-        # NED north = ENU x, NED east = ENU y.
+        # b.cx/b.cy are ENU east/north, which are numerically identical to
+        # NED east/north (frames.ned_to_enu only reorders components and
+        # negates up->down -- it never changes an east or north value).
+        # The trajectory below is plotted as (east, north) too, so this
+        # must match that axis order or the buildings render rotated 90
+        # degrees relative to the flight path they're supposed to bound.
         ax1.add_patch(plt.Rectangle(
             (b.cx - b.sx / 2, b.cy - b.sy / 2), b.sx, b.sy,
             color='0.75', zorder=0))
 
     bf, tf = _flying(base), _flying(treat)
-    ax1.plot(bf.x, bf.y, label='PX4 baseline', lw=2, color='#c1443c')
-    ax1.plot(tf.x, tf.y, label='FO-PINN + CBF', lw=2, color='#2b6cb0')
+    ax1.plot(bf.y, bf.x, label='PX4 baseline', lw=2, color='#c1443c')
+    ax1.plot(tf.y, tf.x, label='FO-PINN + CBF', lw=2, color='#2b6cb0')
     ax1.axhline(0.0, ls='--', c='0.4', lw=1, label='reference path')
-    ax1.set_xlabel('north [m]')
-    ax1.set_ylabel('east (lateral) [m]')
+    ax1.set_xlabel('east (along canyon) [m]')
+    ax1.set_ylabel('north (lateral) [m]')
     ax1.set_title('Canyon transit under urban wind')
     ax1.legend()
     ax1.set_aspect('equal')
