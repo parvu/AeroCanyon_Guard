@@ -37,6 +37,19 @@ CD_A = 0.12  # drag area, m^2. Calibration knob -- see the note in the plan.
 # controllable flight actually observed live all session. Scaled down to
 # 2x 0.3 m^2 (a calibration knob, like CD_A above) alongside correcting
 # MASS_KG (constants.py) to the vehicle's real simulated total mass.
+#
+# CARRIED OVER UNCHANGED to the tricopter, and re-verified rather than
+# assumed: converting that airframe removed a rotor but touched no
+# aerodynamic surface, so model.sdf still declares exactly the same four
+# LiftDrag plugins (2x 0.5 m^2 wing halves + 2 small control surfaces)
+# with the same cla/alpha_stall/cla_stall. Re-running the weight-fraction
+# check against live tricopter telemetry reproduces the tiltrotor's
+# numbers: mean wing lift 33% of vehicle weight (peak 117%, down from
+# 139% on the slightly heavier tiltrotor), and mean frame drag 4% of
+# weight. CD_A is arguably a touch high now -- the tricopter has one less
+# rotor and shorter booms -- but the difference is far inside this knob's
+# uncertainty, and trimming it without a real measurement would be false
+# precision.
 WING_AREA = 0.6           # m^2, both 0.3 m^2 wing-half surfaces combined
 WING_CLA = 4.752798721   # lift-curve slope, per radian
 WING_ALPHA_STALL = 0.3391428111  # rad (~19.4 deg)
@@ -199,7 +212,11 @@ def main():
     ap.add_argument('--out', default=str(
         pathlib.Path(__file__).resolve().parents[1] / 'data' / 'wind_estimator.pt'))
     ap.add_argument('--alpha', type=float, default=0.7)
-    ap.add_argument('--epochs', type=int, default=300)
+    # 300 (the old default) simply under-trains this data: swept on the six
+    # tricopter trial legs, held-out skill runs 0.650 at 300 epochs, 0.872 at
+    # 800, 0.896 at 1500, then falls back to 0.866/0.869 at 3000/5000 as it
+    # starts overfitting. 1500 is the top of that curve.
+    ap.add_argument('--epochs', type=int, default=1500)
     args = ap.parse_args()
     m = train(args.csvs, args.out, alpha=args.alpha, epochs=args.epochs)
     assert m['skill'] > 0.0, (
