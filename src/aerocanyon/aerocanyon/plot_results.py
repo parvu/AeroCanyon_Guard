@@ -12,9 +12,23 @@ from . import canyon_geometry as cg  # noqa: E402
 
 
 def _flying(df):
-    """Rows where the vehicle is actually airborne and tracking."""
+    """Rows where the vehicle is actually airborne, tracking, and still
+    within the canyon transit itself -- not the return leg.
+
+    The return leg (baseline's native RTL, which doesn't reliably
+    navigate home in this SITL config and can drift for hundreds of
+    metres; treatment's own wind-compensated fly-home) isn't part of the
+    baseline/treatment comparison being measured -- see controller_node's
+    RETURN_CLEARANCE_M and History.md. Cut the data off a little past the
+    canyon exit, in local NED east (== distance travelled from
+    CANYON_ENTRY, see building_plot_rect below), so a few hundred metres of
+    aimless post-transit wandering can't swamp the actual ~200 m transit
+    in these figures."""
+    exit_east = float(cg.CANYON_EXIT[0]) - float(cg.CANYON_ENTRY[0])
+    transit_margin_m = 5.0
     return df[(df[['qw', 'qx', 'qy', 'qz']].abs().sum(axis=1) > 0.5)
-              & (df.z < -2.0)]
+              & (df.z < -2.0)
+              & (df.y <= exit_east + transit_margin_m)]
 
 
 def lateral_deviation(df):
