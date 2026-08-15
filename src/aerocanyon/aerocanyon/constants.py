@@ -1,6 +1,12 @@
 """Single source of truth for physical and interface constants."""
 
-MASS_KG = 2.0
+# Sum of every link mass in PX4-Autopilot's tiltrotor model.sdf: base_link
+# (5 kg) + 2x motor (0.05 kg each) + 4x rotor (0.005 kg each); the four
+# control-surface links are ~0 kg. Previously hardcoded to 2.0, which
+# didn't match the actual simulated vehicle at all -- every physics
+# calculation that uses this constant (CBF feedforward, the PINN's thrust
+# reconstruction and physics residual) was off by more than half.
+MASS_KG = 5.12
 G = 9.81
 
 WORLD_NAME = 'urban_canyon'
