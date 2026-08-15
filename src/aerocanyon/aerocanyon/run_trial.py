@@ -2,9 +2,16 @@
 
 PX4 SITL is restarted between trials because its EKF and mission state do
 not reset cleanly in place, and a warm-started EKF would make the two runs
-incomparable. Gazebo itself, however, is NOT restarted between trials --
-it's started once, externally (see the repo README), and every PX4
-restart just reconnects gz_bridge to whatever's already in the world.
+incomparable. Gazebo is now restarted between trials too, by default:
+main() runs each leg (baseline, treatment) as its own separate OS process
+(see run_leg/`--mode`), each of which spawns a completely fresh `gz sim`
+world, boots PX4 against it, runs the leg, and tears both down again --
+no entity, physics state, or Python/rclpy state is shared between legs at
+all. This replaced an earlier design where Gazebo stayed up for the whole
+session and the vehicle entity was reset in place between legs (see
+_reset_gazebo_model/_recreate_gazebo_model below, kept for that use case
+-- e.g. the manual "watch a trial fly" flow in the README still starts
+Gazebo externally and reuses it).
 
 PX4 tries to (re-)spawn its model with allow_renaming:false on every
 start; if the previous trial's vehicle entity is still there, the create
@@ -43,6 +50,7 @@ import os
 import pathlib
 import signal
 import subprocess
+import sys
 import time
 
 import rclpy
@@ -72,6 +80,42 @@ WS = pathlib.Path(__file__).resolve().parents[3]
 # answer over in NED-land.
 SPAWN_XYZ = (float(cg.CANYON_ENTRY[0]), float(cg.CANYON_ENTRY[1]), 0.246)
 SPAWN_POSE = f'{SPAWN_XYZ[0]},{SPAWN_XYZ[1]},{SPAWN_XYZ[2]},0,0,0'
+
+WORLD_SDF = PX4_DIR / 'Tools/simulation/gz/worlds' / f'{C.WORLD_NAME}.sdf'
+
+
+def _gazebo_env():
+    """Equivalent of sourcing build/px4_sitl_default/rootfs/gz_env.sh --
+    needed because this process launches `gz sim` itself now (see
+    _spawn_gazebo) instead of relying on it already being started,
+    sourced, externally. Without GZ_SIM_RESOURCE_PATH, gz-sim can't
+    resolve model://tiltrotor and the vehicle silently never spawns."""
+    models = str(PX4_DIR / 'Tools/simulation/gz/models')
+    worlds = str(PX4_DIR / 'Tools/simulation/gz/worlds')
+    plugins = str(PX4_DIR / 'build/px4_sitl_default/src/modules/simulation/gz_plugins')
+    env = dict(os.environ)
+    env['GZ_SIM_RESOURCE_PATH'] = ':'.join(
+        p for p in (env.get('GZ_SIM_RESOURCE_PATH', ''), models, worlds) if p)
+    env['GZ_SIM_SYSTEM_PLUGIN_PATH'] = ':'.join(
+        p for p in (env.get('GZ_SIM_SYSTEM_PLUGIN_PATH', ''), plugins) if p)
+    return env
+
+
+def _spawn_gazebo(headless=True):
+    """Start a brand-new `gz sim` server for this leg -- see run_leg for
+    why: a genuinely fresh Gazebo process, not just an in-world entity
+    reset, gives PX4 nothing carried over from any previous leg at all
+    (no shared entity, no shared physics engine state)."""
+    flag = '' if headless else '-g'
+    proc = _spawn(f'gz sim -v 2 {WORLD_SDF} -r -s {flag}'.strip(),
+                  cwd=PX4_DIR, env=_gazebo_env())
+    time.sleep(5)  # matches the README's manual startup margin
+    if proc.poll() is not None:
+        raise SystemExit(
+            f'gz sim exited immediately (code {proc.returncode}) instead of '
+            'staying up -- check that ros-jazzy-ros-gz* is installed and '
+            '`gz` is on PATH (source /opt/ros/jazzy/setup.bash).')
+    return proc
 
 
 def _reset_gazebo_model():
@@ -272,6 +316,28 @@ def run_one(mode, trial, duration, headless=True, clean_respawn=False):
     return csv
 
 
+def run_leg(mode, trial, duration, headless=True):
+    """Own one leg's entire Gazebo+PX4 lifecycle: spawn a fresh `gz sim`,
+    run the leg, tear the world back down -- always, even if the leg
+    raises. This is what main() runs as a separate OS process per leg
+    (see `--mode`), so a leg's Gazebo/PX4/rclpy state can never leak into
+    the next one."""
+    gz = _spawn_gazebo(headless=headless)
+    try:
+        return run_one(mode, trial, duration, headless=headless)
+    finally:
+        _kill(gz)
+        # Verified live, twice: gz-sim can leave behind a companion
+        # process (`gz sim -g`, no world argument) that's already
+        # reparented to init by the time _kill's killpg runs, so it
+        # survives the process-group kill above. -x matches the pattern
+        # against the WHOLE command line only, so this can't collide with
+        # our own real `gz sim -v 2 <world> -r -s -g` GUI invocation.
+        subprocess.run(['pkill', '-xf', 'gz sim -g'],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(2)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--trial', default='compare')
@@ -288,9 +354,26 @@ def main():
                          'own wind-compensated offboard control instead')
     ap.add_argument('--gui', action='store_true',
                     help='show the Gazebo GUI (use this for the demo video)')
+    ap.add_argument('--mode', choices=('baseline', 'treatment'), default=None,
+                    help=argparse.SUPPRESS)  # internal: run_leg's own subprocess re-invokes with this set
     args = ap.parse_args()
+
+    if args.mode:
+        run_leg(args.mode, args.trial, args.duration, headless=not args.gui)
+        return
+
+    # Each leg gets its own OS process, and inside that its own fresh
+    # Gazebo+PX4 (see run_leg) -- no state at all carries from one leg
+    # into the next.
     for mode in ('baseline', 'treatment'):
-        run_one(mode, args.trial, args.duration, headless=not args.gui)
+        cmd = [sys.executable, '-m', 'aerocanyon.run_trial',
+               '--mode', mode, '--trial', args.trial,
+               '--duration', str(args.duration)]
+        if args.gui:
+            cmd.append('--gui')
+        result = subprocess.run(cmd, cwd=WS)
+        if result.returncode != 0:
+            raise SystemExit(f'{mode} leg failed (exit code {result.returncode})')
     print('both trials complete; now run plot_results')
 
 

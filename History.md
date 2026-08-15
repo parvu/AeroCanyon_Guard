@@ -135,6 +135,48 @@ bugs before it worked at all:
   that estimate during the return leg too, since getting home safely
   isn't part of the baseline/treatment comparison being scienced.
 
+**New lead, not yet chased down:** flying manually from QGroundControl
+(arm, climb, cruise, `ORBIT`, then trigger `AUTO_RTL` from QGC itself) --
+RTL worked correctly. `nav_state` went `AUTO_RTL` -> `AUTO_LAND`, the
+vehicle flew back toward the spawn point and landed cleanly and slowly
+(~105 s descent, roll pinned near 0° the whole way, a real
+airborne-to-landed transition confirmed by `vehicle_land_detected`).
+That's the opposite of the `controller_node`-triggered failure above.
+The concrete difference between the two: `controller_node` skips PX4's
+own takeoff/mission sequencing and jumps straight into OFFBOARD mode,
+where QGC's flight went through PX4's normal arm/manual-climb/mission
+flow first. If PX4's home-position latching depends on passing through
+one of those normal modes at least once, that would explain both
+results at once -- worth testing directly (e.g. briefly holding
+`AUTO_TAKEOFF` before switching to OFFBOARD) before writing off native
+RTL as fundamentally broken in this SITL configuration.
+
+### Split-process trial runner: why each leg gets its own Gazebo
+
+`main()` no longer runs both legs' `run_one()` calls in the same Python
+process against one long-lived, externally-started Gazebo. Each leg
+(`run_leg`, invoked as `run_trial --mode <mode>`) now spawns a
+brand-new `gz sim` server, runs its leg against it, and tears both
+Gazebo and PX4 back down before the next leg's *separate OS process*
+even starts. Motivated by the spawn-time flip above: a genuinely fresh
+Gazebo process shares nothing with a previous leg -- no entity, no
+physics engine state, no Python/rclpy state either, unlike the
+in-place entity reset this replaced as the default (`_reset_gazebo_model`,
+still used by the manual/external-Gazebo flow in the README). Whether
+this actually reduces the flip rate hasn't been verified live over
+enough runs yet to say -- it's a reasonable additional isolation
+guarantee regardless, since a leg's Gazebo/PX4 can no longer affect the
+next leg's boot at the OS-process level, not just at the entity level.
+
+One thing this surfaced immediately: `gz sim ... -s` occasionally
+leaves behind an already-orphaned companion process (`gz sim -g`, no
+world argument, reparented to init) that escapes the normal
+process-group kill on the main server -- observed live, twice.
+`run_leg`'s teardown now also sweeps for that exact command line
+(`pkill -xf 'gz sim -g'`, exact-match so it can't collide with a real
+`-g` GUI invocation) so a stray Gazebo process can never survive into
+the next leg's supposedly-fresh one.
+
 ### Intermittent spawn-time attitude flip (unresolved)
 
 Live testing occasionally (roughly 1 run in 3-4) shows `vehicle_attitude`
