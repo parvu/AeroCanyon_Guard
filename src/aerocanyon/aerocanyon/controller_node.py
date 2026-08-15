@@ -11,7 +11,8 @@ import rclpy
 from geometry_msgs.msg import Vector3Stamped
 from px4_msgs.msg import (OffboardControlMode, TrajectorySetpoint,
                           VehicleAttitude, VehicleCommand,
-                          VehicleLocalPosition, VehicleStatus)
+                          VehicleLocalPosition, VehicleStatus,
+                          VtolVehicleStatus)
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 
@@ -48,6 +49,7 @@ class ControllerNode(Node):
         self.start_time = None
         self.armed = False
         self.offboard_engaged = False
+        self.vtol_transitioned = False
         self.done_logged = False
         self.wind_est = np.zeros(3)
 
@@ -149,6 +151,21 @@ class ControllerNode(Node):
         elapsed = 0.0
         if self.start_time is not None:
             elapsed = (self.get_clock().now() - self.start_time).nanoseconds / 1e9
+
+        if engaged and not self.vtol_transitioned and elapsed >= self.mission.hold_s:
+            # The hold phase (elapsed < hold_s, target pinned at
+            # CANYON_ENTRY) is the vertical climb to altitude -- takeoff.
+            # Once the mission starts moving the target forward, switch
+            # the airframe out of multicopter hover and into fixed-wing
+            # cruise. Gated on elapsed rather than measured altitude so
+            # the transition happens at the same mission time in both
+            # trials regardless of how wind affects the actual climb --
+            # matching every other schedule in Mission, which is a pure
+            # function of time, not of feedback.
+            self._send_command(VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION,
+                               float(VtolVehicleStatus.VEHICLE_VTOL_STATE_FW))
+            self.vtol_transitioned = True
+            self.get_logger().info('requested VTOL transition to fixed-wing')
 
         target, done = self.mission.target(elapsed)
         if done and not self.done_logged:

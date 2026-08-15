@@ -11,11 +11,12 @@ assert the vehicle_command sequence actually gets sent.
 """
 import numpy as np
 import rclpy
+from rclpy.duration import Duration
 
 from aerocanyon.controller_node import (ENGAGE_RETRY_TICKS,
                                         SETPOINTS_BEFORE_OFFBOARD,
                                         ControllerNode)
-from px4_msgs.msg import VehicleCommand
+from px4_msgs.msg import VehicleCommand, VtolVehicleStatus
 
 
 def _run_ticks(mode, n):
@@ -121,6 +122,49 @@ def test_treatment_mode_also_survives_the_tick_loop():
     assert len(sent) >= 1
 
 
+def _run_ticks_already_engaged(n, elapsed_at_start_s):
+    """Like _run_ticks, but fakes the vehicle as already armed + offboard
+    (as if _on_status had already received confirmation) with the mission
+    clock already elapsed_at_start_s into the flight, so tests can reach
+    the post-hold cruise phase without waiting on real wall-clock time."""
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        node.armed = True
+        node.offboard_engaged = True
+        node.start_time = node.get_clock().now() - Duration(seconds=elapsed_at_start_s)
+        sent = []
+        real_send = node._send_command
+
+        def spy_send(command, param1=0.0, param2=0.0):
+            sent.append((command, param1, param2))
+            real_send(command, param1, param2)
+
+        node._send_command = spy_send
+        for _ in range(n):
+            node._tick()
+        node.destroy_node()
+        return sent
+    finally:
+        rclpy.shutdown()
+
+
+def test_requests_vtol_transition_to_fixed_wing_after_the_hold_phase():
+    # elapsed starts just before hold_s (3.0s default): the transition
+    # must not fire during the vertical-climb/hold phase...
+    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=2.9)
+    transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
+    assert transitions == [], 'must not transition to fixed-wing before the hold phase ends'
+
+
+def test_vtol_transition_fires_once_cruise_starts():
+    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=3.1)
+    transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
+    assert len(transitions) == 1, 'must request the VTOL transition exactly once'
+    _, param1, _ = transitions[0]
+    assert param1 == float(VtolVehicleStatus.VEHICLE_VTOL_STATE_FW)
+
+
 if __name__ == '__main__':
     test_tick_loop_survives_past_first_tick()
     test_requests_offboard_mode_and_arm_after_setpoint_stream()
@@ -128,4 +172,6 @@ if __name__ == '__main__':
     test_retries_arm_request_until_engaged()
     test_yaw_points_down_the_canyons_actual_travel_direction()
     test_treatment_mode_also_survives_the_tick_loop()
+    test_requests_vtol_transition_to_fixed_wing_after_the_hold_phase()
+    test_vtol_transition_fires_once_cruise_starts()
     print('ok')
