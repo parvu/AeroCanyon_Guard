@@ -277,7 +277,7 @@ def _kill(proc):
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
 
 
-def run_one(mode, trial, duration, clean_respawn=False):
+def run_one(mode, trial, duration, clean_respawn=False, seed=0):
     if clean_respawn:
         _recreate_gazebo_model()
     else:
@@ -310,7 +310,7 @@ def run_one(mode, trial, duration, clean_respawn=False):
     launch = (f'bash -lc "source /opt/ros/jazzy/setup.bash && '
               f'source {WS}/install/setup.bash && '
               f'ros2 launch aerocanyon canyon_sim.launch.py '
-              f'mode:={mode} trial:={trial}"')
+              f'mode:={mode} trial:={trial} seed:={seed}"')
     nodes = _spawn(launch, cwd=WS)
 
     # Both modes hand off to PX4's own AUTO_LAND, in place, once
@@ -334,7 +334,7 @@ def run_one(mode, trial, duration, clean_respawn=False):
     return csv
 
 
-def run_leg(mode, trial, duration):
+def run_leg(mode, trial, duration, seed=0):
     """Own one leg's entire Gazebo+PX4 lifecycle: spawn a fresh `gz sim`,
     run the leg, tear the world back down -- always, even if the leg
     raises. This is what main() runs as a separate OS process per leg
@@ -342,7 +342,7 @@ def run_leg(mode, trial, duration):
     the next one."""
     gz = _spawn_gazebo()
     try:
-        return run_one(mode, trial, duration)
+        return run_one(mode, trial, duration, seed=seed)
     finally:
         _kill(gz)
         # Belt-and-suspenders: verified live that `gz sim ... -g` (the
@@ -370,12 +370,15 @@ def main():
                          'dynamics have taken 60-90s live), and the '
                          'AUTO_LAND descent itself (~100s observed live, '
                          'manually, from ~75m), with margin')
+    ap.add_argument('--seed', type=int, default=0,
+                    help='Dryden gust RNG seed -- vary this across trials '
+                         'for wind diversity (e.g. when building a training set)')
     ap.add_argument('--mode', choices=('baseline', 'treatment'), default=None,
                     help=argparse.SUPPRESS)  # internal: run_leg's own subprocess re-invokes with this set
     args = ap.parse_args()
 
     if args.mode:
-        run_leg(args.mode, args.trial, args.duration)
+        run_leg(args.mode, args.trial, args.duration, seed=args.seed)
         return
 
     # Each leg gets its own OS process, and inside that its own fresh
@@ -384,7 +387,7 @@ def main():
     for mode in ('baseline', 'treatment'):
         cmd = [sys.executable, '-m', 'aerocanyon.run_trial',
                '--mode', mode, '--trial', args.trial,
-               '--duration', str(args.duration)]
+               '--duration', str(args.duration), '--seed', str(args.seed)]
         result = subprocess.run(cmd, cwd=WS)
         if result.returncode != 0:
             raise SystemExit(f'{mode} leg failed (exit code {result.returncode})')

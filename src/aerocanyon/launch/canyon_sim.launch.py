@@ -6,18 +6,24 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
     mode = LaunchConfiguration('mode')
     trial = LaunchConfiguration('trial')
+    seed = LaunchConfiguration('seed')
     return LaunchDescription([
         DeclareLaunchArgument('mode', default_value='baseline',
                               description='baseline or treatment'),
         DeclareLaunchArgument('trial', default_value='trial',
                               description='CSV output basename'),
+        DeclareLaunchArgument('seed', default_value='0',
+                              description='Dryden gust RNG seed -- vary this '
+                                          'across trials for wind diversity'),
         Node(package='aerocanyon', executable='wind_field_node',
-             name='wind_field_node', output='screen'),
+             name='wind_field_node', output='screen',
+             parameters=[{'seed': ParameterValue(seed, value_type=int)}]),
         Node(package='aerocanyon', executable='fo_pinn_node',
              name='fo_pinn_node', output='screen',
              parameters=[{'enabled': mode}]),

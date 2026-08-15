@@ -25,18 +25,55 @@ from .mission import Mission
 SETPOINTS_BEFORE_OFFBOARD = 20  # PX4 needs an existing stream to accept the mode
 ENGAGE_RETRY_TICKS = 50  # retry the arm+offboard request once a second until it sticks
 
-# Requesting DO_VTOL_TRANSITION, even gated on measured forward speed
-# reaching 80% of cruise, produced a violent, self-reinforcing pitch
-# oscillation in live testing: a sudden climb (vz jumping to +8 m/s),
-# then a stall, then a drop down to ~2 m above the ground before
-# partially recovering. This is a real PX4 VTOL attitude/airspeed-control
-# tuning problem (transition ramp rate, FW pitch/airspeed gains), not a
-# logic bug fixable by adjusting the trigger condition -- it needs
-# careful iterative tuning against live telemetry, not a blind parameter
-# guess. Disabled until that tuning happens; the vehicle instead flies
+# Tried again this session, live, twice, with a real fix attempt each
+# time -- still disabled. What changed and what was learned:
+#
+# 1. Root-caused the original crash to PX4's own front-transition logic
+#    (vtol_type.cpp isFrontTransitionCompletedBase) falling back to a
+#    BLIND open-loop timer (VT_F_TR_OL_TM, 6s) whenever no airspeed
+#    feedback is available, then ramming the rest of the tilt to
+#    horizontal and cutting the rear hover motors in another 0.5s
+#    (VT_TRANS_P2_DUR) regardless of the vehicle's actual state.
+# 2. Tried enabling SYS_HAS_NUM_ASPD so PX4 could use real closed-loop
+#    airspeed gating instead. model.sdf does declare an airspeed_link,
+#    but nothing actually publishes on the Gazebo topic PX4's bridge
+#    subscribes to in this build -- verified live, PX4's own console
+#    logged "Preflight Fail: Airspeed invalid" and the vehicle never
+#    armed at all (max altitude 12.5cm over an 82s run). Reverted; the
+#    airspeed sensor isn't functional in this SITL setup, and making it
+#    so is a separate, unstarted Gazebo-plugin task.
+# 3. Fell back to PX4's blind open-loop timer, but added a
+#    positive-climb-rate precondition here (on top of the existing speed
+#    gate) before even requesting the transition, and set
+#    VT_TILT_TRANS=0.5 (45 degrees) in the PX4-Autopilot airframe file --
+#    the requested "gain speed and lift at a partial tilt, then once
+#    climbing, finish the tilt" sequence, as closely as PX4's
+#    architecture allows without a working airspeed sensor. Live-tested:
+#    the vehicle no longer dives into the ground, but it never reaches
+#    stable fixed-wing flight either -- once PX4's own P1/P2 state
+#    machine takes over, it pitches wildly (0 to 88 degrees and back)
+#    for the rest of the flight, horizontal speed collapses to
+#    ~0.3-0.5 m/s, and it just drifts upward instead of flying the
+#    canyon. Different failure shape, same underlying cause: the P1->P2
+#    handoff (finish the tilt, cut the rear motors) is still a blind
+#    clock, not a check on whether the wing is actually carrying the
+#    vehicle's weight yet.
+#
+# Both of the levers actually reachable from this node (when to start,
+# how far to tilt) are exhausted without a working airspeed signal. A
+# real fix needs either (a) wiring the Gazebo airspeed sensor plugin so
+# PX4's own closed-loop transition logic has real data to gate on, or
+# (b) this node driving the tilt/throttle directly via
+# /fmu/in/actuator_servos + /fmu/in/actuator_motors (OffboardControlMode
+# .direct_actuator) instead of PX4's automatic state machine -- which
+# means writing this project's own attitude stabilization for the
+# transition phase, since direct_actuator bypasses PX4's rate/attitude
+# controllers too. Both are real, separate pieces of work, not a
+# trigger-condition or param tweak. Disabled again; the vehicle flies
 # the whole transit in stable multicopter mode, which is how every
 # verified-stable flight in this project's history has actually flown.
 ENABLE_VTOL_TRANSITION = False
+CLIMB_RATE_TRIGGER_MS = 0.3  # m/s upward (NED vz <= -this) required to request the transition
 
 # How far past the canyon exit the vehicle must actually be before it
 # lands, measured from the far edge of the LAST tower row (tower_2_n/
@@ -235,12 +272,15 @@ class ControllerNode(Node):
             # generous elapsed-time cap so a persistently low reading
             # (e.g. stuck telemetry) can't withhold the transition forever.
             speed = float(np.linalg.norm(self.vel[:2]))
-            if speed >= 0.8 * self.mission.speed or elapsed >= self.mission.hold_s + 15.0:
+            climbing = self.vel[2] <= -CLIMB_RATE_TRIGGER_MS
+            if ((speed >= 0.8 * self.mission.speed and climbing)
+                    or elapsed >= self.mission.hold_s + 15.0):
                 self._send_command(VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION,
                                    float(VtolVehicleStatus.VEHICLE_VTOL_STATE_FW))
                 self.vtol_transitioned = True
                 self.get_logger().info(
-                    f'requested VTOL transition to fixed-wing at speed={speed:.1f} m/s')
+                    f'requested VTOL transition to fixed-wing at '
+                    f'speed={speed:.1f} m/s vz={self.vel[2]:.1f} m/s')
 
         target, done = self.mission.target(elapsed)
         if done and not self.done_logged:

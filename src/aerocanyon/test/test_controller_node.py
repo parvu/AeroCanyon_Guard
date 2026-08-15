@@ -156,48 +156,65 @@ def _run_ticks_already_engaged(n, elapsed_at_start_s, vel=(0.0, 0.0, 0.0),
 
 
 def test_vtol_transition_is_disabled_by_default():
-    # Live testing found that requesting DO_VTOL_TRANSITION -- even gated
-    # on measured forward speed reaching cruise -- caused a violent pitch
-    # oscillation that dropped the vehicle to within ~2 m of the ground
-    # before partially recovering. This is a real PX4 attitude/airspeed
-    # tuning problem, not something a trigger-condition tweak fixes, so
-    # the feature is disabled until that tuning happens. This test is the
-    # safety net: it must keep failing (loudly, in review) if someone
-    # flips ENABLE_VTOL_TRANSITION back on without re-verifying stability.
-    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=20.0, vel=(12.0, 0.0, 0.0))
+    # Tried again this session with a real fix attempt (see
+    # controller_node's module docstring / ENABLE_VTOL_TRANSITION
+    # comment for the full account): a positive-climb-rate precondition
+    # plus VT_TILT_TRANS=0.5 (45 degrees). Live-verified twice: the
+    # vehicle no longer dives into the ground, but it never reaches
+    # stable fixed-wing flight either -- PX4's own P1->P2 handoff is
+    # still a blind clock (no functional airspeed sensor in this SITL
+    # build), and once it fires the vehicle pitches wildly (0-88 degrees)
+    # for the rest of the flight instead of settling into cruise. This
+    # test is the safety net: it must keep failing (loudly, in review) if
+    # someone flips ENABLE_VTOL_TRANSITION back on without first fixing
+    # the airspeed sensor or replacing PX4's transition state machine
+    # with direct actuator control from this node.
+    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=20.0, vel=(12.0, 0.0, -1.0))
     transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
     assert transitions == [], (
-        'ENABLE_VTOL_TRANSITION must stay False until the pitch instability '
-        'seen in live testing (climb to a stall, drop to ~2m altitude) is '
-        'actually fixed by tuning PX4 VTOL transition/attitude parameters')
+        'ENABLE_VTOL_TRANSITION must stay False until either the Gazebo '
+        'airspeed sensor is made functional or PX4\'s transition state '
+        'machine is replaced with direct actuator control from this node')
 
 
 def test_requests_vtol_transition_to_fixed_wing_after_the_hold_phase(monkeypatch):
     monkeypatch.setattr(controller_node, 'ENABLE_VTOL_TRANSITION', True)
     # elapsed starts just before hold_s (3.0s default): the transition
     # must not fire during the vertical-climb/hold phase...
-    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=2.9, vel=(12.0, 0.0, 0.0))
+    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=2.9, vel=(12.0, 0.0, -1.0))
     transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
     assert transitions == [], 'must not transition to fixed-wing before the hold phase ends'
 
 
-def test_vtol_transition_fires_once_cruise_speed_is_reached(monkeypatch):
+def test_vtol_transition_fires_once_cruise_speed_and_climb_are_reached(monkeypatch):
     monkeypatch.setattr(controller_node, 'ENABLE_VTOL_TRANSITION', True)
     # Regression: transitioning at elapsed == hold_s alone (with no speed
     # check) stalled and crashed the vehicle every time, because that
     # instant is exactly when the target has JUST started moving off the
     # pinned hold point -- horizontal speed is still ~0 then, and a VTOL
-    # has no lift in fixed-wing mode without forward airspeed.
-    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=3.1, vel=(12.0, 0.0, 0.0))
+    # has no lift in fixed-wing mode without forward airspeed. vz=-1.0
+    # (NED, climbing) satisfies the added climb-rate precondition.
+    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=3.1, vel=(12.0, 0.0, -1.0))
     transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
     assert len(transitions) == 1, 'must request the VTOL transition exactly once'
 
 
 def test_vtol_transition_does_not_fire_at_low_speed_even_after_the_hold_phase(monkeypatch):
     monkeypatch.setattr(controller_node, 'ENABLE_VTOL_TRANSITION', True)
-    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=3.1, vel=(0.5, 0.0, 0.0))
+    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=3.1, vel=(0.5, 0.0, -1.0))
     transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
     assert transitions == [], 'must wait for real forward speed, not just elapsed time'
+
+
+def test_vtol_transition_does_not_fire_without_positive_climb_rate(monkeypatch):
+    monkeypatch.setattr(controller_node, 'ENABLE_VTOL_TRANSITION', True)
+    # Cruise speed alone isn't enough: a level, non-climbing pass at
+    # cruise speed must not trigger the transition either -- this is the
+    # explicitly requested "gain speed, then transition once climbing"
+    # sequence, not a speed-only gate.
+    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=3.1, vel=(12.0, 0.0, 0.0))
+    transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
+    assert transitions == [], 'must wait for a positive climb rate, not just horizontal speed'
 
 
 def test_vtol_transition_fires_anyway_after_the_timeout_cap_even_at_zero_speed(monkeypatch):
