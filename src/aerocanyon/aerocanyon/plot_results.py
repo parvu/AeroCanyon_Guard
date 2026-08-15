@@ -13,18 +13,21 @@ from . import canyon_geometry as cg  # noqa: E402
 
 def _flying(df):
     """Rows where the vehicle is actually airborne, tracking, and still
-    within the canyon transit itself -- not the return leg.
+    within the canyon transit itself -- not the landing.
 
-    The return leg (baseline's native RTL, which doesn't reliably
-    navigate home in this SITL config and can drift for hundreds of
-    metres; treatment's own wind-compensated fly-home) isn't part of the
-    baseline/treatment comparison being measured -- see controller_node's
-    RETURN_CLEARANCE_M and History.md. Cut the data off a little past the
-    canyon exit, in local NED east (== distance travelled from
-    CANYON_ENTRY, see building_plot_rect below), so a few hundred metres of
-    aimless post-transit wandering can't swamp the actual ~200 m transit
-    in these figures."""
-    exit_east = float(cg.CANYON_EXIT[0]) - float(cg.CANYON_ENTRY[0])
+    controller_node requests AUTO_LAND as soon as the vehicle clears the
+    LAST TOWER ROW (not the mission's own, much-further-out exit
+    waypoint), and that hands-off, largely wind-uncompensated descent
+    isn't part of the baseline/treatment comparison being measured -- see
+    controller_node.LAND_TRIGGER_LOCAL_M and History.md. Cut the data off
+    a little past the last tower row, in local NED east (== distance
+    travelled from CANYON_ENTRY, see building_plot_rect below), matching
+    that same trigger point -- using the old, further-out mission-exit
+    cutoff here let tens of metres of post-landing-command AUTO_LAND
+    drift back into the RMS figure, since landing now happens well before
+    the vehicle ever reaches that point."""
+    last_tower_edge = max(b.cx + b.sx / 2.0 for b in cg.BUILDINGS if b.cx > 0)
+    exit_east = last_tower_edge - float(cg.CANYON_ENTRY[0])
     transit_margin_m = 5.0
     return df[(df[['qw', 'qx', 'qy', 'qz']].abs().sum(axis=1) > 0.5)
               & (df.z < -2.0)

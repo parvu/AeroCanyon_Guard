@@ -241,8 +241,8 @@ def _run_land_ticks(n, pos, mode='baseline'):
         rclpy.shutdown()
 
 
-def test_lands_in_place_once_position_clears_the_canyon_exit_by_the_margin():
-    # Both modes land where they are once clear of the canyon -- see
+def test_lands_in_place_once_position_clears_the_last_tower_row_by_the_margin():
+    # Both modes land where they are once clear of the towers -- see
     # LAND_CLEARANCE_M's comment for why flying anywhere first (native
     # RTL, or an earlier custom fly-home-and-land design) is no longer
     # needed now that each leg gets its own fresh Gazebo/PX4 process --
@@ -251,25 +251,28 @@ def test_lands_in_place_once_position_clears_the_canyon_exit_by_the_margin():
     # heading correctly, but its own disarm logic was verified live to be
     # unsafe (a rejected disarm-while-airborne request could leave the
     # vehicle with no control input at all, mid-air).
-    from aerocanyon.mission import Mission
-    distance = Mission().distance
+    #
+    # Triggered on clearing the LAST TOWER ROW's edge (LAND_TRIGGER_LOCAL_M),
+    # not the mission's own exit waypoint -- CANYON_EXIT sits 45m further
+    # out for stable transit dynamics, not as a landing cue, and landing
+    # that much later would mean more time drifting under wind before the
+    # vehicle is actually on the ground.
     for mode in ('baseline', 'treatment'):
         sent, setpoints, land_requested = _run_land_ticks(
-            2, pos=(0.0, distance + controller_node.LAND_CLEARANCE_M, 0.0), mode=mode)
+            2, pos=(0.0, controller_node.LAND_TRIGGER_LOCAL_M, 0.0), mode=mode)
         land_cmds = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_NAV_LAND]
-        assert land_requested, f'{mode}: must request landing on clearing the canyon'
+        assert land_requested, f'{mode}: must request landing on clearing the tower row'
         assert len(land_cmds) == 1, f'{mode}: must request landing exactly once'
         assert setpoints == [], (
             f'{mode}: must stop publishing its own setpoint stream once handed off '
             'to AUTO_LAND -- continuing would fight PX4 for control authority')
 
 
-def test_does_not_land_before_clearing_the_canyon_by_the_margin():
-    from aerocanyon.mission import Mission
-    distance = Mission().distance
+def test_does_not_land_before_clearing_the_last_tower_row_by_the_margin():
     # 1m short of the required clearance margin.
-    _, _, land_requested = _run_land_ticks(5, pos=(0.0, distance + 1.0, 0.0))
-    assert not land_requested, 'must not land until actually 2m clear of the canyon exit'
+    _, _, land_requested = _run_land_ticks(
+        5, pos=(0.0, controller_node.LAND_TRIGGER_LOCAL_M - 1.0, 0.0))
+    assert not land_requested, 'must not land until actually 2m clear of the last tower row'
 
 
 if __name__ == '__main__':

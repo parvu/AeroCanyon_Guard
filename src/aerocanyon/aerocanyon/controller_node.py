@@ -16,6 +16,7 @@ from px4_msgs.msg import (OffboardControlMode, TrajectorySetpoint,
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 
+from . import canyon_geometry as cg
 from . import constants as C
 from .cbf_filter import CBFFilter
 from .constants import MASS_KG
@@ -37,9 +38,16 @@ ENGAGE_RETRY_TICKS = 50  # retry the arm+offboard request once a second until it
 # verified-stable flight in this project's history has actually flown.
 ENABLE_VTOL_TRANSITION = False
 
-# How far past the canyon exit (measured position, not the open-loop
-# mission schedule) the vehicle must actually be before it lands.
+# How far past the canyon exit the vehicle must actually be before it
+# lands, measured from the far edge of the LAST tower row (tower_2_n/
+# tower_2_s), not from the mission's own exit waypoint (CANYON_EXIT is
+# set generously past the towers -- 45m of margin -- for stable transit
+# dynamics, not as a landing cue). local NED east = distance from
+# CANYON_ENTRY (== the spawn point, verified live), so this is the last
+# tower row's world-ENU edge shifted into that same local frame.
 LAND_CLEARANCE_M = 2.0
+_LAST_TOWER_EDGE_ENU_X = max(b.cx + b.sx / 2.0 for b in cg.BUILDINGS if b.cx > 0)
+LAND_TRIGGER_LOCAL_M = _LAST_TOWER_EDGE_ENU_X - float(cg.CANYON_ENTRY[0]) + LAND_CLEARANCE_M
 
 # Earlier designs tried flying the vehicle all the way back to the spawn
 # point before landing via native RTL (VEHICLE_CMD_NAV_RETURN_TO_LAUNCH:
@@ -243,16 +251,17 @@ class ControllerNode(Node):
         # CANYON_ENTRY (run_trial.SPAWN_XYZ), PX4's local origin sits
         # there too (verified live), so self.pos[1] already reads as
         # "east distance travelled from the entry" directly, and
-        # mission.distance is exactly that distance to the exit. Gated on
-        # measured position, not the open-loop mission schedule's `done`
-        # flag, so landing only fires once the vehicle has actually
-        # cleared the canyon -- wind or CBF deviation could otherwise have
-        # it trigger while still between the buildings.
-        if engaged and self.pos[1] >= self.mission.distance + LAND_CLEARANCE_M:
+        # LAND_TRIGGER_LOCAL_M is that same distance to the last tower
+        # row's far edge plus LAND_CLEARANCE_M. Gated on measured
+        # position, not the open-loop mission schedule's `done` flag, so
+        # landing only fires once the vehicle has actually cleared the
+        # towers -- wind or CBF deviation could otherwise have it trigger
+        # while still between the buildings.
+        if engaged and self.pos[1] >= LAND_TRIGGER_LOCAL_M:
             self._send_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
             self.land_requested = True
             self.get_logger().info(
-                f'cleared canyon by {LAND_CLEARANCE_M}m -- requested landing')
+                f'cleared the tower row by {LAND_CLEARANCE_M}m -- requested landing')
             self.tick += 1
             return
 

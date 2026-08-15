@@ -33,18 +33,24 @@
     <model name="ground_plane">
       <static>true</static>
       <link name="link">
-        <!-- 300x150, centred at the origin: the mission runs from
-             CANYON_ENTRY (east=-90) to CANYON_EXIT (east=110) -- a 100x100
-             plane (the old size) left the vehicle flying off the edge of
-             the visible/collidable ground for most of the transit. 300x150
-             covers east in [-150,150] and north in [-75,75] with margin on
-             every side, including for CBF/wind-driven lateral excursions
-             around the +-12 m clear corridor between the two building rows. -->
+        <!-- 600x200, centred at the origin (so the towers -- themselves
+             centred at (0,0), see canyon_geometry.BUILDINGS -- stay in the
+             middle of it): controller_node now requests AUTO_LAND as soon
+             as the vehicle clears the last tower row (world east=55), not
+             at the old, much-further-out mission exit waypoint. AUTO_LAND
+             is a slow, largely wind-uncompensated descent (tens of
+             seconds), and verified live that a single baseline run drifted
+             from the world-east=55 trigger point all the way to
+             world-east=180 by touchdown under the canyon's ~12-14 m/s
+             crosswind -- past the previous 300x150 plane's own east edge
+             at 150. 600x200 covers east in [-300,300], comfortably past
+             that observed worst case with margin for run-to-run variance,
+             and north in [-100,100] for lateral drift. -->
         <collision name="collision">
-          <geometry><plane><normal>0 0 1</normal><size>300 150</size></plane></geometry>
+          <geometry><plane><normal>0 0 1</normal><size>600 200</size></plane></geometry>
         </collision>
         <visual name="visual">
-          <geometry><plane><normal>0 0 1</normal><size>300 150</size></plane></geometry>
+          <geometry><plane><normal>0 0 1</normal><size>600 200</size></plane></geometry>
           <material><ambient>0.16 0.45 0.16 1</ambient><diffuse>0.16 0.45 0.16 1</diffuse></material>
         </visual>
       </link>
