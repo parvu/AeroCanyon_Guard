@@ -1,23 +1,29 @@
 """run_trial.py orchestrates real subprocesses and a real Gazebo instance,
-so it isn't meaningfully unit-testable end-to-end. This checks the one
-piece of non-trivial logic that can be verified without either: the
-Gazebo entity-removal request is built with the right service name and
-the right message fields, since a typo there (wrong entity type, wrong
-model name) would silently no-op -- the failure mode this whole function
-exists to prevent in the first place.
+so it isn't meaningfully unit-testable end-to-end. These tests check the
+two pieces of non-trivial logic that can be verified without either:
+
+- the Gazebo teleport request is built with the right service name and
+  message fields (a typo there -- wrong field, wrong model name -- would
+  silently no-op, which is exactly the failure mode this exists to
+  prevent); an earlier version used the entity-remove service instead,
+  which was verified live (twice, on independently fresh Gazebo
+  instances) to leave every /fmu/out telemetry topic frozen at zero after
+  the second PX4 boot in a session -- see the module docstring;
+- the "did PX4 actually start" check reports failure the moment the
+  subprocess has already exited, without needing a real PX4/Gazebo pair.
 """
+import subprocess
+
 import pytest
 
 from gz.msgs10.boolean_pb2 import Boolean
-from gz.msgs10.entity_pb2 import Entity
-from gz.msgs10.model_pb2 import Model
-from gz.msgs10.scene_pb2 import Scene
+from gz.msgs10.pose_pb2 import Pose
 
 from aerocanyon import constants as C
-from aerocanyon.run_trial import _reset_gazebo_model, _wait_for_spawn
+from aerocanyon.run_trial import SPAWN_XYZ, _reset_gazebo_model, _verify_px4_started
 
 
-def test_reset_gazebo_model_requests_removal_of_the_right_entity(monkeypatch):
+def test_reset_gazebo_model_teleports_the_right_entity_to_the_spawn_pose(monkeypatch):
     calls = []
 
     def fake_request(self, service, request, request_type, response_type, timeout):
@@ -31,35 +37,31 @@ def test_reset_gazebo_model_requests_removal_of_the_right_entity(monkeypatch):
 
     assert len(calls) == 1
     service, request, request_type, response_type, _ = calls[0]
-    assert service == f'/world/{C.WORLD_NAME}/remove'
-    assert request_type is Entity
+    assert service == f'/world/{C.WORLD_NAME}/set_pose'
+    assert request_type is Pose
     assert response_type is Boolean
     assert request.name == C.MODEL_NAME
-    assert request.type == Entity.MODEL
+    x, y, z = SPAWN_XYZ
+    assert (request.position.x, request.position.y, request.position.z) == (x, y, z)
 
 
-def _fake_scene(*names):
-    def fake_request(self, service, request, request_type, response_type, timeout):
-        return True, Scene(model=[Model(name=n) for n in names])
-    return fake_request
-
-
-def test_wait_for_spawn_returns_once_the_model_appears(monkeypatch):
-    # _reset_gazebo_model() removes the entity before every PX4 restart; if
-    # nothing then respawns it (e.g. a manually-started PX4/agent from
-    # another terminal is blocking this run's own, see run_trial's
-    # docstring), the vehicle used to just be silently gone for the whole
-    # trial. This is the "it did come back" path.
-    monkeypatch.setattr('gz.transport13.Node.request',
-                        _fake_scene('ground_plane', C.MODEL_NAME))
-    _wait_for_spawn(timeout_s=5)  # must return, not raise
-
-
-def test_wait_for_spawn_fails_loudly_when_the_model_never_reappears(monkeypatch):
-    # The actual regression this exists to catch: nothing in the rest of
-    # the stack (PX4, the ROS nodes, run_trial's own CSV-size check) would
-    # ever have noticed a missing vehicle before this.
-    monkeypatch.setattr('gz.transport13.Node.request', _fake_scene('ground_plane'))
+def test_verify_px4_started_passes_when_the_process_is_still_alive(monkeypatch):
     monkeypatch.setattr('time.sleep', lambda _: None)
-    with pytest.raises(SystemExit, match=C.MODEL_NAME):
-        _wait_for_spawn(timeout_s=0.2)
+    proc = subprocess.Popen(['sleep', '30'])
+    try:
+        _verify_px4_started(proc, timeout_s=0)  # must not raise
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_verify_px4_started_fails_loudly_when_px4_exited_immediately(monkeypatch):
+    # The actual regression this exists to catch: a manually-started PX4
+    # or agent from another terminal wins the instance-0/port-8888 race,
+    # this process's own PX4 dies within moments, and -- before this
+    # check existed -- nothing else in the stack ever noticed.
+    monkeypatch.setattr('time.sleep', lambda _: None)
+    proc = subprocess.Popen(['false'])
+    proc.wait()
+    with pytest.raises(SystemExit, match='PX4 exited immediately'):
+        _verify_px4_started(proc, timeout_s=0)

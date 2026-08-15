@@ -33,11 +33,18 @@
     <model name="ground_plane">
       <static>true</static>
       <link name="link">
+        <!-- 300x150, centred at the origin: the mission runs from
+             CANYON_ENTRY (east=-90) to CANYON_EXIT (east=110) -- a 100x100
+             plane (the old size) left the vehicle flying off the edge of
+             the visible/collidable ground for most of the transit. 300x150
+             covers east in [-150,150] and north in [-75,75] with margin on
+             every side, including for CBF/wind-driven lateral excursions
+             around the +-12 m clear corridor between the two building rows. -->
         <collision name="collision">
-          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+          <geometry><plane><normal>0 0 1</normal><size>300 150</size></plane></geometry>
         </collision>
         <visual name="visual">
-          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+          <geometry><plane><normal>0 0 1</normal><size>300 150</size></plane></geometry>
           <material><ambient>0.2 0.2 0.2 1</ambient><diffuse>0.2 0.2 0.2 1</diffuse></material>
         </visual>
       </link>
