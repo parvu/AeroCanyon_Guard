@@ -16,6 +16,16 @@
     <plugin filename="gz-sim-air-pressure-system" name="gz::sim::systems::AirPressure" />
     <plugin filename="gz-sim-magnetometer-system" name="gz::sim::systems::Magnetometer" />
     <plugin filename="gz-sim-navsat-system" name="gz::sim::systems::NavSat" />
+    <!-- The tiltrotor model (models/airspeed, included via model.sdf)
+         declares a sensor of type "air_speed", but declaring the sensor
+         alone doesn't make it publish anything -- like Imu/AirPressure/
+         Magnetometer/NavSat above, each sensor TYPE needs its own system
+         plugin loaded to actually compute and publish its data. This one
+         was missing: PX4's GZBridge subscribes to the air_speed topic
+         unconditionally, but nothing was ever publishing on it, so
+         SYS_HAS_NUM_ASPD>0 could never see valid data (verified live:
+         "Preflight Fail: Airspeed invalid", vehicle never armed). -->
+    <plugin filename="gz-sim-air-speed-system" name="gz::sim::systems::AirSpeed" />
 
     <!-- Sistemul global de vânt -->
     <plugin filename="gz-sim-wind-effects-system" name="gz::sim::systems::WindEffects">

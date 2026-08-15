@@ -156,19 +156,20 @@ def _run_ticks_already_engaged(n, elapsed_at_start_s, vel=(0.0, 0.0, 0.0),
 
 
 def test_vtol_transition_is_disabled_by_default():
-    # Tried again this session with a real fix attempt (see
-    # controller_node's module docstring / ENABLE_VTOL_TRANSITION
-    # comment for the full account): a positive-climb-rate precondition
-    # plus VT_TILT_TRANS=0.5 (45 degrees). Live-verified twice: the
-    # vehicle no longer dives into the ground, but it never reaches
-    # stable fixed-wing flight either -- PX4's own P1->P2 handoff is
-    # still a blind clock (no functional airspeed sensor in this SITL
-    # build), and once it fires the vehicle pitches wildly (0-88 degrees)
-    # for the rest of the flight instead of settling into cruise. This
-    # test is the safety net: it must keep failing (loudly, in review) if
-    # someone flips ENABLE_VTOL_TRANSITION back on without first fixing
-    # the airspeed sensor or replacing PX4's transition state machine
-    # with direct actuator control from this node.
+    # See controller_node's module docstring / ENABLE_VTOL_TRANSITION
+    # comment for the full account of this session's attempts. Short
+    # version: the Gazebo airspeed sensor is now genuinely fixed (the
+    # world file was missing the gz-sim-air-speed-system plugin), and
+    # with it a full transition+cruise+landing run has been live-verified
+    # to complete successfully for the first time. But cruise still has
+    # recurring pitch excursions (past +-45 degrees), and the one attempt
+    # to fix that via FW_AIRSPD_TRIM/MIN tuning made it WORSE live -- a
+    # sustained ~22s nose-down dive to near-ground contact instead of a
+    # bounded wobble. This test is the safety net: it must keep failing
+    # (loudly, in review) if someone flips ENABLE_VTOL_TRANSITION back on
+    # without first doing real TECS/attitude-rate tuning against live
+    # telemetry, or replacing PX4's transition state machine with direct
+    # actuator control from this node.
     sent = _run_ticks_already_engaged(5, elapsed_at_start_s=20.0, vel=(12.0, 0.0, -1.0))
     transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
     assert transitions == [], (

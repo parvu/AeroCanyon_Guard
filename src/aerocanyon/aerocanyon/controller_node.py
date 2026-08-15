@@ -25,8 +25,8 @@ from .mission import Mission
 SETPOINTS_BEFORE_OFFBOARD = 20  # PX4 needs an existing stream to accept the mode
 ENGAGE_RETRY_TICKS = 50  # retry the arm+offboard request once a second until it sticks
 
-# Tried again this session, live, twice, with a real fix attempt each
-# time -- still disabled. What changed and what was learned:
+# Tried repeatedly this session, live, with real fix attempts each round
+# -- still disabled. What changed and what was learned, in order:
 #
 # 1. Root-caused the original crash to PX4's own front-transition logic
 #    (vtol_type.cpp isFrontTransitionCompletedBase) falling back to a
@@ -34,43 +34,49 @@ ENGAGE_RETRY_TICKS = 50  # retry the arm+offboard request once a second until it
 #    feedback is available, then ramming the rest of the tilt to
 #    horizontal and cutting the rear hover motors in another 0.5s
 #    (VT_TRANS_P2_DUR) regardless of the vehicle's actual state.
-# 2. Tried enabling SYS_HAS_NUM_ASPD so PX4 could use real closed-loop
-#    airspeed gating instead. model.sdf does declare an airspeed_link,
-#    but nothing actually publishes on the Gazebo topic PX4's bridge
-#    subscribes to in this build -- verified live, PX4's own console
-#    logged "Preflight Fail: Airspeed invalid" and the vehicle never
-#    armed at all (max altitude 12.5cm over an 82s run). Reverted; the
-#    airspeed sensor isn't functional in this SITL setup, and making it
-#    so is a separate, unstarted Gazebo-plugin task.
-# 3. Fell back to PX4's blind open-loop timer, but added a
-#    positive-climb-rate precondition here (on top of the existing speed
-#    gate) before even requesting the transition, and set
-#    VT_TILT_TRANS=0.5 (45 degrees) in the PX4-Autopilot airframe file --
-#    the requested "gain speed and lift at a partial tilt, then once
-#    climbing, finish the tilt" sequence, as closely as PX4's
-#    architecture allows without a working airspeed sensor. Live-tested:
-#    the vehicle no longer dives into the ground, but it never reaches
-#    stable fixed-wing flight either -- once PX4's own P1/P2 state
-#    machine takes over, it pitches wildly (0 to 88 degrees and back)
-#    for the rest of the flight, horizontal speed collapses to
-#    ~0.3-0.5 m/s, and it just drifts upward instead of flying the
-#    canyon. Different failure shape, same underlying cause: the P1->P2
-#    handoff (finish the tilt, cut the rear motors) is still a blind
-#    clock, not a check on whether the wing is actually carrying the
-#    vehicle's weight yet.
+# 2. Enabled SYS_HAS_NUM_ASPD so PX4 could use real closed-loop airspeed
+#    gating instead. First attempt failed: model.sdf declares an
+#    airspeed_link, but nothing was publishing on the Gazebo topic PX4's
+#    bridge subscribes to -- "Preflight Fail: Airspeed invalid", vehicle
+#    never armed. Root cause (found by reading the world file): the
+#    world's plugin list loads gz-sim-imu-system, air-pressure-system,
+#    magnetometer-system, and navsat-system explicitly, but never
+#    gz-sim-air-speed-system -- each sensor TYPE needs its own system
+#    plugin to actually compute and publish data, and that one was just
+#    missing. Added it (worlds/_template.sdf, regenerated into
+#    worlds/urban_canyon.sdf and copied to PX4-Autopilot). Verified live:
+#    PX4's console now logs "Airspeed sensor healthy", arming succeeds,
+#    and a full run with the climb-rate-gated trigger + VT_TILT_TRANS=0.5
+#    actually completed the canyon transit and landed safely -- the first
+#    time any transition attempt this session did that. This part is a
+#    real, kept fix: the airspeed sensor is genuine, reusable
+#    infrastructure regardless of what happens with the transition
+#    itself (SYS_HAS_NUM_ASPD stays 1 in the airframe file).
+# 3. That successful run still wasn't smooth: recurring pitch excursions
+#    during cruise (past +-45 degrees, briefly +-80, self-recovering).
+#    Suspected TECS chasing an unreachable airspeed -- PX4's stock
+#    FW_AIRSPD_TRIM=15/MIN=10 m/s were never overridden, but this
+#    vehicle only ever reaches ~7-11 m/s. Tried FW_AIRSPD_STALL=6/MIN=7/
+#    TRIM=10/MAX=15. Live-tested: WORSE, not better -- instead of a
+#    bounded wobble around cruise altitude, the vehicle entered a
+#    sustained ~22s nose-down dive (pitch to -87 degrees, sink rate up to
+#    7.7 m/s) from 25m almost to ground contact before barely arresting
+#    it. Reverted; the performance-model numbers (trim/stall/climb/sink)
+#    aren't self-consistent for this vehicle and guessing at them further
+#    risks a real crash rather than fixing the wobble.
 #
-# Both of the levers actually reachable from this node (when to start,
-# how far to tilt) are exhausted without a working airspeed signal. A
-# real fix needs either (a) wiring the Gazebo airspeed sensor plugin so
-# PX4's own closed-loop transition logic has real data to gate on, or
-# (b) this node driving the tilt/throttle directly via
-# /fmu/in/actuator_servos + /fmu/in/actuator_motors (OffboardControlMode
-# .direct_actuator) instead of PX4's automatic state machine -- which
-# means writing this project's own attitude stabilization for the
-# transition phase, since direct_actuator bypasses PX4's rate/attitude
-# controllers too. Both are real, separate pieces of work, not a
-# trigger-condition or param tweak. Disabled again; the vehicle flies
-# the whole transit in stable multicopter mode, which is how every
+# Net position: the airspeed sensor fix (2) is real and kept. The
+# transition can now complete a full flight without diving or getting
+# stuck, but cruise is still rough, and the one attempt to smooth it (3)
+# made things actively worse. This needs proper TECS/attitude-rate
+# tuning against live telemetry by someone who can iterate on it
+# carefully -- not another guessed parameter set -- or the direct-
+# actuator alternative (this node driving tilt/throttle itself via
+# /fmu/in/actuator_servos + /fmu/in/actuator_motors with
+# OffboardControlMode.direct_actuator, replacing PX4's state machine
+# entirely, which also means writing this project's own attitude
+# stabilization for the transition phase). Disabled for now; the vehicle
+# flies the whole transit in stable multicopter mode, which is how every
 # verified-stable flight in this project's history has actually flown.
 ENABLE_VTOL_TRANSITION = False
 CLIMB_RATE_TRIGGER_MS = 0.3  # m/s upward (NED vz <= -this) required to request the transition
