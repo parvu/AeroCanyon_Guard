@@ -88,7 +88,7 @@ Collect baseline trials first (see below), then:
 
 ```bash
 source .venv/bin/activate
-PYTHONPATH=src/aerocanyon python -m aerocanyon.train_pinn trials/train*_baseline.csv --alpha 1.0
+PYTHONPATH=src/aerocanyon python3 -m aerocanyon.train_pinn trials/train*_baseline.csv --alpha 1.0
 ```
 
 `docs/alpha_sweep.txt` records the alpha-vs-skill sweep used to pick the
