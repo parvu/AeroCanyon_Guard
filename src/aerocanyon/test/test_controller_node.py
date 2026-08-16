@@ -10,6 +10,7 @@ unnoticed. These tests drive the real tick loop (no mocked physics) and
 assert the vehicle_command sequence actually gets sent.
 """
 import numpy as np
+import pytest
 import rclpy
 from rclpy.duration import Duration
 
@@ -114,6 +115,25 @@ def test_yaw_points_down_the_canyons_actual_travel_direction():
             f'sp.yaw={sp.yaw} does not match the canyon travel direction '
             f'({expected_yaw} rad); a hardcoded yaw=0.0 (north) would fail this')
         assert abs(sp.yaw) > 1e-6, 'yaw must not silently regress to hardcoded north (0.0)'
+
+
+def test_setpoint_velocity_is_the_cruise_vector_not_nan():
+    # See the sp.velocity comment in controller_node._tick(): sending NaN
+    # (the MC convention) makes PX4's FixedWingModeManager silently
+    # reclassify the position setpoint to SETPOINT_TYPE_LOITER whenever the
+    # vehicle is laterally close to it -- true almost every tick, for a
+    # continuously-advancing target -- and that reclassification latches.
+    # A real cruise-velocity vector routes into FW_POSCTRL_MODE_AUTO_PATH
+    # instead, which has no such trap.
+    from aerocanyon.mission import Mission
+    m = Mission(hold_s=0.0)
+    _, setpoints = _run_ticks('baseline', SETPOINTS_BEFORE_OFFBOARD + 5)
+    assert setpoints, 'tick loop must publish at least one TrajectorySetpoint'
+    for sp in setpoints:
+        assert np.isfinite(sp.velocity[0]) and np.isfinite(sp.velocity[1]), (
+            'sp.velocity[0:2] must be finite -- NaN routes into the FW loiter trap')
+        assert sp.velocity[0] == pytest.approx(m.direction[0] * m.speed, abs=1e-6)
+        assert sp.velocity[1] == pytest.approx(m.direction[1] * m.speed, abs=1e-6)
 
 
 def test_treatment_mode_also_survives_the_tick_loop():

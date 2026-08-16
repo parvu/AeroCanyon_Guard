@@ -338,20 +338,29 @@ class ControllerNode(Node):
 
         sp = TrajectorySetpoint()
         sp.position = [float(v) for v in target]
-        # TrajectorySetpoint.msg: "setting a value to NaN means the state
-        # should not be controlled". velocity/acceleration default to
-        # [0.0, 0.0, 0.0], NOT NaN -- left alone, that is read by PX4 as an
-        # explicit hold-zero-velocity/zero-acceleration command layered on
-        # top of the position setpoint, fighting the position controller's
-        # own authority to move the vehicle. Verified live: with this
-        # unset, cruise velocity never got anywhere near the mission's
-        # 12 m/s (capped around 2-6 m/s), and a large reverse position
-        # setpoint (tried in an earlier fly-home-and-land design -- see
-        # LAND_CLEARANCE_M above) produced no turnaround at all -- the
-        # vehicle just kept drifting the same direction it was already
-        # moving. Explicitly marking both NaN is what actually hands full
-        # authority to the position controller.
-        sp.velocity = [float('nan')] * 3
+        # FW-SPECIFIC, and different from the NaN-velocity convention this
+        # project's MC vehicles (tiltrotor/tricopter) used. Traced directly
+        # in FixedWingModeManager.cpp's set_control_mode_current(): offboard
+        # position setpoints only reach the good path-tangent guidance
+        # (FW_POSCTRL_MODE_AUTO_PATH) when BOTH position AND velocity[0:2]
+        # are finite. With velocity NaN (the MC convention), it instead
+        # takes the "position setpoint only" branch (FW_POSCTRL_MODE_AUTO ->
+        # control_auto() -> handle_setpoint_type()), which silently
+        # reclassifies SETPOINT_TYPE_POSITION to SETPOINT_TYPE_LOITER
+        # whenever the vehicle is laterally close to the target and hasn't
+        # reached its altitude yet -- and LATCHES there once triggered. Our
+        # mission target is a continuously-advancing point that tracks just
+        # ahead of the vehicle (the same style that works fine for MC's
+        # mc_pos_control), so it is laterally close on essentially every
+        # tick -- meaning this reclassification fires almost immediately and
+        # never releases, which is why the vehicle settled into a low-
+        # altitude near-stop instead of climbing and flying the mission:
+        # it was silently loitering, not tracking. Sending the mission's
+        # actual cruise velocity vector (not NaN) alongside position
+        # sidesteps handle_setpoint_type() entirely.
+        sp.velocity = [float(self.mission.direction[0] * self.mission.speed),
+                       float(self.mission.direction[1] * self.mission.speed),
+                       float('nan')]
         sp.acceleration = [float('nan')] * 3
         sp.yaw = self.cruise_yaw  # nose down the canyon's actual travel direction
 

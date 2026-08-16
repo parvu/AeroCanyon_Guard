@@ -47,7 +47,21 @@ from gz.msgs10.vector3d_pb2 import Vector3d
 from gz.msgs10.wrench_pb2 import Wrench
 
 LAUNCH_DURATION_S = 0.3  # catapult stroke time -- see the force-vs-impulse note above
-LAUNCH_DELTA_V_MS = 10.0  # target forward speed gained during the stroke
+# Was 10.0. Raised after diagnosing a real aerodynamic shortfall, not a
+# guidance bug: this airframe's actual stall speed, computed from the wing's
+# own simulated CL_max (model.sdf's cla=4.7528, alpha_stall=0.3391 rad,
+# giving CL_max=cla*alpha_stall~=1.61) and this vehicle's real weight
+# (5.005 kg -> 49.1N) via V_stall=sqrt(2W/(rho*S*CL_max)), S=1.0 m^2 (the
+# two real 0.5 m^2 LiftDrag surfaces) is ~7.05 m/s. Every observed launch
+# only achieved 6-7 m/s peak -- AT or BELOW stall, not comfortably above
+# it -- which is exactly why PX4's own commander logged "Takeoff detected"
+# immediately followed by "Landing detected": a brief, marginal hop, not
+# sustained lift. Achieved speed also measured running ~2/3 of this
+# constant (drag during the stroke, and the ramp angle sending some of the
+# force vertically instead of horizontal, aren't in the naive F=m*dv/dt
+# calc). Real catapult-launched aircraft target 1.3-1.5x stall speed for
+# margin; backing that out through the same 2/3 shortfall gives ~16 m/s.
+LAUNCH_DELTA_V_MS = 16.0  # target forward speed gained during the stroke
 
 # The vehicle spawns sitting on a ramp (see run_trial.SPAWN_XYZ/SPAWN_POSE
 # and the static ramp prop in worlds/_template.sdf) rather than flat on the
