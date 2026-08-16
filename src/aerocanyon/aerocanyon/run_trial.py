@@ -66,7 +66,10 @@ from px4_msgs.msg import VehicleLandDetected
 from rclpy.node import Node as RosNode
 from rclpy.qos import qos_profile_sensor_data
 
+import numpy as np
+
 from . import canyon_geometry as cg
+from . import catapult
 from . import constants as C
 
 PX4_DIR = pathlib.Path.home() / 'PX4-Autopilot'
@@ -75,15 +78,22 @@ WS = pathlib.Path(__file__).resolve().parents[3]
 
 # Spawn/reset position: the canyon entry's horizontal position (ENU east,
 # north from CANYON_ENTRY), not the world origin -- which sits almost
-# exactly under the middle tower row. 0.246 m is the wingonly model's own
-# stock ground clearance (its unpatched <pose> z value); reusing it here
-# keeps the landing gear resting on the ground instead of floating or
-# clipping through it. Facing yaw=0 in Gazebo's ENU-frame pose already
-# points the nose along +x (east), which is the mission's actual direction
-# of travel -- see the yaw fix in controller_node.py for why 0 is not the
-# answer over in NED-land.
-SPAWN_XYZ = (float(cg.CANYON_ENTRY[0]), float(cg.CANYON_ENTRY[1]), 0.246)
-SPAWN_POSE = f'{SPAWN_XYZ[0]},{SPAWN_XYZ[1]},{SPAWN_XYZ[2]},0,0,0'
+# exactly under the middle tower row. Facing yaw=0 in Gazebo's ENU-frame
+# pose already points the nose along +x (east), which is the mission's
+# actual direction of travel -- see the yaw fix in controller_node.py for
+# why 0 is not the answer over in NED-land.
+#
+# Height and pitch: this vehicle spawns sitting on the catapult ramp (see
+# worlds/_template.sdf's catapult_ramp model), not flat on the ground --
+# 0.246 m was the wingonly model's own stock flat-ground clearance, no
+# longer applicable once the vehicle is up at the ramp's high end. Pitch
+# matches the ramp's own incline (nose pointed up-slope, same direction
+# catapult.start() then applies the toss along) rather than 0 (level).
+_RAMP_PITCH_RAD = -np.radians(catapult.RAMP_ANGLE_DEG)
+SPAWN_XYZ = (float(cg.CANYON_ENTRY[0]), float(cg.CANYON_ENTRY[1]),
+            catapult.RAMP_RISE_M + 0.246)
+SPAWN_POSE = (f'{SPAWN_XYZ[0]},{SPAWN_XYZ[1]},{SPAWN_XYZ[2]},'
+              f'0,{_RAMP_PITCH_RAD},0')
 
 WORLD_SDF = PX4_DIR / 'Tools/simulation/gz/worlds' / f'{C.WORLD_NAME}.sdf'
 
@@ -144,28 +154,32 @@ def _reset_gazebo_model():
     that's a minor, bounded imperfection next to the alternative of
     telemetry not working at all.
 
-    ORIENTATION is reset explicitly (identity quaternion -- level,
-    yaw=0), not left alone. Verified live: vehicle_attitude occasionally
-    reports the vehicle flipped ~180 degrees in roll immediately on
-    spawn/settle -- as early as t=0.1s, before this project's own code has
-    sent an arm command and before PX4 itself considers the vehicle
-    armable, so it isn't an arm-time motor-torque event (COM_SPOOLUP_TIME
-    was tried live and made no difference) and it isn't this project's
-    own axis-conversion code (frames.py's NED/ENU swap and quat_to_rotmat
-    were checked and are self-consistent). The timing instead points at
-    physics-state carried over from repeatedly teleporting the SAME
-    long-lived entity via set_pose rather than a genuinely fresh spawn --
-    see _recreate_gazebo_model() below for the (riskier) alternative that
-    tests that theory directly. Previously, set_pose only touched
-    position, so a leg that ended flipped over stayed flipped over
-    through the teleport and started the NEXT leg still upside-down at
-    the spawn point -- turning one bad moment into a permanently-broken
-    trial. Forcing orientation level on every reset can't fix the initial
-    flip, but it stops it from persisting across legs."""
+    ORIENTATION is reset explicitly (pitched up by the ramp angle, matching
+    SPAWN_POSE -- see catapult.RAMP_ANGLE_DEG), not left alone. Verified
+    live (before the ramp existed, at level/yaw=0): vehicle_attitude
+    occasionally reports the vehicle flipped ~180 degrees in roll
+    immediately on spawn/settle -- as early as t=0.1s, before this
+    project's own code has sent an arm command and before PX4 itself
+    considers the vehicle armable, so it isn't an arm-time motor-torque
+    event (COM_SPOOLUP_TIME was tried live and made no difference) and it
+    isn't this project's own axis-conversion code (frames.py's NED/ENU
+    swap and quat_to_rotmat were checked and are self-consistent). The
+    timing instead points at physics-state carried over from repeatedly
+    teleporting the SAME long-lived entity via set_pose rather than a
+    genuinely fresh spawn -- see _recreate_gazebo_model() below for the
+    (riskier) alternative that tests that theory directly. Previously,
+    set_pose only touched position, so a leg that ended flipped over
+    stayed flipped over through the teleport and started the NEXT leg
+    still upside-down at the spawn point -- turning one bad moment into a
+    permanently-broken trial. Forcing a known-good orientation on every
+    reset can't fix the initial flip, but it stops it from persisting
+    across legs."""
     node = GzNode()
     x, y, z = SPAWN_XYZ
+    half_pitch = _RAMP_PITCH_RAD / 2.0
     req = Pose(name=C.MODEL_NAME, position={'x': x, 'y': y, 'z': z},
-               orientation={'w': 1.0, 'x': 0.0, 'y': 0.0, 'z': 0.0})
+               orientation={'w': float(np.cos(half_pitch)), 'x': 0.0,
+                            'y': float(np.sin(half_pitch)), 'z': 0.0})
     node.request(f'/world/{C.WORLD_NAME}/set_pose', req, Pose, Boolean, 2000)
     time.sleep(1)
 

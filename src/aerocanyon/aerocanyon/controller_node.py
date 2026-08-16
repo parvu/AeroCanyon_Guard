@@ -34,23 +34,42 @@ ENGAGE_RETRY_TICKS = 50  # retry the arm+offboard request once a second until it
 # simulated, and its module docstring for why PX4's own FW_LAUN_DETCN_ON
 # launch detector can't be used from this project's OFFBOARD architecture.
 #
-# STATUS, verified live: the catapult launch itself works exactly as
-# designed -- a clean, controlled velocity ramp to ~10 m/s in the first
-# ~0.3s after engagement, confirmed against controller_node's own log
-# ("catapult: applying 167 N for 0.3s" / "catapult: released") and the
-# resulting telemetry. Sustained FW flight control does NOT: the vehicle
-# stayed within +-0.2m of ground level for 48+ seconds of a 60s trial and
-# flew ~400m past the mission's own target position with no course
-# correction, despite Mission commanding a 25m cruise altitude from the
-# first tick. This is the same class of problem the tricopter/tiltrotor
-# hit in FW mode (see History.md) -- copied reference rate-loop gains get
-# the vehicle flying, not tracking -- and it is UNRESOLVED here. Root
-# cause not yet diagnosed (candidates: TECS altitude gate, an offboard
-# message field fighting position control the way an unset velocity/
-# acceleration field did for the tricopter, or the FW_POSCTRL mode never
-# actually engaging for this airframe). Do not assume position/altitude
-# tracking works on this branch without re-verifying live -- the one
-# thing checked so far is the toss, not the flight after it.
+# STATUS, verified live across several rounds:
+#
+# 1. Catapult launch mechanism: works, but took two real bugs to get there.
+#    (a) The static motor-nacelle visual (models/wingonly/model.sdf's
+#        motor_rear) was never rotated to match rotor_1's real horizontal
+#        thrust axis -- it stood upright as if for a vertical hover motor.
+#        Fixed, and the tail boom (a leftover from the tricopter's offset
+#        tail rotor, not needed for a fuselage-mounted pusher) removed.
+#    (b) catapult.start()/stop() originally called gz_node.advertise()
+#        immediately before the first publish -- a gz-transport discovery
+#        race that can silently drop that first message. Measured directly:
+#        one run's launch acceleration came out ~100x smaller than
+#        intended, consistent with the toss being lost and only
+#        FW_THR_IDLE creep showing up. Fixed by advertising once at node
+#        startup (catapult.Launcher) instead of at launch time.
+# 2. Motor thrust: was 2e-05 motorConstant, copied unchanged from the
+#    tricopter where it was one of THREE rotors sharing hover load. As the
+#    SOLE forward-thrust source here, max available thrust at FW_THR_MAX
+#    was ~16N against this airframe's ~49N weight -- 33%, nowhere near
+#    enough climb authority. Set to 3x (6e-05, ~99% of weight) -- a real,
+#    computed fix, kept regardless of (3) below.
+# 3. Sustained FW flight control: STILL UNRESOLVED, confirmed present even
+#    with (1) and (2) both fixed -- this rules out "it just needs a
+#    working launch and more thrust" as the explanation. Live-verified: a
+#    clean, fast launch pulse (0 to ~6 m/s within the 0.3s stroke, not
+#    smeared over seconds) is followed by steady deceleration back to a
+#    dead stop, still essentially on the ground (max altitude 4cm), well
+#    short of the mission's 25m cruise target. Same class of problem the
+#    tricopter/tiltrotor hit in FW mode (see History.md) -- copied
+#    reference rate-loop gains get the vehicle moving, not tracking.
+#    Root cause not yet diagnosed (candidates: TECS altitude gate, an
+#    offboard message field fighting position control the way an unset
+#    velocity/acceleration field did for the tricopter, or the
+#    FW_POSCTRL mode never actually engaging for this airframe). Do not
+#    assume position/altitude tracking works on this branch without
+#    re-verifying live.
 
 # How far past the canyon exit the vehicle must actually be before it
 # lands, measured from the far edge of the LAST tower row (tower_2_n/
@@ -159,7 +178,12 @@ class ControllerNode(Node):
         # vehicle is armed and offboard-engaged. gz.transport13's Node is
         # this project's existing pattern for talking to Gazebo directly
         # (run_trial.py's _reset_gazebo_model uses the same client type).
+        # The Launcher advertises its publishers HERE, at node startup --
+        # not right before the time-critical first publish -- see
+        # catapult.py's module docstring for why that matters (a discovery
+        # race that silently dropped the toss, live-verified).
         self.gz = GzNode()
+        self.launcher = catapult.Launcher(self.gz, C.WORLD_NAME, C.MODEL_NAME)
         self.launched = False
         self.launch_time = None
         self._launch_force_n = catapult.force_newtons(MASS_KG)
@@ -276,7 +300,7 @@ class ControllerNode(Node):
             # offboard-engaged -- see catapult.py for why this simulates the
             # toss directly (a real force on the airframe) instead of going
             # through PX4's own launch-detection module.
-            catapult.start(self.gz, C.WORLD_NAME, C.MODEL_NAME, self._launch_force_n)
+            self.launcher.start(self._launch_force_n)
             self.launched = True
             self.launch_time = self.get_clock().now()
             self.get_logger().info(
@@ -285,7 +309,7 @@ class ControllerNode(Node):
         elif self.launched and self.launch_time is not None:
             since_launch = (self.get_clock().now() - self.launch_time).nanoseconds / 1e9
             if since_launch >= catapult.LAUNCH_DURATION_S:
-                catapult.stop(self.gz, C.WORLD_NAME, C.MODEL_NAME)
+                self.launcher.stop()
                 self.launch_time = None  # one-shot: never call stop() again
                 self.get_logger().info('catapult: released')
 

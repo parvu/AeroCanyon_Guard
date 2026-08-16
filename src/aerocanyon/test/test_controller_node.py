@@ -168,11 +168,26 @@ def test_mission_has_no_hold_phase():
         rclpy.shutdown()
 
 
+def test_catapult_publishers_are_advertised_once_at_startup_not_at_launch_time():
+    # Live-verified bug (see catapult.py's module docstring): advertising
+    # right before the first publish hits a gz-transport discovery race
+    # that can silently drop the toss. The Launcher must exist -- and so
+    # have already advertised -- from node construction, before arming/
+    # offboard engagement even starts, not be created lazily at launch time.
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        assert isinstance(node.launcher, controller_node.catapult.Launcher)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
 def test_catapult_fires_exactly_once_on_the_first_engaged_tick(monkeypatch):
     calls = []
-    monkeypatch.setattr(controller_node.catapult, 'start',
-                        lambda gz, world, model, force: calls.append((world, model, force)))
-    monkeypatch.setattr(controller_node.catapult, 'stop', lambda *a: None)
+    monkeypatch.setattr(controller_node.catapult.Launcher, 'start',
+                        lambda self, force: calls.append((self.world_name, self.model_name, force)))
+    monkeypatch.setattr(controller_node.catapult.Launcher, 'stop', lambda self: None)
     sent = _run_ticks_already_engaged(5, elapsed_at_start_s=0.0)
     assert len(calls) == 1, 'must fire the catapult exactly once, not every tick'
     world, model, force = calls[0]
@@ -183,9 +198,9 @@ def test_catapult_fires_exactly_once_on_the_first_engaged_tick(monkeypatch):
 
 def test_catapult_releases_after_the_launch_duration_elapses(monkeypatch):
     stop_calls = []
-    monkeypatch.setattr(controller_node.catapult, 'start', lambda *a: None)
-    monkeypatch.setattr(controller_node.catapult, 'stop',
-                        lambda gz, world, model: stop_calls.append(model))
+    monkeypatch.setattr(controller_node.catapult.Launcher, 'start', lambda self, force: None)
+    monkeypatch.setattr(controller_node.catapult.Launcher, 'stop',
+                        lambda self: stop_calls.append(self.model_name))
     rclpy.init(args=[])
     try:
         node = ControllerNode()
@@ -206,9 +221,9 @@ def test_catapult_releases_after_the_launch_duration_elapses(monkeypatch):
 
 def test_catapult_does_not_release_before_the_launch_duration_elapses(monkeypatch):
     stop_calls = []
-    monkeypatch.setattr(controller_node.catapult, 'start', lambda *a: None)
-    monkeypatch.setattr(controller_node.catapult, 'stop',
-                        lambda gz, world, model: stop_calls.append(model))
+    monkeypatch.setattr(controller_node.catapult.Launcher, 'start', lambda self, force: None)
+    monkeypatch.setattr(controller_node.catapult.Launcher, 'stop',
+                        lambda self: stop_calls.append(self.model_name))
     rclpy.init(args=[])
     try:
         node = ControllerNode()

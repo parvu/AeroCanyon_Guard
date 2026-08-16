@@ -74,6 +74,44 @@
       </link>
     </model>
 
+    <!-- Catapult launch ramp (wing-only branch only): a static prop the
+         vehicle spawns sitting on top of, nose pitched up, instead of flat
+         on the ground -- see catapult.py's RAMP_ANGLE_DEG/RAMP_LENGTH_M/
+         RAMP_RISE_M, the single source of truth this pose is hand-computed
+         from (the world file is static text, it can't import them). Numbers
+         here: length 2.5m, angle 12deg -> half_x=(L/2)*cos(angle)=1.2227,
+         half_z=(L/2)*sin(angle)=0.2599, rise=L*sin(angle)=0.5198. The ramp's
+         HIGH end sits exactly at CANYON_ENTRY (world x=-100, y=0 -- see
+         canyon_geometry.CANYON_ENTRY and run_trial.SPAWN_XYZ, which is where
+         the vehicle actually spawns), so its centre is offset back by
+         half_x/half_z from there, at ground level (z=0) at its low end.
+         Change any of catapult.py's three constants and these six numbers
+         (box size x/z, pose x/z/pitch) need recomputing to match.
+
+         VISUAL ONLY, deliberately no <collision>. The vehicle is teleport-
+         spawned already sitting at the ramp's top pose (SPAWN_XYZ/
+         SPAWN_POSE) -- it never actually slides down the ramp under contact
+         physics, catapult.py tosses it with a wrench instead -- so a
+         collision shape here was never needed. Learned live: it actively
+         broke arming. The clearance math (run_trial's SPAWN_XYZ using the
+         ramp's centreline RAMP_RISE_M, not its true top surface, which sits
+         a further half-thickness above that along the incline) put the
+         vehicle's own collision geometry slightly into the ramp's, and PX4
+         reported a PERSISTENT "Preflight Fail: Attitude failure (roll)" for
+         an entire 60s run -- despite a spawn pose with zero roll -- which is
+         the signature of a spawn-time contact-response corrupting attitude,
+         not a real flight problem. -->
+    <model name="catapult_ramp">
+      <static>true</static>
+      <pose>-101.2227 0 0.2599 0 -0.20944 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><box><size>2.5 0.6 0.08</size></box></geometry>
+          <material><ambient>0.5 0.5 0.55 1</ambient><diffuse>0.5 0.5 0.55 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
     <!--BUILDINGS-->
 
     <spherical_coordinates>
