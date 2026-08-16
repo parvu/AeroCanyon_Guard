@@ -1,0 +1,123 @@
+#!/bin/sh
+#
+# @name Wing-Only Catapult-Launched FW
+#
+# @type Plane
+#
+# Pure fixed-wing, catapult-launched: no tilt rotors at all, a single fixed
+# pusher along the fuselage's longitudinal axis, control from ailerons
+# (the tricopter's elevons repurposed roll-only, matching PX4's stock plane
+# convention), elevator, and rudder. Derived from this project's tricopter
+# model.sdf (models/wingonly) by removing both front tilting rotors and
+# re-orienting the remaining rear rotor from a vertical hover thrust axis to
+# a forward pusher thrust axis.
+#
+# This is NOT a VT_* VTOL airframe at all -- no hover phase exists, so it
+# uses rc.fw_defaults (not rc.vtol_defaults) and MAV_TYPE 1 (Fixed Wing).
+#
+
+. ${R}etc/init.d/rc.fw_defaults
+
+PX4_SIMULATOR=${PX4_SIMULATOR:=gz}
+PX4_GZ_WORLD=${PX4_GZ_WORLD:=default}
+PX4_SIM_MODEL=${PX4_SIM_MODEL:=wingonly}
+
+param set-default SIM_GZ_EN 1 # Gazebo bridge
+
+param set-default MAV_TYPE 1
+
+# Catapult launch: PX4's own launch-detection module, not a Gazebo plugin --
+# there is no physical catapult modelled. It watches body-x acceleration and
+# treats a spike above FW_LAUN_AC_THLD as the throw, transitioning out of the
+# idle/pre-launch hold automatically. Values copied from PX4's own reference
+# catapult airframe (1032_gazebo-classic_plane_catapult) rather than guessed:
+# that is the one PX4-shipped config that has actually flown this way.
+param set-default FW_LAUN_DETCN_ON 1
+param set-default FW_THR_IDLE 0.1  # must already be spinning for Gazebo to register "armed"
+param set-default FW_LAUN_AC_THLD 10
+param set-default TRIM_PITCH -0.15
+
+# Rate-loop gains: also copied from 1032_gazebo-classic_plane_catapult rather
+# than reusing this project's own VTOL-template FW gains (FW_PR_P 0.9 with
+# FF 0.2, no I term -- copied from PX4's standard_vtol.sdf.jinja template and
+# never independently tuned). Those produced live-verified pitch-hunting
+# oscillation on the tricopter/tiltrotor's FW mode this session. This
+# airframe flies FW for its ENTIRE mission, not just a transition window, so
+# it inherits a config that has a real reference flight behind it instead.
+param set-default NPFG_PERIOD 12
+param set-default FW_PR_P 0.9
+param set-default FW_PR_FF 0.5
+param set-default FW_PR_I 0.5
+param set-default FW_RR_FF 0.5
+param set-default FW_RR_P 0.3
+param set-default FW_RR_I 0.5
+param set-default FW_YR_FF 0.5
+param set-default FW_YR_P 0.6
+param set-default FW_YR_I 0.5
+
+param set-default FW_PSP_OFF 2
+param set-default FW_P_LIM_MIN -15
+param set-default FW_P_LIM_MAX 32
+
+param set-default FW_THR_MAX 0.6
+param set-default FW_THR_MIN 0.05
+param set-default FW_THR_TRIM 0.25
+
+param set-default FW_T_CLMB_MAX 8
+param set-default FW_T_SINK_MAX 2.7
+param set-default FW_T_SINK_MIN 2.2
+
+param set-default FW_W_EN 1
+
+param set-default NAV_DLL_ACT 0
+param set-default NAV_ACC_RAD 15
+param set-default MIS_TAKEOFF_ALT 30
+
+# Single rear pusher (motor 0), thrust along the fuselage centreline -- see
+# model.sdf's rotor_1_joint (axis 1 0 0, use_parent_model_frame=1). No tilt
+# servos at all (CA_SV_TL_COUNT stays 0, the control_allocator default).
+param set-default CA_ROTOR_COUNT 1
+param set-default CA_ROTOR0_PX -0.35
+param set-default CA_ROTOR0_PY 0.0
+param set-default CA_ROTOR0_KM 0.05
+
+# Control surfaces: left/right elevon repurposed as plain roll-only ailerons
+# (matching PX4's own stock plane convention -- see 1032_gazebo-classic_
+# plane_catapult and 4008_gz_advanced_plane, both use this exact CS0-CS3
+# mapping), separate elevator for pitch, rudder for yaw. Yaw has no other
+# source at all on this airframe (no differential-thrust motors), so rudder
+# is not optional the way it was on the tricopter, where it was configured
+# but unused.
+param set-default CA_SV_CS_COUNT 4
+param set-default CA_SV_CS0_TRQ_R -0.5
+param set-default CA_SV_CS0_TYPE 1
+param set-default CA_SV_CS1_TRQ_R 0.5
+param set-default CA_SV_CS1_TYPE 2
+param set-default CA_SV_CS2_TRQ_P 1
+param set-default CA_SV_CS2_TYPE 3
+param set-default CA_SV_CS3_TRQ_Y 1
+param set-default CA_SV_CS3_TYPE 4
+
+param set-default SIM_GZ_EC_FUNC1 101
+param set-default SIM_GZ_EC_MIN1 10
+param set-default SIM_GZ_EC_MAX1 1500
+
+# servo_0..3 in model.sdf = left elevon (aileron), right elevon (aileron),
+# elevator, rudder -- in that order, matching CS0..CS3 above.
+param set-default SIM_GZ_SV_FUNC1 201
+param set-default SIM_GZ_SV_FUNC2 202
+param set-default SIM_GZ_SV_FUNC3 203
+param set-default SIM_GZ_SV_FUNC4 204
+
+# SITL: disable preflight checks that don't apply to simulation.
+# NOTE: do NOT disable SYS_HAS_MAG / SYS_HAS_BARO -- Gazebo simulates both
+# sensors via the Magnetometer/AirPressure world plugins, and the EKF needs
+# the simulated mag for yaw alignment ("no heading reference" otherwise).
+# SYS_HAS_NUM_ASPD is 1: the world file loads gz-sim-air-speed-system, so the
+# model's airspeed sensor actually publishes (see the aerocanyon repo's
+# worlds/_template.sdf) -- and unlike the tricopter, this airframe genuinely
+# needs it: TECS/NPFG run in FW mode from the very first tick, with no MC
+# fallback to mask a bad airspeed reading.
+param set-default COM_ARM_WO_GPS 1
+param set-default SYS_HAS_NUM_ASPD 1
+param set-default CBRK_SUPPLY_CHK 894281
