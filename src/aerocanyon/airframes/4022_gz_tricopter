@@ -164,6 +164,15 @@ param set-default MPC_TILTMAX_AIR 30
 
 param set-default MPC_XY_VEL_P_ACC 3
 param set-default MPC_XY_VEL_I_ACC 4
+# Tried doubling to 8 as a control: does integrator retuning alone recover
+# the FO-PINN's benefit, without any wind estimator? Measured, n=7 matched
+# seeds: I=8 baseline 4.48 m vs I=4 baseline 4.33 m vs PINN(gain 0.2) 4.28 m --
+# I=8 was the WORST of the three (not significant at this n, p=0.67-0.71, so
+# take this as directional, not proof). Reverted to 4. The tracking error is
+# genuinely slow (see controller_node's feedforward_gain comment -- 90% of
+# its spectral power sits below 0.11 Hz), so integral action was the obvious
+# thing to try, but simply pushing it harder does not reproduce what the PINN
+# does. A full n=20 run would settle this properly if it matters later.
 param set-default MPC_XY_VEL_D_ACC 0.1
 
 param set-default MIS_TAKEOFF_ALT 10
