@@ -17,7 +17,7 @@ import aerocanyon.controller_node as controller_node
 from aerocanyon.controller_node import (ENGAGE_RETRY_TICKS,
                                         SETPOINTS_BEFORE_OFFBOARD,
                                         ControllerNode)
-from px4_msgs.msg import VehicleCommand, VtolVehicleStatus
+from px4_msgs.msg import VehicleCommand
 
 
 def _run_ticks(mode, n):
@@ -155,79 +155,72 @@ def _run_ticks_already_engaged(n, elapsed_at_start_s, vel=(0.0, 0.0, 0.0),
         rclpy.shutdown()
 
 
-def test_vtol_transition_is_disabled_by_default():
-    # See controller_node's module docstring / ENABLE_VTOL_TRANSITION
-    # comment for the full account of this session's attempts. Short
-    # version: the Gazebo airspeed sensor is now genuinely fixed (the
-    # world file was missing the gz-sim-air-speed-system plugin), and
-    # with it a full transition+cruise+landing run has been live-verified
-    # to complete successfully for the first time. But cruise still has
-    # recurring pitch excursions (past +-45 degrees), and the one attempt
-    # to fix that via FW_AIRSPD_TRIM/MIN tuning made it WORSE live -- a
-    # sustained ~22s nose-down dive to near-ground contact instead of a
-    # bounded wobble. This test is the safety net: it must keep failing
-    # (loudly, in review) if someone flips ENABLE_VTOL_TRANSITION back on
-    # without first doing real TECS/attitude-rate tuning against live
-    # telemetry, or replacing PX4's transition state machine with direct
-    # actuator control from this node.
-    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=20.0, vel=(12.0, 0.0, -1.0))
-    transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
-    assert transitions == [], (
-        'ENABLE_VTOL_TRANSITION must stay False until either the Gazebo '
-        'airspeed sensor is made functional or PX4\'s transition state '
-        'machine is replaced with direct actuator control from this node')
+def test_mission_has_no_hold_phase():
+    # The tricopter/tiltrotor's hold_s pinned the vehicle over one spot to
+    # climb vertically before moving -- meaningless for a fixed-wing
+    # airframe with no hover at all. It must be moving from the first tick.
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        assert node.mission.hold_s == 0.0
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
-def test_requests_vtol_transition_to_fixed_wing_after_the_hold_phase(monkeypatch):
-    monkeypatch.setattr(controller_node, 'ENABLE_VTOL_TRANSITION', True)
-    # elapsed starts just before hold_s (3.0s default): the transition
-    # must not fire during the vertical-climb/hold phase...
-    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=2.9, vel=(12.0, 0.0, -1.0))
-    transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
-    assert transitions == [], 'must not transition to fixed-wing before the hold phase ends'
+def test_catapult_fires_exactly_once_on_the_first_engaged_tick(monkeypatch):
+    calls = []
+    monkeypatch.setattr(controller_node.catapult, 'start',
+                        lambda gz, world, model, force: calls.append((world, model, force)))
+    monkeypatch.setattr(controller_node.catapult, 'stop', lambda *a: None)
+    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=0.0)
+    assert len(calls) == 1, 'must fire the catapult exactly once, not every tick'
+    world, model, force = calls[0]
+    assert world == controller_node.C.WORLD_NAME
+    assert model == controller_node.C.MODEL_NAME
+    assert force == controller_node.catapult.force_newtons(controller_node.MASS_KG)
 
 
-def test_vtol_transition_fires_once_cruise_speed_and_climb_are_reached(monkeypatch):
-    monkeypatch.setattr(controller_node, 'ENABLE_VTOL_TRANSITION', True)
-    # Regression: transitioning at elapsed == hold_s alone (with no speed
-    # check) stalled and crashed the vehicle every time, because that
-    # instant is exactly when the target has JUST started moving off the
-    # pinned hold point -- horizontal speed is still ~0 then, and a VTOL
-    # has no lift in fixed-wing mode without forward airspeed. vz=-1.0
-    # (NED, climbing) satisfies the added climb-rate precondition.
-    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=3.1, vel=(12.0, 0.0, -1.0))
-    transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
-    assert len(transitions) == 1, 'must request the VTOL transition exactly once'
+def test_catapult_releases_after_the_launch_duration_elapses(monkeypatch):
+    stop_calls = []
+    monkeypatch.setattr(controller_node.catapult, 'start', lambda *a: None)
+    monkeypatch.setattr(controller_node.catapult, 'stop',
+                        lambda gz, world, model: stop_calls.append(model))
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        node.armed = True
+        node.offboard_engaged = True
+        node.launched = True
+        # Backdate launch_time past LAUNCH_DURATION_S so the very next tick
+        # sees it as elapsed, without an actual real-time sleep in the test.
+        node.launch_time = node.get_clock().now() - Duration(
+            seconds=controller_node.catapult.LAUNCH_DURATION_S + 0.1)
+        node._tick()
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+    assert stop_calls == [controller_node.C.MODEL_NAME], (
+        'must release the toss exactly once, and only once the duration has passed')
 
 
-def test_vtol_transition_does_not_fire_at_low_speed_even_after_the_hold_phase(monkeypatch):
-    monkeypatch.setattr(controller_node, 'ENABLE_VTOL_TRANSITION', True)
-    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=3.1, vel=(0.5, 0.0, -1.0))
-    transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
-    assert transitions == [], 'must wait for real forward speed, not just elapsed time'
-
-
-def test_vtol_transition_does_not_fire_without_positive_climb_rate(monkeypatch):
-    monkeypatch.setattr(controller_node, 'ENABLE_VTOL_TRANSITION', True)
-    # Cruise speed alone isn't enough: a level, non-climbing pass at
-    # cruise speed must not trigger the transition either -- this is the
-    # explicitly requested "gain speed, then transition once climbing"
-    # sequence, not a speed-only gate.
-    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=3.1, vel=(12.0, 0.0, 0.0))
-    transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
-    assert transitions == [], 'must wait for a positive climb rate, not just horizontal speed'
-
-
-def test_vtol_transition_fires_anyway_after_the_timeout_cap_even_at_zero_speed(monkeypatch):
-    monkeypatch.setattr(controller_node, 'ENABLE_VTOL_TRANSITION', True)
-    # A stuck-at-zero velocity reading (e.g. the same telemetry-topic bug
-    # fixed elsewhere in this project) must not withhold the transition
-    # forever -- there's a generous elapsed-time cap as a fallback.
-    sent = _run_ticks_already_engaged(1, elapsed_at_start_s=20.0, vel=(0.0, 0.0, 0.0))
-    transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
-    assert len(transitions) == 1, 'must transition anyway once the timeout cap is reached'
-    _, param1, _ = transitions[0]
-    assert param1 == float(VtolVehicleStatus.VEHICLE_VTOL_STATE_FW)
+def test_catapult_does_not_release_before_the_launch_duration_elapses(monkeypatch):
+    stop_calls = []
+    monkeypatch.setattr(controller_node.catapult, 'start', lambda *a: None)
+    monkeypatch.setattr(controller_node.catapult, 'stop',
+                        lambda gz, world, model: stop_calls.append(model))
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        node.armed = True
+        node.offboard_engaged = True
+        node.launched = True
+        node.launch_time = node.get_clock().now()  # just fired, not yet elapsed
+        node._tick()
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+    assert stop_calls == [], 'must not release the toss before LAUNCH_DURATION_S has passed'
 
 
 def _run_land_ticks(n, pos, mode='baseline'):
@@ -294,10 +287,10 @@ def test_does_not_land_before_clearing_the_last_tower_row_by_the_margin():
 
 
 if __name__ == '__main__':
-    # Several tests above need pytest's monkeypatch fixture (to flip
-    # ENABLE_VTOL_TRANSITION on for the duration of one test), so this
-    # file needs pytest as its runner rather than a plain function-call
-    # list -- `pytest <this file>` is the real entry point either way.
+    # Several tests above need pytest's monkeypatch fixture (to spy on
+    # catapult.start/stop), so this file needs pytest as its runner rather
+    # than a plain function-call list -- `pytest <this file>` is the real
+    # entry point either way.
     import sys
     import pytest as _pytest
     sys.exit(_pytest.main([__file__, '-q']))

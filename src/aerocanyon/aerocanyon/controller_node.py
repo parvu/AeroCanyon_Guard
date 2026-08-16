@@ -9,14 +9,15 @@ setpoint stream is already present.
 import numpy as np
 import rclpy
 from geometry_msgs.msg import Vector3Stamped
+from gz.transport13 import Node as GzNode
 from px4_msgs.msg import (OffboardControlMode, TrajectorySetpoint,
                           VehicleAttitude, VehicleCommand,
-                          VehicleLocalPosition, VehicleStatus,
-                          VtolVehicleStatus)
+                          VehicleLocalPosition, VehicleStatus)
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 
 from . import canyon_geometry as cg
+from . import catapult
 from . import constants as C
 from .cbf_filter import CBFFilter
 from .constants import MASS_KG
@@ -25,61 +26,31 @@ from .mission import Mission
 SETPOINTS_BEFORE_OFFBOARD = 20  # PX4 needs an existing stream to accept the mode
 ENGAGE_RETRY_TICKS = 50  # retry the arm+offboard request once a second until it sticks
 
-# Tried repeatedly this session, live, with real fix attempts each round
-# -- still disabled. What changed and what was learned, in order:
+# This is the wing-only branch: pure fixed-wing, catapult-launched, no hover
+# capability at all. The VTOL-transition machinery that lived here on the
+# tricopter/tiltrotor branches (ENABLE_VTOL_TRANSITION and its whole history
+# of attempted fixes) is gone -- not applicable, there is no MC mode on this
+# airframe to transition FROM. See catapult.py for how the launch itself is
+# simulated, and its module docstring for why PX4's own FW_LAUN_DETCN_ON
+# launch detector can't be used from this project's OFFBOARD architecture.
 #
-# 1. Root-caused the original crash to PX4's own front-transition logic
-#    (vtol_type.cpp isFrontTransitionCompletedBase) falling back to a
-#    BLIND open-loop timer (VT_F_TR_OL_TM, 6s) whenever no airspeed
-#    feedback is available, then ramming the rest of the tilt to
-#    horizontal and cutting the rear hover motors in another 0.5s
-#    (VT_TRANS_P2_DUR) regardless of the vehicle's actual state.
-# 2. Enabled SYS_HAS_NUM_ASPD so PX4 could use real closed-loop airspeed
-#    gating instead. First attempt failed: model.sdf declares an
-#    airspeed_link, but nothing was publishing on the Gazebo topic PX4's
-#    bridge subscribes to -- "Preflight Fail: Airspeed invalid", vehicle
-#    never armed. Root cause (found by reading the world file): the
-#    world's plugin list loads gz-sim-imu-system, air-pressure-system,
-#    magnetometer-system, and navsat-system explicitly, but never
-#    gz-sim-air-speed-system -- each sensor TYPE needs its own system
-#    plugin to actually compute and publish data, and that one was just
-#    missing. Added it (worlds/_template.sdf, regenerated into
-#    worlds/urban_canyon.sdf and copied to PX4-Autopilot). Verified live:
-#    PX4's console now logs "Airspeed sensor healthy", arming succeeds,
-#    and a full run with the climb-rate-gated trigger + VT_TILT_TRANS=0.5
-#    actually completed the canyon transit and landed safely -- the first
-#    time any transition attempt this session did that. This part is a
-#    real, kept fix: the airspeed sensor is genuine, reusable
-#    infrastructure regardless of what happens with the transition
-#    itself (SYS_HAS_NUM_ASPD stays 1 in the airframe file).
-# 3. That successful run still wasn't smooth: recurring pitch excursions
-#    during cruise (past +-45 degrees, briefly +-80, self-recovering).
-#    Suspected TECS chasing an unreachable airspeed -- PX4's stock
-#    FW_AIRSPD_TRIM=15/MIN=10 m/s were never overridden, but this
-#    vehicle only ever reaches ~7-11 m/s. Tried FW_AIRSPD_STALL=6/MIN=7/
-#    TRIM=10/MAX=15. Live-tested: WORSE, not better -- instead of a
-#    bounded wobble around cruise altitude, the vehicle entered a
-#    sustained ~22s nose-down dive (pitch to -87 degrees, sink rate up to
-#    7.7 m/s) from 25m almost to ground contact before barely arresting
-#    it. Reverted; the performance-model numbers (trim/stall/climb/sink)
-#    aren't self-consistent for this vehicle and guessing at them further
-#    risks a real crash rather than fixing the wobble.
-#
-# Net position: the airspeed sensor fix (2) is real and kept. The
-# transition can now complete a full flight without diving or getting
-# stuck, but cruise is still rough, and the one attempt to smooth it (3)
-# made things actively worse. This needs proper TECS/attitude-rate
-# tuning against live telemetry by someone who can iterate on it
-# carefully -- not another guessed parameter set -- or the direct-
-# actuator alternative (this node driving tilt/throttle itself via
-# /fmu/in/actuator_servos + /fmu/in/actuator_motors with
-# OffboardControlMode.direct_actuator, replacing PX4's state machine
-# entirely, which also means writing this project's own attitude
-# stabilization for the transition phase). Disabled for now; the vehicle
-# flies the whole transit in stable multicopter mode, which is how every
-# verified-stable flight in this project's history has actually flown.
-ENABLE_VTOL_TRANSITION = False
-CLIMB_RATE_TRIGGER_MS = 0.3  # m/s upward (NED vz <= -this) required to request the transition
+# STATUS, verified live: the catapult launch itself works exactly as
+# designed -- a clean, controlled velocity ramp to ~10 m/s in the first
+# ~0.3s after engagement, confirmed against controller_node's own log
+# ("catapult: applying 167 N for 0.3s" / "catapult: released") and the
+# resulting telemetry. Sustained FW flight control does NOT: the vehicle
+# stayed within +-0.2m of ground level for 48+ seconds of a 60s trial and
+# flew ~400m past the mission's own target position with no course
+# correction, despite Mission commanding a 25m cruise altitude from the
+# first tick. This is the same class of problem the tricopter/tiltrotor
+# hit in FW mode (see History.md) -- copied reference rate-loop gains get
+# the vehicle flying, not tracking -- and it is UNRESOLVED here. Root
+# cause not yet diagnosed (candidates: TECS altitude gate, an offboard
+# message field fighting position control the way an unset velocity/
+# acceleration field did for the tricopter, or the FW_POSCTRL mode never
+# actually engaging for this airframe). Do not assume position/altitude
+# tracking works on this branch without re-verifying live -- the one
+# thing checked so far is the toss, not the flight after it.
 
 # How far past the canyon exit the vehicle must actually be before it
 # lands, measured from the far edge of the LAST tower row (tower_2_n/
@@ -159,7 +130,11 @@ class ControllerNode(Node):
         self.declare_parameter('feedforward_gain', 0.2)
         self.ff_gain = float(self.get_parameter('feedforward_gain').value)
 
-        self.mission = Mission()
+        # hold_s=0: the tricopter/tiltrotor's hold phase pinned the vehicle
+        # over one spot to climb vertically before starting forward travel --
+        # meaningless for a fixed-wing airframe with no hover capability at
+        # all. This vehicle needs to be moving from the very first tick.
+        self.mission = Mission(hold_s=0.0)
         # NED yaw (0 = north, +pi/2 = east) pointing down the canyon's
         # actual travel direction -- do NOT hardcode this to 0.0. The
         # canyon corridor runs along Gazebo ENU +x (east, see
@@ -173,7 +148,6 @@ class ControllerNode(Node):
         self.start_time = None
         self.armed = False
         self.offboard_engaged = False
-        self.vtol_transitioned = False
         self.land_requested = False
         self.done_logged = False
         self.wind_est = np.zeros(3)
@@ -181,12 +155,20 @@ class ControllerNode(Node):
         self.pos = np.zeros(3)
         self.vel = np.zeros(3)
 
-        # The CBF's stall barrier is a fixed-wing (loss-of-lift) concept --
-        # only meaningful while the vehicle is actually flying fixed-wing,
-        # i.e. tied to the same flag as the VTOL transition itself. See
-        # cbf_filter.py's module docstring for why leaving it on
-        # unconditionally corrupted the safety diagnostic.
-        self.cbf = CBFFilter(enable_stall=ENABLE_VTOL_TRANSITION)
+        # Catapult toss (see catapult.py): fired once, on the first tick the
+        # vehicle is armed and offboard-engaged. gz.transport13's Node is
+        # this project's existing pattern for talking to Gazebo directly
+        # (run_trial.py's _reset_gazebo_model uses the same client type).
+        self.gz = GzNode()
+        self.launched = False
+        self.launch_time = None
+        self._launch_force_n = catapult.force_newtons(MASS_KG)
+
+        # This airframe is ALWAYS flying fixed-wing -- unlike the tricopter,
+        # where the stall barrier was tied to the (disabled) VTOL transition
+        # flag because MC flight has no meaningful angle of attack, this
+        # vehicle has no MC mode to guard against. Enabled unconditionally.
+        self.cbf = CBFFilter(enable_stall=True)
         self.quat = np.array([1.0, 0.0, 0.0, 0.0])
         self.wind_truth = np.zeros(3)
         self.cbf_pub = self.create_publisher(
@@ -289,29 +271,23 @@ class ControllerNode(Node):
         if self.start_time is not None:
             elapsed = (self.get_clock().now() - self.start_time).nanoseconds / 1e9
 
-        if (ENABLE_VTOL_TRANSITION and engaged and not self.vtol_transitioned
-                and elapsed >= self.mission.hold_s):
-            # The hold phase (elapsed < hold_s, target pinned at
-            # CANYON_ENTRY) is the vertical climb to altitude -- takeoff.
-            # Transitioning to fixed-wing right at elapsed == hold_s
-            # (originally gated on elapsed alone, for determinism) stalled
-            # and crashed the vehicle every time: that instant is exactly
-            # when the target has JUST started moving off the pinned hold
-            # point, so horizontal speed is still ~0 -- a VTOL has no lift
-            # in FW mode without forward airspeed. Gate on measured ground
-            # speed reaching a safe margin below cruise instead, with a
-            # generous elapsed-time cap so a persistently low reading
-            # (e.g. stuck telemetry) can't withhold the transition forever.
-            speed = float(np.linalg.norm(self.vel[:2]))
-            climbing = self.vel[2] <= -CLIMB_RATE_TRIGGER_MS
-            if ((speed >= 0.8 * self.mission.speed and climbing)
-                    or elapsed >= self.mission.hold_s + 15.0):
-                self._send_command(VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION,
-                                   float(VtolVehicleStatus.VEHICLE_VTOL_STATE_FW))
-                self.vtol_transitioned = True
-                self.get_logger().info(
-                    f'requested VTOL transition to fixed-wing at '
-                    f'speed={speed:.1f} m/s vz={self.vel[2]:.1f} m/s')
+        if engaged and not self.launched:
+            # Fires exactly once, the instant the vehicle is armed and
+            # offboard-engaged -- see catapult.py for why this simulates the
+            # toss directly (a real force on the airframe) instead of going
+            # through PX4's own launch-detection module.
+            catapult.start(self.gz, C.WORLD_NAME, C.MODEL_NAME, self._launch_force_n)
+            self.launched = True
+            self.launch_time = self.get_clock().now()
+            self.get_logger().info(
+                f'catapult: applying {self._launch_force_n:.0f} N for '
+                f'{catapult.LAUNCH_DURATION_S:.1f}s')
+        elif self.launched and self.launch_time is not None:
+            since_launch = (self.get_clock().now() - self.launch_time).nanoseconds / 1e9
+            if since_launch >= catapult.LAUNCH_DURATION_S:
+                catapult.stop(self.gz, C.WORLD_NAME, C.MODEL_NAME)
+                self.launch_time = None  # one-shot: never call stop() again
+                self.get_logger().info('catapult: released')
 
         target, done = self.mission.target(elapsed)
         if done and not self.done_logged:

@@ -26,6 +26,14 @@
          SYS_HAS_NUM_ASPD>0 could never see valid data (verified live:
          "Preflight Fail: Airspeed invalid", vehicle never armed). -->
     <plugin filename="gz-sim-air-speed-system" name="gz::sim::systems::AirSpeed" />
+    <!-- Lets a Python client apply a one-off force to any named entity via
+         gz.msgs.EntityWrench on /world/<world>/wrench(/persistent|/clear) --
+         used by the wing-only vehicle to simulate a catapult toss (there is
+         no physical catapult modelled; PX4's own launch-detection module is
+         structurally unreachable from this project's OFFBOARD architecture,
+         see catapult.py). Inert for every other vehicle: it only acts on
+         entities a wrench message actually names. -->
+    <plugin filename="gz-sim-apply-link-wrench-system" name="gz::sim::systems::ApplyLinkWrench" />
 
     <!-- Sistemul global de vânt -->
     <plugin filename="gz-sim-wind-effects-system" name="gz::sim::systems::WindEffects">

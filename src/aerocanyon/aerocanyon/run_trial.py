@@ -75,7 +75,7 @@ WS = pathlib.Path(__file__).resolve().parents[3]
 
 # Spawn/reset position: the canyon entry's horizontal position (ENU east,
 # north from CANYON_ENTRY), not the world origin -- which sits almost
-# exactly under the middle tower row. 0.246 m is the tricopter model's own
+# exactly under the middle tower row. 0.246 m is the wingonly model's own
 # stock ground clearance (its unpatched <pose> z value); reusing it here
 # keeps the landing gear resting on the ground instead of floating or
 # clipping through it. Facing yaw=0 in Gazebo's ENU-frame pose already
@@ -93,7 +93,7 @@ def _gazebo_env():
     needed because this process launches `gz sim` itself now (see
     _spawn_gazebo) instead of relying on it already being started,
     sourced, externally. Without GZ_SIM_RESOURCE_PATH, gz-sim can't
-    resolve model://tricopter and the vehicle silently never spawns."""
+    resolve model://wingonly and the vehicle silently never spawns."""
     models = str(PX4_DIR / 'Tools/simulation/gz/models')
     worlds = str(PX4_DIR / 'Tools/simulation/gz/worlds')
     plugins = str(PX4_DIR / 'build/px4_sitl_default/src/modules/simulation/gz_plugins')
@@ -135,7 +135,7 @@ def _spawn_gazebo():
 
 
 def _reset_gazebo_model():
-    """Teleport the tricopter entity back to the spawn pose, if it exists
+    """Teleport the wingonly entity back to the spawn pose, if it exists
     from a previous trial (a no-op the first time nothing has spawned
     yet), instead of destroying and recreating it -- see the module
     docstring for why recreating it is unreliable. This doesn't reset
@@ -171,7 +171,7 @@ def _reset_gazebo_model():
 
 
 def _recreate_gazebo_model():
-    """Remove the tricopter entity outright instead of teleporting it, so
+    """Remove the wingonly entity outright instead of teleporting it, so
     PX4's own create-on-boot call produces a genuinely fresh entity with
     no carried-over physics state, on the theory that the live-observed
     spawn-time flip (see _reset_gazebo_model) comes from repeatedly
@@ -284,10 +284,10 @@ def run_one(mode, trial, duration, clean_respawn=False, seed=0, turbulence=2.5, 
         _reset_gazebo_model()
 
     env = dict(os.environ,
-               # NOTE: the airframe file is 4022_gz_tricopter; PX4 matches
-               # PX4_SIM_MODEL against that suffix, so a bare 'tricopter'
+               # NOTE: the airframe file is 4023_gz_wingonly; PX4 matches
+               # PX4_SIM_MODEL against that suffix, so a bare 'wingonly'
                # fails to boot (the same trap the old gz_tiltrotor hit).
-               PX4_SIM_MODEL='gz_tricopter',
+               PX4_SIM_MODEL='gz_wingonly',
                PX4_GZ_WORLD='urban_canyon',
                PX4_GZ_MODEL_POSE=SPAWN_POSE,
                GZ_IP='127.0.0.1')
