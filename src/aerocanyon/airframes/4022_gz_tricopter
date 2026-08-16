@@ -144,6 +144,24 @@ param set-default MC_YAWRATE_D 0.004
 param set-default MPC_MAN_Y_MAX 60
 param set-default MC_YAWRATE_MAX 60
 
+# Pitch/roll limit. PX4's default 45 deg is what let the observed transits
+# reach +45..47 deg of pitch. This is the ONLY enforced tilt bound in
+# multicopter mode: controller_node publishes POSITION setpoints, and PX4's
+# mc_pos_control derives the attitude from its own feedback, so neither that
+# node nor the CBF (which filters only the added feedforward term, and only in
+# treatment mode) can bound attitude -- the limit has to live here.
+#
+# NOTE it is symmetric TOTAL tilt (roll and pitch combined), so an asymmetric
+# bound like -20/+30 is not expressible: that would need either a patch to
+# mc_pos_control or this project taking over attitude control itself. In
+# fixed-wing mode PX4 does have asymmetric FW_P_LIM_MIN/MAX, which is where
+# such a constraint naturally belongs.
+#
+# Trade-off: tilt caps horizontal acceleration at g*tan(tilt) = 5.66 m/s^2 at
+# 30 deg, against MPC_ACC_HOR's 3.0 budget -- so this bounds attitude without
+# cutting into the acceleration the controller actually asks for.
+param set-default MPC_TILTMAX_AIR 30
+
 param set-default MPC_XY_VEL_P_ACC 3
 param set-default MPC_XY_VEL_I_ACC 4
 param set-default MPC_XY_VEL_D_ACC 0.1

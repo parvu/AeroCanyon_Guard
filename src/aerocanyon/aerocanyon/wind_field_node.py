@@ -30,7 +30,16 @@ class WindFieldNode(Node):
     def __init__(self):
         super().__init__('wind_field_node')
         self.declare_parameter('data_dir', '')
-        self.declare_parameter('turbulence_sigma', 1.5)
+        # Dryden gust intensity. Raised from the original 1.5 to 4.0 after
+        # measuring what the vehicle actually experienced: the disturbance was
+        # dominated by the STEADY mean-flow grid (mean 8.8 m/s, per-axis std
+        # 0.99/4.75/1.48), most of which PX4's own position-controller
+        # integrator absorbs by itself. That left almost nothing unsteady for
+        # a feedforward wind estimate to contribute, and the baseline/treatment
+        # difference sat below the run-to-run noise floor (see History.md).
+        # Gusts are the component a FO-PINN feedforward can uniquely help with,
+        # so they are what needs to be representative of a real urban canyon.
+        self.declare_parameter('turbulence_sigma', 2.5)
         self.declare_parameter('seed', 0)
 
         data_dir = self.get_parameter('data_dir').value
