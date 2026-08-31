@@ -29,9 +29,10 @@ Cloned/built separately, outside this workspace (not part of this repo):
 ### PX4 setup for the tricopter + wind
 
 The vehicle is a **tricopter VTOL** in the style of the E-flite
-Convergence: two tilting front rotors (which also give yaw in hover, via
-differential tilt) and one fixed vertical rear rotor that stops in
-forward flight. PX4 has a real-hardware airframe for the Convergence
+Convergence: three tilting rotors -- two front (which also give yaw in
+hover, via differential tilt) and one rear, an active pusher in cruise
+sized to half the vehicle's weight rather than a fixed rotor that stops
+in forward flight. PX4 has a real-hardware airframe for the Convergence
 (ID 13012) but has **never shipped a simulation model** for it, so this
 project carries its own — both files live in this repo and get copied
 into `PX4-Autopilot`:

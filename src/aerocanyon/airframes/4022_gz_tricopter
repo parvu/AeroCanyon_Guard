@@ -5,17 +5,47 @@
 # @type VTOL Tiltrotor
 #
 # Tricopter VTOL in the style of the E-flite Convergence (PX4's real-hardware
-# airframe 13012, which has never shipped a simulation model): two tilting
-# front rotors plus one fixed vertical rear rotor. Derived from
-# 4020_gz_tiltrotor -- see Tools/simulation/gz/models/tricopter, which is the
-# stock quad tiltrotor model with one rear rotor removed and the other moved
-# to the centreline.
+# airframe 13012, which has never shipped a simulation model): three tilting
+# rotors -- two front, one rear. Derived from 4020_gz_tiltrotor -- see
+# Tools/simulation/gz/models/tricopter, which is the stock quad tiltrotor
+# model with one rear rotor removed and the other moved to the centreline.
+#
+# The rear rotor tilts too (CA_ROTOR2_TILT, tilt servo 3 below): vertical for
+# takeoff/landing/hover like the front pair, tilted aft as an active pusher
+# in cruise, sized to half the vehicle's weight (CA_ROTOR2_CT, see the
+# comment there). Unlike the front two it is NOT wired into any differential
+# tilt-control axis (CA_SV_TL2_CT = None) -- see that param below for why.
 #
 # Yaw in hover comes from DIFFERENTIAL TILT of the two front rotors
-# (CA_SV_TL*_CT = 1), not from rotor drag-torque differential: with a single
-# rear rotor its reaction torque is inherently unbalanced and has to be
-# trimmed continuously by the tilt servos. That is also how the real
-# Convergence flies.
+# (CA_SV_TL0/1_CT = Yaw), not from rotor drag-torque differential: with a
+# single rear rotor its reaction torque is inherently unbalanced and has to
+# be trimmed continuously by the tilt servos. That is also how the real
+# Convergence flies. Two firmware constraints, verified against
+# src/modules/control_allocator/VehicleActuatorEffectiveness/
+# ActuatorEffectivenessTiltrotorVTOL.cpp (and ActuatorEffectivenessTilts.cpp)
+# at the PX4 commit this workspace is pinned to, shape the rear tilt's
+# config below and are worth knowing before changing it:
+#
+#   1. A rotor only auto-stops in forward flight if it has NO tilt servo at
+#      all (CA_ROTORi_TILT=None puts it in the firmware's untiltable-motor
+#      mask, which is what zeroes it in FlightPhase::FORWARD_FLIGHT). A
+#      rotor that IS tiltable -- front pair included -- keeps spinning in
+#      cruise; there is no PX4 param to have a rotor be both tiltable (for
+#      hover yaw, here) and auto-stopped in FW. So the front pair keep
+#      contributing thrust in cruise alongside the new rear pusher; making
+#      them untiltable to force a literal stop would cost them their only
+#      hover yaw mechanism.
+#   2. Pitch-tilt-control is hardcoded OFF for this vehicle type:
+#      getEffectivenessMatrix() always calls
+#      _tilts.updateTorqueSign(geometry, /*disable_pitch=*/true), and that
+#      function only applies a tilt's pitch torque when disable_pitch is
+#      false. CA_SV_TLi_CT = Pitch (or Yaw+Pitch) is therefore a silent
+#      no-op on this firmware -- CT = Yaw is the only differential-control
+#      mode that actually does anything for a tilt here. The rear tilt uses
+#      CT = None rather than claim a pitch-control effect that won't exist;
+#      its thrust still gets pitch authority for free from plain geometry
+#      (CA_ROTOR2_PX puts it off the CG on the X axis), no CT setting needed
+#      for that part.
 #
 # SCALE IS DELIBERATELY NOT THE REAL AIRCRAFT'S. The real E-flite Convergence
 # is 0.962 kg / 0.762 m span / ~0.14 m^2 wing (specs recovered from the
@@ -57,11 +87,19 @@ param set-default CA_ROTOR1_PX 0.35
 param set-default CA_ROTOR1_PY -0.35
 param set-default CA_ROTOR1_KM -0.05
 param set-default CA_ROTOR1_TILT 2
-# Rotor 2: rear centre, CCW, fixed vertical (stopped in forward flight)
+# Rotor 2: rear centre, CCW, now tiltable (servo 3) -- vertical for
+# hover/takeoff/landing, tilted aft as a pusher in cruise. CT below is
+# PX4's own thrust coefficient (Thrust = CT * u^2), scaled down from the
+# front rotors' default (6.5) by the same ratio as the Gazebo motorConstant
+# reduction in model.sdf, so PX4's allocator stays consistent with what the
+# sim will actually produce: 6.5 * (1.126e-05 / 2e-05) = 3.66. See
+# model.sdf's rotor_1_joint MulticopterMotorModel plugin for the underlying
+# half-vehicle-weight thrust sizing.
 param set-default CA_ROTOR2_PX -0.35
 param set-default CA_ROTOR2_PY 0.0
 param set-default CA_ROTOR2_KM 0.05
-param set-default CA_ROTOR2_TILT 0
+param set-default CA_ROTOR2_TILT 3
+param set-default CA_ROTOR2_CT 3.66
 
 # Tilt servos travel -15..90 deg rather than the stock 0..90. The negative
 # end is what gives hover yaw authority in BOTH directions: at a vertical
@@ -69,7 +107,7 @@ param set-default CA_ROTOR2_TILT 0
 # the other forward to trim the rear rotor's torque. The gz joint limits in
 # model.sdf were widened to match. Normalised tilt therefore maps as
 # 0 -> -15 deg, 1 -> +90 deg, which is what the VT_TILT_* values below encode.
-param set-default CA_SV_TL_COUNT 2
+param set-default CA_SV_TL_COUNT 3
 param set-default CA_SV_TL0_MINA -15
 param set-default CA_SV_TL0_MAXA 90
 param set-default CA_SV_TL0_TD 0
@@ -78,6 +116,15 @@ param set-default CA_SV_TL1_MINA -15
 param set-default CA_SV_TL1_MAXA 90
 param set-default CA_SV_TL1_TD 0
 param set-default CA_SV_TL1_CT 1
+# Tilt 3 (rear/tail): same range and fore-aft plane as the front two, but
+# CT = None (not Yaw or Pitch) -- see the header comment above for why
+# (pitch-tilt-control is hardcoded off for this vehicle type in PX4, and
+# this tilt isn't wired into yaw either, to leave the tuned front-pair yaw
+# loop below untouched).
+param set-default CA_SV_TL2_MINA -15
+param set-default CA_SV_TL2_MAXA 90
+param set-default CA_SV_TL2_TD 0
+param set-default CA_SV_TL2_CT 0
 
 param set-default CA_SV_CS0_TRQ_R -0.5
 param set-default CA_SV_CS0_TYPE 1
@@ -104,14 +151,19 @@ param set-default SIM_GZ_SV_FUNC2 202
 param set-default SIM_GZ_SV_FUNC3 203
 param set-default SIM_GZ_SV_FUNC4 204
 param set-default SIM_GZ_SV_FUNC5 205
+param set-default SIM_GZ_SV_FUNC6 206
 
-# Must match CA_SV_TL0/TL1 above -- these are the same two tilt servos seen
-# from the simulator side (SIM_GZ_SV_* is 1-based, model.sdf's servo_N topics
-# are 0-based, so channel 4 is servo_3 and channel 5 is servo_4).
+# Must match CA_SV_TL0/TL1/TL2 above -- these are the same three tilt servos
+# seen from the simulator side (SIM_GZ_SV_* is 1-based, model.sdf's servo_N
+# topics are 0-based, so channel 4 is servo_3, channel 5 is servo_4, and
+# channel 6 is servo_5 -- previously an unused/commented-out rudder hookup
+# in model.sdf, now the rear tilt servo).
 param set-default SIM_GZ_SV_MAXA4 90
 param set-default SIM_GZ_SV_MINA4 -15
 param set-default SIM_GZ_SV_MAXA5 90
 param set-default SIM_GZ_SV_MINA5 -15
+param set-default SIM_GZ_SV_MAXA6 90
+param set-default SIM_GZ_SV_MINA6 -15
 
 param set-default NPFG_PERIOD 12
 param set-default FW_PR_FF 0.2
@@ -181,9 +233,11 @@ param set-default VT_FWD_THRUST_EN 4
 param set-default VT_FWD_THRUST_SC 0.6
 param set-default VT_TYPE 1
 # Normalised against the -15..90 deg servo range above:
-#   MC    0.143 -> 0 deg   (rotors vertical in hover, with tilt room both ways)
+#   MC    0.143 -> 0 deg   (all three rotors vertical in hover, tilt room both ways)
 #   TRANS 0.571 -> 45 deg  (the partial-tilt accelerate phase)
-#   FW    1.0   -> 90 deg  (fully forward; the rear rotor stops)
+#   FW    1.0   -> 90 deg  (fully forward/aft; front pair keep pulling, rear
+#                           pushes -- see the header comment on why the rear
+#                           doesn't (and the front pair can't cleanly) stop)
 param set-default VT_TILT_MC 0.143
 param set-default VT_TILT_TRANS 0.571
 param set-default VT_TILT_FW 1.0

@@ -88,19 +88,11 @@
           <diffuse>0.175 0.175 0.175 1.0</diffuse>
         </material>
       </visual>
-      <visual name='motor_rear'>
-        <pose>-0.35 0 0.045 0 0 0</pose>
-        <geometry>
-          <cylinder>
-            <length>0.040</length>
-            <radius>0.023</radius>
-          </cylinder>
-        </geometry>
-        <material>
-          <ambient>.175 .175 .175 1.0</ambient>
-          <diffuse>.175 .175 .175 1.0</diffuse>
-        </material>
-      </visual>
+      <!-- motor_rear was a static (non-tilting) nacelle visual here.
+           Removed now that the rear rotor tilts: motor_1 (below) is a real
+           link with its own visual that moves with the tilt joint, and a
+           second, non-moving copy drawn on base_link would just double up
+           / desync from it. -->
       <gravity>1</gravity>
       <velocity_decay />
       <self_collide>0</self_collide>
@@ -352,6 +344,73 @@
       </axis>
     </joint>
 
+    <link name='motor_1'>
+      <pose>-0.35 0 0.045 0 0 0</pose>
+      <inertial>
+        <pose>0 0 0 0 0 0</pose>
+        <mass>0.05</mass>
+        <inertia>
+          <ixx>0.0166704</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>0.0166704</iyy>
+          <iyz>0</iyz>
+          <izz>0.0167604</izz>
+        </inertia>
+      </inertial>
+      <collision name='motor_1_collision'>
+        <pose>0 0 0 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <length>0.035</length>
+            <radius>0.02</radius>
+          </cylinder>
+        </geometry>
+        <surface>
+          <contact>
+            <ode />
+          </contact>
+          <friction>
+            <ode />
+          </friction>
+        </surface>
+      </collision>
+      <visual name='motor_1_visual'>
+        <pose>0 0 0 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <length>0.035</length>
+            <radius>0.02</radius>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.175 0.175 0.175 1.0</ambient>
+          <diffuse>0.175 0.175 0.175 1.0</diffuse>
+        </material>
+      </visual>
+      <gravity>1</gravity>
+      <velocity_decay />
+      <self_collide>0</self_collide>
+    </link>
+
+    <joint name='motor_1_joint' type='revolute'>
+      <child>motor_1</child>
+      <parent>base_link</parent>
+      <axis>
+        <xyz>0 1 0</xyz>
+        <limit>
+          <lower>-0.2618</lower>
+          <upper>1.57</upper>
+        </limit>
+        <dynamics>
+          <friction>1.0</friction>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+        </dynamics>
+        <use_parent_model_frame>1</use_parent_model_frame>
+      </axis>
+    </joint>
+
     <link name='rotor_1'>
       <pose>-0.35 0 0.07 0 0 0</pose>
       <inertial>
@@ -402,7 +461,7 @@
     </link>
     <joint name='rotor_1_joint' type='revolute'>
       <child>rotor_1</child>
-      <parent>base_link</parent>
+      <parent>motor_1</parent>
       <axis>
         <xyz>0 0 1</xyz>
         <limit>
@@ -847,6 +906,14 @@
       <cmd_min>-2</cmd_min>
       <err_max>0.2</err_max>
     </plugin>
+    <!-- Rear/tail rotor: now tiltable (motor_1_joint) rather than fixed,
+         and resized as an active cruise pusher rather than a rotor that
+         just stops in forward flight. motorConstant is sized so max
+         thrust (motorConstant * maxRotVelocity^2) is half the vehicle's
+         weight: mass 5.165 kg (base_link 5.0 + 3x0.05 motor housings +
+         3x0.005 rotor blades) * 9.80665 = 50.65 N weight; target thrust
+         25.33 N / 1500^2 = 1.126e-05. See CA_ROTOR2_CT in the airframe
+         file for the matching PX4-side allocation coefficient. -->
     <plugin filename="gz-sim-multicopter-motor-model-system"
       name="gz::sim::systems::MulticopterMotorModel">
       <jointName>rotor_1_joint</jointName>
@@ -855,7 +922,7 @@
       <timeConstantUp>0.0125</timeConstantUp>
       <timeConstantDown>0.025</timeConstantDown>
       <maxRotVelocity>1500</maxRotVelocity>
-      <motorConstant>2e-05</motorConstant>
+      <motorConstant>1.126e-05</motorConstant>
       <momentConstant>0.06</momentConstant>
       <commandSubTopic>command/motor_speed</commandSubTopic>
       <motorNumber>2</motorNumber>
@@ -863,6 +930,20 @@
       <rollingMomentCoefficient>1e-06</rollingMomentCoefficient>
       <rotorVelocitySlowdownSim>20</rotorVelocitySlowdownSim>
       <motorType>velocity</motorType>
+    </plugin>
+    <plugin
+      filename="gz-sim-joint-position-controller-system"
+      name="gz::sim::systems::JointPositionController">
+      <joint_name>motor_1_joint</joint_name>
+      <sub_topic>servo_5</sub_topic>
+      <p_gain>100</p_gain>
+      <i_gain>0</i_gain>
+      <d_gain>0</d_gain>
+      <i_max>0.0</i_max>
+      <i_min>0.0</i_min>
+      <cmd_max>2</cmd_max>
+      <cmd_min>-2</cmd_min>
+      <err_max>0.2</err_max>
     </plugin>
     <plugin filename="gz-sim-multicopter-motor-model-system"
       name="gz::sim::systems::MulticopterMotorModel">
