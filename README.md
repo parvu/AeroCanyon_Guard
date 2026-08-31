@@ -79,6 +79,18 @@ publishes -- neither needs editing. See
 for the pitfalls that look like they need a patch here but don't (and the
 ones that actually do, elsewhere in the stack).
 
+## Docker
+
+`Dockerfile` builds the entire stack above in one image: ROS2 Jazzy,
+Gazebo Harmonic, PX4-Autopilot SITL (pinned to the commit the vendored
+`px4_msgs` submodule was generated against, with this project's tricopter
+airframe registered into it), and Micro-XRCE-DDS-Agent. See the comment
+block at the top of the Dockerfile for build/run invocations, including
+the X11 flags GUI trials need. It's an alternative to the manual
+Prerequisites setup above, not a replacement for anything below this
+section — everything from "Build this workspace" onward still applies,
+just run inside the container.
+
 ## Build this workspace
 
 ```bash
