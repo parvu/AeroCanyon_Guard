@@ -52,6 +52,7 @@ process IS reused across runs.
 import argparse
 import os
 import pathlib
+import shutil
 import signal
 import subprocess
 import sys
@@ -87,6 +88,15 @@ SPAWN_POSE = f'{SPAWN_XYZ[0]},{SPAWN_XYZ[1]},{SPAWN_XYZ[2]},0,0,0'
 
 WORLD_SDF = PX4_DIR / 'Tools/simulation/gz/worlds' / f'{C.WORLD_NAME}.sdf'
 
+WEB_VIEWER = WS / 'web_viewer'
+# The launch7 plugin's own binary, not the `gz launch` subcommand -- verified
+# live this session that the subcommand can silently stop resolving (falls
+# back to `gz`'s generic top-level help instead of actually launching)
+# depending on which gz_tools_vendor happens to be first on PATH, while the
+# plugin's own binary always works regardless.
+GZ_LAUNCH_BIN = pathlib.Path('/usr/lib/x86_64-linux-gnu/gz/launch7/gz-launch')
+WEBVIEW_PORT = 8080
+
 
 def _gazebo_env():
     """Equivalent of sourcing build/px4_sitl_default/rootfs/gz_env.sh --
@@ -111,19 +121,19 @@ def _spawn_gazebo():
     reset, gives PX4 nothing carried over from any previous leg at all
     (no shared entity, no shared physics engine state).
 
-    No `-s` (server-only/headless): dropped so every trial's GUI is
-    visible by default -- being able to actually watch a leg fly (e.g.
-    to see the intermittent spawn-time flip in History.md happen live,
-    or just to sanity-check a run) matters more here than the ~100MB RAM
-    a headless server would save. Needs a working X11 DISPLAY.
+    `-s` (server-only/headless): a leg no longer needs a working X11
+    DISPLAY to run at all -- watching it fly is now the browser viewer's
+    job (see _spawn_web_bridge), not the native GUI's. Headless also
+    sidesteps the native-GUI-window-under-WSLg rendering issue documented
+    in the README/History.md entirely, rather than working around it.
 
-    No separate `-g` flag either -- tried it (to offer an explicit
-    headless option), and verified live that `-g` makes gz-sim detach a
-    child that escapes the process-group kill in run_leg's teardown,
-    unlike the combined server+gui process this function actually
-    launches without it. Not worth the leak risk for a flag that would
-    now be redundant anyway."""
-    proc = _spawn(f'gz sim -v 2 {WORLD_SDF} -r',
+    No separate `-g` flag (that's the OTHER, standalone way to get a
+    GUI): tried it in an earlier version of this function and verified
+    live that `-g` makes gz-sim detach a child that escapes the
+    process-group kill in run_leg's teardown. Moot now that this
+    function doesn't want a GUI process at all, but worth remembering if
+    a native GUI is ever wanted back."""
+    proc = _spawn(f'gz sim -v 2 {WORLD_SDF} -r -s',
                   cwd=PX4_DIR, env=_gazebo_env())
     time.sleep(5)  # matches the README's manual startup margin
     if proc.poll() is not None:
@@ -132,6 +142,42 @@ def _spawn_gazebo():
             'staying up -- check that ros-jazzy-ros-gz* is installed and '
             '`gz` is on PATH (source /opt/ros/jazzy/setup.bash).')
     return proc
+
+
+def _spawn_web_bridge():
+    """Bridge this leg's already-running gz-transport session to a
+    browser via websocket (web_viewer/, see README's "Fly from a
+    browser instead") so a headless leg (see _spawn_gazebo) is still
+    watchable live, just through the browser instead of a native window.
+    Best-effort: a missing gz-launch binary shouldn't fail the whole
+    trial over a visualization nicety."""
+    if not GZ_LAUNCH_BIN.exists():
+        print(f'warning: {GZ_LAUNCH_BIN} not found -- web viewer bridge '
+              'skipped, trial continues without live viewing')
+        return None
+    return _spawn(f'{GZ_LAUNCH_BIN} websocket.gzlaunch', cwd=WEB_VIEWER)
+
+
+def _spawn_static_server():
+    """Plain static file server for web_viewer/ -- deliberately NOT
+    control_server.py: that one also runs an rclpy node continuously
+    publishing OffboardControlMode/TrajectorySetpoint, which would fight
+    controller_node's own real offboard stream for control authority
+    during an actual trial (see README's warning against running it
+    alongside one). This has zero ROS2 involvement, just serves
+    index.html/gz3d.js/results.html, so it's safe to run for the whole
+    trial's lifetime -- started once here, not per leg like the web
+    bridge above, and deliberately never killed by this script: it needs
+    to keep serving results.html after main() itself has returned, and
+    os.setsid (see _spawn) already detaches it from this process's own
+    lifetime. Kills any previous instance on the same port first so
+    re-running this script doesn't pile up orphaned servers fighting
+    over WEBVIEW_PORT."""
+    subprocess.run(['pkill', '-f', f'http.server {WEBVIEW_PORT}'],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(1)
+    return _spawn(f'{sys.executable} -m http.server {WEBVIEW_PORT}',
+                  cwd=WEB_VIEWER)
 
 
 def _reset_gazebo_model():
@@ -340,12 +386,16 @@ def run_leg(mode, trial, duration, seed=0, turbulence=2.5, ff_gain=0.2):
     run the leg, tear the world back down -- always, even if the leg
     raises. This is what main() runs as a separate OS process per leg
     (see `--mode`), so a leg's Gazebo/PX4/rclpy state can never leak into
-    the next one."""
+    the next one. Also owns this leg's web viewer bridge (see
+    _spawn_web_bridge) -- paired 1:1 with its own gz sim instance, unlike
+    the static file server in main(), which spans the whole trial."""
     gz = _spawn_gazebo()
+    bridge = _spawn_web_bridge()
     try:
         return run_one(mode, trial, duration, seed=seed, turbulence=turbulence,
                        ff_gain=ff_gain)
     finally:
+        _kill(bridge)
         _kill(gz)
         # Belt-and-suspenders: verified live that `gz sim ... -g` (the
         # standalone gui-client flag, no longer used by _spawn_gazebo --
@@ -390,6 +440,13 @@ def main():
                 turbulence=args.turbulence, ff_gain=args.ff_gain)
         return
 
+    # Started once here, not per leg -- see _spawn_static_server's own
+    # docstring for why (no ROS2 involvement, safe for the whole trial,
+    # needs to keep serving results.html after this function returns).
+    _spawn_static_server()
+    print(f'web viewer: http://localhost:{WEBVIEW_PORT} '
+          '(live during each leg, results page once both finish)')
+
     # Each leg gets its own OS process, and inside that its own fresh
     # Gazebo+PX4 (see run_leg) -- no state at all carries from one leg
     # into the next.
@@ -402,7 +459,22 @@ def main():
         result = subprocess.run(cmd, cwd=WS)
         if result.returncode != 0:
             raise SystemExit(f'{mode} leg failed (exit code {result.returncode})')
-    print('both trials complete; now run plot_results')
+    print('both trials complete; generating figures')
+
+    plot_cmd = [sys.executable, '-m', 'aerocanyon.plot_results', '--trial', args.trial]
+    result = subprocess.run(plot_cmd, cwd=WS)
+    if result.returncode != 0:
+        raise SystemExit(f'plot_results failed (exit code {result.returncode})')
+
+    # Copies rather than points results.html at ../figures/ directly:
+    # the static server is rooted at web_viewer/ (see _spawn_static_server)
+    # and Python's http.server refuses to serve outside its own root.
+    results_dir = WEB_VIEWER / 'results'
+    results_dir.mkdir(exist_ok=True)
+    for name in ('comparison.png', 'cbf_intervention.png'):
+        shutil.copy(WS / 'figures' / name, results_dir / name)
+
+    print(f'results: http://localhost:{WEBVIEW_PORT}/results.html')
 
 
 if __name__ == '__main__':

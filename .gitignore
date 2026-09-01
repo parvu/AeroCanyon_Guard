@@ -13,5 +13,9 @@ __pycache__/
 .ros/
 trials/
 
+# run_trial.py's browser-viewable copy of figures/*.png -- regenerated
+# every run, figures/ is the tracked canonical copy
+web_viewer/results/
+
 # superpowers:subagent-driven-development scratch workspace
 .superpowers/sdd/

@@ -323,11 +323,17 @@ python3 -m aerocanyon.run_trial --trial live_full  # --duration defaults to 220s
 python3 -m aerocanyon.plot_results --trial live_full
 ```
 
-Each leg's Gazebo GUI is visible by default while it runs (needs a
-working X11 display server -- on WSL2, [VcXsrv](https://sourceforge.net/projects/vcxsrv/)
-or X410, and `export DISPLAY=:0` or your WSL2 host IP first) — useful
-for actually watching a trial fly, or catching the intermittent
-spawn-time attitude flip in History.md happening live.
+Each leg runs Gazebo headless (`-s`, no native GUI, no X11 needed) and
+starts its own `web_viewer/` browser bridge instead -- open
+`http://localhost:8080` while a leg is running to watch it fly (same 3D
+viewer as [Fly the tricopter manually](#fly-the-tricopter-manually)
+above, read-only here since nothing is driving `/api/stick`). Once both
+legs finish, `run_trial.py` runs `plot_results` itself, copies the two
+figures into `web_viewer/results/`, and prints a `results:` URL --
+reload `http://localhost:8080/results.html` to see them without leaving
+the browser. `python3 -m aerocanyon.plot_results --trial live_full` (the
+explicit form below) is still there for regenerating figures from
+existing CSVs without re-flying anything.
 
 `plot_results` reads `trials/live_full_baseline.csv` and
 `trials/live_full_treatment.csv` (the same `--trial` name used for the run)
