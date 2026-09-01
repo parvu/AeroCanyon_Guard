@@ -161,12 +161,18 @@
       */
     }
 
-    function resetCameraPose() {
+    function resetCameraPose(tries) {
       // Ported from CaveX-Explorer-Pro's web viewer -- default gz-launch
       // camera pose is sized for its own tiny demo "shapes" world and
       // points at empty space here. Points at the tricopter's actual spawn
-      // (-100, 0, 0.246 -- see run_trial.py's SPAWN_POSE / the README's
-      // PX4_GZ_MODEL_POSE).
+      // pose, read live off the scene graph rather than hardcoded, since
+      // where that is depends on how PX4 was started: run_trial.py sets
+      // PX4_GZ_MODEL_POSE to the canyon entrance (-100, 0, 0.246), but the
+      // manual-flight path here (PX4 launched directly, no env var) spawns
+      // at the world origin instead -- a hardcoded -100 pointed the camera
+      // at empty space for that path (real bug found live: "plane doesn't
+      // show in webview" turned out to be this, not a rendering/spawn
+      // failure -- the model was there, just 100m off camera).
       //
       // Real bug found live: an earlier version framed this as a bird's-eye
       // view of the whole canyon (~137m out), sized for CaveX's own larger
@@ -177,8 +183,15 @@
       // easy to mistake for "not there at all". Close-up framing instead;
       // the orbit/pan controls (Interactive view control plugin) still let
       // the user zoom out to see the whole canyon themselves.
+      const tricopter = scene.getByName('tricopter_0');
+      if (!tricopter) {
+        if (tries === undefined) tries = 20;
+        if (tries > 0) { setTimeout(function () { resetCameraPose(tries - 1); }, 500); }
+        return;
+      }
+      const p = tricopter.position;
       const cam = scene.camera;
-      cam.position.set(-100 + 2.5, -2.5, 1.8);
+      cam.position.set(p.x + 2.5, p.y - 2.5, p.z + 1.554);
       // Real bug found live 2026-08-27: this vendored three.js build (r86,
       // see gz3d.js) only supports Object3D.lookAt(vector) -- a single
       // Vector3 -- not the (x,y,z) numbers form modern three.js added later.
@@ -191,7 +204,7 @@
       // nothing else. Root-caused by reproducing lookAt(20,0,7.9) on a bare
       // scratch camera in the browser console and finding the resulting
       // quaternion was already NaN before any render happened.
-      cam.lookAt(new THREE.Vector3(-100, 0, 0.246));
+      cam.lookAt(new THREE.Vector3(p.x, p.y, p.z + 0.146));
     }
 
     function animate() {
@@ -776,6 +789,8 @@
       <button onclick="manualCmd('arm')">arm</button>
       <button onclick="manualCmd('disarm')">disarm</button>
       <button onclick="manualCmd('land')">land now</button>
+      <button onclick="manualCmd('transition_fw')">transition FW</button>
+      <button onclick="manualCmd('transition_mc')">transition MC</button>
     </div>
 
     <div id="speedControls" style="position: fixed; top: 10px; right: 10px;

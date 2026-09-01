@@ -20,32 +20,33 @@ Built on PX4-Autopilot SITL + Micro-XRCE-DDS for ROS2 ↔ PX4 bridging.
 Cloned/built separately, outside this workspace (not part of this repo):
 
 - **ROS2 Jazzy + Gazebo Harmonic:** `sudo apt install ros-jazzy-ros-gz* ros-jazzy-rosidl*`
-- **[PX4-Autopilot](https://github.com/PX4/PX4-Autopilot)** cloned at `~/PX4-Autopilot`,
+- **[PX4-Autopilot](https://github.com/PX4/PX4-Autopilot)** cloned at `$HOME/PX4-Autopilot`,
   built for SITL: `make px4_sitl gz_tricopter` (after installing the
   airframe below — it does not exist in stock PX4)
 - **[Micro-XRCE-DDS-Agent](https://github.com/eProsima/Micro-XRCE-DDS-Agent)**
-  built at `~/Micro-XRCE-DDS-Agent` (bridges ROS2 ↔ PX4)
+  built at `$HOME/Micro-XRCE-DDS-Agent` (bridges ROS2 ↔ PX4)
 
 ### PX4 setup for the tricopter + wind
 
 The vehicle is a **tricopter VTOL** in the style of the E-flite
 Convergence: three tilting rotors -- two front (which also give yaw in
-hover, via differential tilt) and one rear, an active pusher in cruise
-sized to half the vehicle's weight rather than a fixed rotor that stops
-in forward flight. PX4 has a real-hardware airframe for the Convergence
-(ID 13012) but has **never shipped a simulation model** for it, so this
-project carries its own — both files live in this repo and get copied
-into `PX4-Autopilot`:
+hover, via differential tilt) and one rear, tiltable too (vertical for
+hover, an active pusher in cruise). All three share equal thrust; see
+[History.md](History.md) for why the rear used to be undersized to half
+the front motors' thrust and what that broke. PX4 has a real-hardware
+airframe for the Convergence (ID 13012) but has **never shipped a
+simulation model** for it, so this project carries its own — both files
+live in this repo and get copied into `PX4-Autopilot`:
 
 1. **Install the tricopter model and airframe:**
    ```bash
-   cp -r ~/AeroCanyon_Guard/src/aerocanyon/models/tricopter \
-         ~/PX4-Autopilot/Tools/simulation/gz/models/
-   cp ~/AeroCanyon_Guard/src/aerocanyon/airframes/4022_gz_tricopter \
-      ~/PX4-Autopilot/ROMFS/px4fmu_common/init.d-posix/airframes/
+   cp -r $HOME/AeroCanyon_Guard/src/aerocanyon/models/tricopter \
+         $HOME/PX4-Autopilot/Tools/simulation/gz/models/
+   cp $HOME/AeroCanyon_Guard/src/aerocanyon/airframes/4022_gz_tricopter \
+      $HOME/PX4-Autopilot/ROMFS/px4fmu_common/init.d-posix/airframes/
    # then register it and rebuild
    #   add `4022_gz_tricopter` to that directory's CMakeLists.txt
-   #   make px4_sitl gz_tricopter
+   cd $HOME/PX4-Autopilot && make px4_sitl gz_tricopter
    ```
    The model is derived from PX4's stock quad `tiltrotor`: one rear rotor
    removed, the other moved to the centreline, and the tilt joints
@@ -54,8 +55,8 @@ into `PX4-Autopilot`:
 
 2. **Place the canyon world:**
    ```bash
-   cp ~/AeroCanyon_Guard/src/aerocanyon/worlds/urban_canyon.sdf \
-      ~/PX4-Autopilot/Tools/simulation/gz/worlds/urban_canyon.sdf
+   cp $HOME/AeroCanyon_Guard/src/aerocanyon/worlds/urban_canyon.sdf \
+      $HOME/PX4-Autopilot/Tools/simulation/gz/worlds/urban_canyon.sdf
    ```
    This world loads `gz-sim-air-speed-system`; without it the model's
    airspeed sensor declares itself but never publishes, and PX4 refuses
@@ -80,133 +81,31 @@ publishes -- neither needs editing. See
 for the pitfalls that look like they need a patch here but don't (and the
 ones that actually do, elsewhere in the stack).
 
-## Docker
-
-`Dockerfile` builds the entire stack above in one image: ROS2 Jazzy,
-Gazebo Harmonic, PX4-Autopilot SITL (pinned to the commit the vendored
-`px4_msgs` submodule was generated against, with this project's tricopter
-airframe registered into it), and Micro-XRCE-DDS-Agent. See the comment
-block at the top of the Dockerfile for build/run invocations, including
-the X11 flags GUI trials need. It's an alternative to the manual
-Prerequisites setup above, not a replacement for anything below this
-section — everything from "Build this workspace" onward still applies,
-just run inside the container.
-
 ## Build this workspace
 
 ```bash
-cd ~/AeroCanyon_Guard
+cd $HOME/AeroCanyon_Guard
 git submodule update --init --recursive
 source /opt/ros/jazzy/setup.bash
 colcon build --symlink-install
 ```
 
-## AeroCanyon-Guard: Tricopter Canyon Transit
+## Fly the tricopter manually
 
-Autonomous mission: tricopter VTOL transits an urban canyon (6 box buildings)
-under spatially-varying wind disturbance. FO-PINN estimates wind forces,
-CBF safety filter prevents collisions and stalls.
-
-
-### Regenerate the world and the wind grid
-
-```bash
-cd ~/AeroCanyon_Guard
-source /opt/ros/jazzy/setup.bash && source install/setup.bash
-python3 -m aerocanyon.canyon_geometry        # writes worlds/urban_canyon.sdf
-python3 -m aerocanyon.canyon_field           # writes data/wind_grid.npy
-cp src/aerocanyon/worlds/urban_canyon.sdf \
-   ~/PX4-Autopilot/Tools/simulation/gz/worlds/urban_canyon.sdf
-```
-
-### Train the FO-PINN wind estimator
-
-Collect baseline trials first (see below), then:
+Start Gazebo and PX4 by hand and keep them running -- useful to
+sanity-check a fresh PX4/model checkout, watch it fly in the GUI without
+the trial harness's own PX4/agent lifecycle management, or fly it
+yourself from QGroundControl, a browser, or a physical RC transmitter.
+This is the opposite of the [automated trial](#run-the-automated-baselinetreatment-trial)
+below, which spawns a completely fresh, split-process Gazebo/PX4 pair
+per leg and tears them down itself -- **do not run `run_trial.py` on top
+of a manually-started stack**: its own spawn of PX4 or the DDS agent will
+silently lose the port/instance-0-lock race against the manually-started
+one and die immediately (it raises with a clear message if that happens,
+rather than failing silently).
 
 ```bash
-source .venv/bin/activate
-PYTHONPATH=src/aerocanyon python3 -m aerocanyon.train_pinn trials/train*_baseline.csv --alpha 1.0
-```
-
-`docs/alpha_sweep.txt` records the alpha-vs-skill sweep used to pick the
-fractional order; re-run it against real flight data before trusting the
-checkpoint (see `task-8-report.md` — the shipped checkpoint was trained on
-synthetic stand-in data because no live PX4 process was available in that
-task's environment).
-
-### Run the paired baseline/treatment trial
-
-`run_trial.py` owns the whole stack itself now, for both legs: Gazebo,
-PX4 SITL, and the Micro-XRCE-DDS-Agent. There's nothing to start by
-hand and nothing external to keep running in another terminal.
-
-**Each leg runs as its own separate OS process** (`run_trial --mode
-baseline` / `--mode treatment`, spawned internally by `main()`), and
-each of those spawns a completely fresh `gz sim` world just for that
-leg, boots PX4 against it, runs the leg, then tears both processes back
-down before the next leg's process even starts. No entity, physics
-state, or Python/rclpy state is shared between legs at all -- this
-replaced an earlier design where one long-lived Gazebo instance was
-reused across legs and the vehicle was reset in place between them
-(`run_trial._reset_gazebo_model`, kept in the code for the manual-flying
-flow below, which still uses an external Gazebo).
-
-Do not start PX4 or the DDS agent by hand alongside `run_trial.py`: its
-own spawn of either will silently lose the port/instance-0-lock race
-against a manually-started one and its own PX4 process dies immediately
-(it raises with a clear message if that happens, rather than failing
-silently).
-
-**Landing behaviour:** both modes land in place (`VEHICLE_CMD_NAV_LAND`)
-once `controller_node` measures having actually cleared the canyon exit
--- not just at a wall-clock timeout. An earlier design instead flew the
-vehicle all the way back to the spawn point before landing, to make sure
-the next leg's PX4 process wouldn't inherit a drifting or crashed
-vehicle's state; that's no longer necessary now that each leg gets its
-own fresh Gazebo/PX4 process with nothing shared between legs at all
-(see above), so landing in place is simpler and just as safe. Landing
-itself is handed off entirely to PX4's own `AUTO_LAND` -- it may turn
-the vehicle's heading during the descent, but always lands flat/level
-and disarms reliably; see History.md for why a heading-locked
-self-controlled descent was tried and rejected (verified live to be
-capable of losing control entirely). The VTOL fixed-wing transition
-stays disabled (`controller_node.ENABLE_VTOL_TRANSITION = False`) for
-both legs — the whole flight flies in stable multicopter mode; see
-History.md for why.
-
-```bash
-cd ~/AeroCanyon_Guard
-source /opt/ros/jazzy/setup.bash && source install/setup.bash
-source .venv/bin/activate
-python3 -m aerocanyon.run_trial --trial live_full  # --duration defaults to 220s, see --help
-python3 -m aerocanyon.plot_results --trial live_full
-```
-
-Each leg's Gazebo GUI is visible by default while it runs (needs a
-working X11 display server -- on WSL2, [VcXsrv](https://sourceforge.net/projects/vcxsrv/)
-or X410, and `export DISPLAY=:0` or your WSL2 host IP first) — useful
-for actually watching a trial fly, or catching the intermittent
-spawn-time attitude flip in History.md happening live.
-
-`plot_results` reads `trials/live_full_baseline.csv` and
-`trials/live_full_treatment.csv` (the same `--trial` name used for the run)
-and writes `figures/comparison.png` and `figures/cbf_intervention.png` —
-see [View the figures](#view-the-figures) below for what's in them.
-
-**SITL-specific PX4 configuration:** see
-[History.md](History.md#known-good-arming-and-telemetry-configuration) —
-it's the single source of truth for the airframe parameters; don't
-duplicate them here, they've drifted out of sync with reality before.
-
-**Watching a trial fly, or flying manually (no `run_trial.py`):** if you
-want to fly the tricopter by hand instead — e.g. to sanity-check a fresh
-PX4/model checkout, watch it in the GUI without the trial harness's own
-PX4/agent lifecycle management, or fly it yourself from QGroundControl —
-Gazebo and PX4 need to be started externally and kept running, exactly
-the opposite of the split-process, fresh-per-leg default above:
-
-```bash
-cd ~/PX4-Autopilot
+cd $HOME/PX4-Autopilot
 source /opt/ros/jazzy/setup.bash
 export GZ_IP=127.0.0.1
 
@@ -214,13 +113,18 @@ export GZ_IP=127.0.0.1
 # MUST source gz_env.sh first (sets GZ_SIM_RESOURCE_PATH) -- without it
 # gz-sim can't resolve model://tricopter and the vehicle silently never
 # spawns (nothing shows up in `gz model --list`, no error visible unless
-# you check the server's own stderr for "Unable to find uri[...]").
-source build/px4_sitl_default/rootfs/gz_env.sh
+# you check the server's own stderr for "Unable to find uri[...]"). If
+# another project's shell startup files also export GZ_SIM_RESOURCE_PATH
+# (check `env | grep GZ_SIM_RESOURCE_PATH` before sourcing), gz_env.sh
+# appends to whatever is already set rather than replacing it, so this
+# is safe to source alongside that -- just source it in THIS shell,
+# every time, before starting gz sim from it.
+source $HOME/PX4-Autopilot/build/px4_sitl_default/rootfs/gz_env.sh
 gz sim -v 2 Tools/simulation/gz/worlds/urban_canyon.sdf -r -s -g &  # drop -g for headless
 sleep 5
 
 # Terminal 2: XRCE-DDS bridge
-~/Micro-XRCE-DDS-Agent/build/MicroXRCEAgent udp4 -p 8888 &
+$HOME/Micro-XRCE-DDS-Agent/build/MicroXRCEAgent udp4 -p 8888 &
 sleep 2
 
 # Terminal 3: PX4 SITL
@@ -237,9 +141,7 @@ over MAVLink UDP), from the browser (see below), or launch just the
 mission nodes without `run_trial.py`'s process orchestration:
 `ros2 launch aerocanyon canyon_sim.launch.py mode:=baseline trial:=manual`.
 
-Do not run `run_trial.py` on top of this -- see the warning above.
-
-#### Fly from a browser instead
+### Fly from a browser instead
 
 `web_viewer/` is a small browser-based Gazebo 3D viewer (ported from a
 sibling project) plus a manual control panel, useful when the native `gz
@@ -252,16 +154,20 @@ during a trial, and this server isn't meant to run alongside one.
 One-time setup -- the vehicle's mesh files aren't vendored into this repo,
 the browser fetches them straight from PX4-Autopilot's own copy:
 ```bash
+cd $HOME/AeroCanyon_Guard
 mkdir -p web_viewer/assets
-ln -s ~/PX4-Autopilot/Tools/simulation/gz/models/standard_vtol web_viewer/assets/standard_vtol
+ln -s $HOME/PX4-Autopilot/Tools/simulation/gz/models/standard_vtol web_viewer/assets/standard_vtol
 ```
 
+With Gazebo and PX4 already running (previous section):
 ```bash
-# tab 1: browser viewer (scene stream) -- needs the gz sim from above running
+# tab 1: browser viewer (scene stream)
+cd $HOME/AeroCanyon_Guard
 gz launch web_viewer/websocket.gzlaunch
 
 # tab 2: control server (static files + manual offboard velocity setpoints)
-cd web_viewer && source /opt/ros/jazzy/setup.bash && source ../install/setup.bash
+cd $HOME/AeroCanyon_Guard/web_viewer
+source /opt/ros/jazzy/setup.bash && source ../install/setup.bash
 python3 control_server.py 8080
 ```
 
@@ -272,7 +178,7 @@ pitch) stream continuously while touched and self-center on release;
 `arm` requests offboard mode + arm, `land now` hands off to PX4's
 `AUTO_LAND`.
 
-#### Fly with a physical RC transmitter instead
+### Fly with a physical RC transmitter instead
 
 `rc_bridge.py` reads a real RC transmitter's USB "simulator" dongle as a
 standard Linux joystick (`/dev/input/js0`) and forwards all four Mode 2
@@ -305,13 +211,20 @@ usbipd bind --busid <BUSID>
 usbipd attach --wsl --busid <BUSID>
 ```
 ```bash
-# In WSL2, once per attach -- the input device node is root-only by default:
-sudo modprobe hid hid-generic usbhid joydev   # if not already loaded
+# In WSL2, once per attach. modprobe only takes ONE module name -- passing
+# more (`modprobe hid hid-generic usbhid joydev`) silently treats the rest
+# as parameters to `hid`, not separate modules (dmesg would show "unknown
+# parameter 'hid-generic' ignored" etc.), so usbhid never loads and no
+# /dev/input node ever appears. Load each one separately:
+sudo modprobe hid-generic   # if not already loaded
+sudo modprobe usbhid        # the one that actually creates /dev/input/js0
+sudo modprobe joydev
 sudo chmod 666 /dev/input/js0
 ```
 
 Then, alongside `control_server.py` from above:
 ```bash
+cd $HOME/AeroCanyon_Guard/web_viewer
 python3 rc_bridge.py 8080
 ```
 
@@ -321,7 +234,104 @@ with `python3 -c "import struct; ..."` reading `/dev/input/js0`'s
 `struct js_event` stream while moving one stick at a time, the same way
 `AXIS_ROLL`/`AXIS_PITCH`/`AXIS_THROTTLE`/`AXIS_YAW` were confirmed here.
 
-### View the figures
+## Run the automated baseline/treatment trial
+
+### AeroCanyon-Guard: Tricopter Canyon Transit
+
+Autonomous mission: tricopter VTOL transits an urban canyon (6 box buildings)
+under spatially-varying wind disturbance. FO-PINN estimates wind forces,
+CBF safety filter prevents collisions and stalls.
+
+### Regenerate the world and the wind grid
+
+```bash
+cd $HOME/AeroCanyon_Guard
+source /opt/ros/jazzy/setup.bash && source install/setup.bash
+python3 -m aerocanyon.canyon_geometry        # writes worlds/urban_canyon.sdf
+python3 -m aerocanyon.canyon_field           # writes data/wind_grid.npy
+cp src/aerocanyon/worlds/urban_canyon.sdf \
+   $HOME/PX4-Autopilot/Tools/simulation/gz/worlds/urban_canyon.sdf
+```
+
+### Train the FO-PINN wind estimator
+
+Collect baseline trials first (see below), then:
+
+```bash
+cd $HOME/AeroCanyon_Guard
+source .venv/bin/activate
+PYTHONPATH=src/aerocanyon python3 -m aerocanyon.train_pinn trials/train*_baseline.csv --alpha 1.0
+```
+
+`docs/alpha_sweep.txt` records the alpha-vs-skill sweep used to pick the
+fractional order; re-run it against real flight data before trusting the
+checkpoint (see `task-8-report.md` — the shipped checkpoint was trained on
+synthetic stand-in data because no live PX4 process was available in that
+task's environment).
+
+### Run the paired baseline/treatment trial
+
+`run_trial.py` owns the whole stack itself now, for both legs: Gazebo,
+PX4 SITL, and the Micro-XRCE-DDS-Agent. There's nothing to start by
+hand and nothing external to keep running in another terminal.
+
+**Each leg runs as its own separate OS process** (`run_trial --mode
+baseline` / `--mode treatment`, spawned internally by `main()`), and
+each of those spawns a completely fresh `gz sim` world just for that
+leg, boots PX4 against it, runs the leg, then tears both processes back
+down before the next leg's process even starts. No entity, physics
+state, or Python/rclpy state is shared between legs at all -- this
+replaced an earlier design where one long-lived Gazebo instance was
+reused across legs and the vehicle was reset in place between them
+(`run_trial._reset_gazebo_model`, kept in the code for the manual-flying
+flow above, which still uses an external Gazebo).
+
+Do not start PX4 or the DDS agent by hand alongside `run_trial.py`: see
+the warning at the top of [Fly the tricopter manually](#fly-the-tricopter-manually)
+above.
+
+**Landing behaviour:** both modes land in place (`VEHICLE_CMD_NAV_LAND`)
+once `controller_node` measures having actually cleared the canyon exit
+-- not just at a wall-clock timeout. An earlier design instead flew the
+vehicle all the way back to the spawn point before landing, to make sure
+the next leg's PX4 process wouldn't inherit a drifting or crashed
+vehicle's state; that's no longer necessary now that each leg gets its
+own fresh Gazebo/PX4 process with nothing shared between legs at all
+(see above), so landing in place is simpler and just as safe. Landing
+itself is handed off entirely to PX4's own `AUTO_LAND` -- it may turn
+the vehicle's heading during the descent, but always lands flat/level
+and disarms reliably; see History.md for why a heading-locked
+self-controlled descent was tried and rejected (verified live to be
+capable of losing control entirely). The VTOL fixed-wing transition
+stays disabled (`controller_node.ENABLE_VTOL_TRANSITION = False`) for
+both legs — the whole flight flies in stable multicopter mode; see
+History.md for why.
+
+```bash
+cd $HOME/AeroCanyon_Guard
+source /opt/ros/jazzy/setup.bash && source install/setup.bash
+source .venv/bin/activate
+python3 -m aerocanyon.run_trial --trial live_full  # --duration defaults to 220s, see --help
+python3 -m aerocanyon.plot_results --trial live_full
+```
+
+Each leg's Gazebo GUI is visible by default while it runs (needs a
+working X11 display server -- on WSL2, [VcXsrv](https://sourceforge.net/projects/vcxsrv/)
+or X410, and `export DISPLAY=:0` or your WSL2 host IP first) — useful
+for actually watching a trial fly, or catching the intermittent
+spawn-time attitude flip in History.md happening live.
+
+`plot_results` reads `trials/live_full_baseline.csv` and
+`trials/live_full_treatment.csv` (the same `--trial` name used for the run)
+and writes `figures/comparison.png` and `figures/cbf_intervention.png` —
+see [View the figures](#view-the-figures) below for what's in them.
+
+**SITL-specific PX4 configuration:** see
+[History.md](History.md#known-good-arming-and-telemetry-configuration) —
+it's the single source of truth for the airframe parameters; don't
+duplicate them here, they've drifted out of sync with reality before.
+
+## View the figures
 
 `plot_results.py` writes two figures to `figures/`:
 

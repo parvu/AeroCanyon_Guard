@@ -29,7 +29,10 @@ from rclpy.qos import qos_profile_sensor_data
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
 CONTROL_HZ = 50
-MAX_VELOCITY_MPS = 1.0
+# Was 1.0; raised to put full-stick climb at the target 3 m/s -- matches
+# MPC_Z_VEL_MAX_UP=3.0, now set explicitly in 4022_gz_tricopter so PX4
+# doesn't cap the climb below what this asks for.
+MAX_VELOCITY_MPS = 3.0
 MAX_YAW_RATE_RAD_S = 0.5
 # Mode 2 RC sticks are proportional and self-centering -- the browser
 # streams the live stick position continuously (see index.html) rather
@@ -44,7 +47,7 @@ STICK_TIMEOUT_S = 0.3
 # disconnect, not a single dropped/delayed HTTP request.
 RC_PRESENT_TIMEOUT_S = 1.0
 
-COMMAND_COMMANDS = {'arm', 'disarm', 'land'}
+COMMAND_COMMANDS = {'arm', 'disarm', 'land', 'transition_fw', 'transition_mc'}
 
 
 def resolve_stick(stick, stick_time, now, timeout):
@@ -139,6 +142,14 @@ class WebControlNode(Node):
             self._send_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 0.0)
         elif cmd == 'land':
             self._send_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
+        elif cmd == 'transition_fw':
+            # MAV_VTOL_STATE_FW = 4. controller_node's own
+            # ENABLE_VTOL_TRANSITION=False only gates the AUTONOMOUS trial's
+            # own logic, not PX4 itself -- this command reaches PX4 directly.
+            self._send_command(VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION, 4.0)
+        elif cmd == 'transition_mc':
+            # MAV_VTOL_STATE_MC = 3.
+            self._send_command(VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION, 3.0)
 
     def _send_command(self, command, param1=0.0, param2=0.0):
         msg = VehicleCommand()

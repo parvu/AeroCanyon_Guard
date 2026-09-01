@@ -894,8 +894,18 @@
            no reason for it -- all three motors now share one thrust
            target, 1/3 of the vehicle's weight each: mass 5.165 kg *
            9.80665 = 50.65 N weight / 3 = 16.88 N target thrust / 1500^2
-           = 7.504e-06. See matching CA_ROTOR0/1/2_CT in the airframe file. -->
-      <motorConstant>7.504e-06</motorConstant>
+           = 7.504e-06, then +20% (9.005e-06) after that still couldn't
+           get the vehicle off the ground -- real motors/props overhead
+           this model doesn't capture. Raised again live to 1.072e-05
+           (~1.43x weight/3, i.e. thrust/weight ~1.43) to fix that, then
+           to 1.608e-05 (~2.14x weight/3, thrust/weight ~2.14) because
+           1.43 gave too little climb authority to reach a commanded 3 m/s
+           climb in reasonable time -- this constant only sets REAL
+           physical thrust, independent of CA_ROTOR0/1/2_CT in the
+           airframe file (that's a control-allocator gain, not a thrust
+           rating; see the corrected comment there for why those two are
+           NOT the same knob despite both looking like "thrust"). -->
+      <motorConstant>1.608e-05</motorConstant>
       <momentConstant>0.06</momentConstant>
       <commandSubTopic>command/motor_speed</commandSubTopic>
       <motorNumber>0</motorNumber>
@@ -924,8 +934,11 @@
          not full weight -- see motor_0's own comment above for why that
          turned out wrong (undersized it enough to saturate and cause a
          real yaw-right at every takeoff) and got reverted: all three
-         motors now share one 1/3-of-weight thrust target, 7.504e-06.
-         See matching CA_ROTOR0/1/2_CT in the airframe file. -->
+         motors now share one 1/3-of-weight thrust target -- see motor_0's
+         own comment above for the full sizing history, currently
+         1.608e-05 for a ~2.14x thrust/weight margin (needed for a 3 m/s
+         commanded climb). See that comment for why CA_ROTOR0/1/2_CT in
+         the airframe file is a separate, unrelated knob. -->
     <plugin filename="gz-sim-multicopter-motor-model-system"
       name="gz::sim::systems::MulticopterMotorModel">
       <jointName>rotor_1_joint</jointName>
@@ -934,7 +947,7 @@
       <timeConstantUp>0.0125</timeConstantUp>
       <timeConstantDown>0.025</timeConstantDown>
       <maxRotVelocity>1500</maxRotVelocity>
-      <motorConstant>7.504e-06</motorConstant>
+      <motorConstant>1.608e-05</motorConstant>
       <momentConstant>0.06</momentConstant>
       <commandSubTopic>command/motor_speed</commandSubTopic>
       <motorNumber>2</motorNumber>
@@ -965,7 +978,7 @@
       <timeConstantUp>0.0125</timeConstantUp>
       <timeConstantDown>0.025</timeConstantDown>
       <maxRotVelocity>1500</maxRotVelocity>
-      <motorConstant>7.504e-06</motorConstant>
+      <motorConstant>1.608e-05</motorConstant>
       <momentConstant>0.06</momentConstant>
       <commandSubTopic>command/motor_speed</commandSubTopic>
       <motorNumber>1</motorNumber>

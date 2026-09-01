@@ -21,8 +21,11 @@ The kernel joystick driver already calibrates raw ADC readings to the
 standard -32767..32767 range, so no per-unit min/center/max calibration
 is needed here (unlike the earlier hidraw-based approach).
 
-Setup, once per USB attach (see README):
-    sudo modprobe hid hid-generic usbhid joydev
+Setup, once per USB attach (see README -- modprobe only takes one module
+name at a time, so these can't be combined into one call):
+    sudo modprobe hid-generic
+    sudo modprobe usbhid
+    sudo modprobe joydev
     sudo chmod 666 /dev/input/js0
 
 Run with control_server.py already up (plain localhost HTTP, no ROS2

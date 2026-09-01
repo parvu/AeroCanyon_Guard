@@ -12,9 +12,12 @@
 #
 # The rear rotor tilts too (CA_ROTOR2_TILT, tilt servo 3 below): vertical for
 # takeoff/landing/hover like the front pair, tilted aft as an active pusher
-# in cruise, sized to half the vehicle's weight (CA_ROTOR2_CT, see the
-# comment there). Unlike the front two it is NOT wired into any differential
-# tilt-control axis (CA_SV_TL2_CT = None) -- see that param below for why.
+# in cruise. All three rotors share equal thrust (CA_ROTOR2_CT, see the
+# comment there) -- the rear was originally sized to half the vehicle's
+# weight, a "cruise pusher only needs to beat drag" assumption that caused a
+# real yaw-right-at-takeoff bug (see that comment). Unlike the front two the
+# rear is NOT wired into any differential tilt-control axis (CA_SV_TL2_CT =
+# None) -- see that param below for why.
 #
 # Yaw in hover comes from DIFFERENTIAL TILT of the two front rotors
 # (CA_SV_TL0/1_CT = Yaw), not from rotor drag-torque differential: with a
@@ -77,39 +80,93 @@ param set-default CA_AIRFRAME 3
 # (x fwd, y left) to PX4 FRD (x fwd, y right): front pair at x=+0.35,
 # y=+-0.35; rear rotor on the centreline at x=-0.35, y=0.
 param set-default CA_ROTOR_COUNT 3
-# All three CT below are PX4's own thrust coefficient (Thrust = CT * u^2),
-# scaled down from PX4's stock default (6.5, sized for a rotor whose max
-# thrust matches Gazebo's original motorConstant=2e-05) by the same ratio
-# as model.sdf's MulticopterMotorModel motorConstant, so PX4's allocator
-# stays consistent with what the sim will actually produce: 6.5 *
-# (7.504e-06 / 2e-05) = 2.44. Real bug found live: the rear motor used to
-# be undersized to half this (a "cruise pusher only needs to beat drag,
-# not full weight" assumption that doesn't apply here -- this project
-# never uses the fixed-wing cruise phase, ENABLE_VTOL_TRANSITION=False in
-# controller_node) -- it saturated during the climb-out throttle
-# transient before the front tilt servos' differential-yaw correction
-# caught up, producing a visible yaw-right at every takeoff. All three
-# rotors now share one 1/3-of-weight thrust target; see model.sdf's
-# rotor_0/1/2_joint MulticopterMotorModel plugins for the underlying sizing.
+# All three CT below are PX4's own thrust coefficient (module.yaml:
+# "Thrust = CT * u^2"). That description is about the rotor's REAL curve,
+# used e.g. by the hover-thrust estimator's physical intuition -- it is
+# NOT what the control allocator itself uses. The allocator's effectiveness
+# matrix (ActuatorEffectivenessRotors::addActuatorsMultirotor) is linear in
+# u (thrust = ct*u, not ct*u^2), and critically, unlike the roll/pitch/yaw
+# rows, the Z-thrust row is NEVER column-normalized
+# (ControlAllocationPseudoInverse.cpp hardcodes
+# `_control_allocation_scale(THRUST_Z) = 1.f`) -- so CT's absolute value is
+# a direct, unnormalized gain between mc_pos_control's hover-relative
+# thrust setpoint (~[0,1], 1.0 meaning "MPC_THR_HOVER's worth of collective
+# thrust") and the actual per-rotor actuator command u. A REAL bug was
+# found live going the OTHER direction from what you'd guess: setting CT to
+# the rotor's actual real-Newtons max thrust (matching model.sdf's
+# MulticopterMotorModel: motorConstant * maxRotVelocity^2 = 1.072e-05 *
+# 1500^2 = 24.12) made the allocator solve for near-zero u for any normal
+# thrust setpoint (verified live: actuator_motors control ~0.0004 at a
+# commanded 0.8 climb, vehicle stuck at idle never really leaving the
+# ground) -- the opposite failure mode from the ORIGINAL bug below (that
+# one undersized CT and saturated every motor at max, still short of
+# weight; this one oversized it and commands ~0 thrust everywhere). CT
+# has to be picked empirically for the vehicle to actually fly, not derived
+# from either "ratio-preserve the stock default" or "match real Newtons" --
+# both are plausible-sounding and both are wrong for this allocator. 4.0
+# was found live to give a good margin (climbs cleanly, no rotor pinned at
+# a limit under a moderate climb command); retune here first if hover
+# feels sluggish (raise CT) or twitchy/saturating (lower it), together with
+# MPC_THR_HOVER below.
+#
+# Earlier (ORIGINAL) bug, kept for history: an even-earlier version of
+# this file set CT by scaling PX4's stock default (6.5) by the ratio of
+# model.sdf's motorConstant to a stock value (6.5 * 7.504e-06/2e-05 =
+# 2.44) -- undersized enough that the vehicle armed and the land-detector
+# flickered takeoff/landing, but it never actually left the ground.
+#
+# Also real, separately: the rear motor used to be undersized to half the
+# front motors' thrust (a "cruise pusher only needs to beat drag, not full
+# weight" assumption that doesn't apply here -- this project never uses
+# the fixed-wing cruise phase, ENABLE_VTOL_TRANSITION=False in
+# controller_node) -- it saturated during the climb-out throttle transient
+# before the front tilt servos' differential-yaw correction caught up,
+# producing a visible yaw-right at every takeoff. All three rotors now
+# share one 1/3-of-weight thrust target.
 # Rotor 0: front right, CCW, tilted by servo 1
 param set-default CA_ROTOR0_PX 0.35
 param set-default CA_ROTOR0_PY 0.35
 param set-default CA_ROTOR0_KM 0.05
 param set-default CA_ROTOR0_TILT 1
-param set-default CA_ROTOR0_CT 2.44
+param set-default CA_ROTOR0_CT 4
 # Rotor 1: front left, CW, tilted by servo 2
 param set-default CA_ROTOR1_PX 0.35
 param set-default CA_ROTOR1_PY -0.35
 param set-default CA_ROTOR1_KM -0.05
 param set-default CA_ROTOR1_TILT 2
-param set-default CA_ROTOR1_CT 2.44
+param set-default CA_ROTOR1_CT 4
 # Rotor 2: rear centre, CCW, now tiltable (servo 3) -- vertical for
 # hover/takeoff/landing, tilted aft as a pusher in cruise.
 param set-default CA_ROTOR2_PX -0.35
 param set-default CA_ROTOR2_PY 0.0
 param set-default CA_ROTOR2_KM 0.05
 param set-default CA_ROTOR2_TILT 3
-param set-default CA_ROTOR2_CT 2.44
+param set-default CA_ROTOR2_CT 4
+
+# Real bug found live: this was never set, so it defaulted to PX4's stock
+# MPC_THR_HOVER=0.5. The hover thrust estimator (mc_hover_thrust_estimator)
+# is meant to correct this from real flight data, but it needs an actual
+# liftoff to get a usable accel/thrust signal -- if the initial value is
+# far enough off that the vehicle never leaves the ground, it's a stuck
+# initial condition and the estimator never gets a chance to run. There
+# isn't a clean closed-form value here the way there is for a normal
+# multirotor: unlike CA_ROTOR_CT (which sets the allocator's actual
+# thrust gain, see that comment), MPC_THR_HOVER only sets mc_pos_control's
+# own idea of "1.0 collective = how much thrust", used to bias the initial
+# guess before the estimator takes over -- it does not have to satisfy any
+# exact weight/CT relationship, just be close enough to get the vehicle
+# off the ground. 0.7 was confirmed live to do that with CA_ROTOR_CT=4
+# above; if you retune CT, sanity-check this still gets a liftoff before
+# trusting the estimator's corrections.
+param set-default MPC_THR_HOVER 0.7
+
+# Set explicitly (matches PX4's stock default here, but pinned so it can't
+# silently drift on a PX4 upgrade) -- web_viewer/control_server.py's
+# MAX_VELOCITY_MPS=3.0 assumes this ceiling; the model.sdf motorConstant
+# was raised alongside it (~2.14x thrust/weight) so there's real thrust
+# authority to actually reach and sustain 3 m/s, not just permission to
+# ask for it.
+param set-default MPC_Z_VEL_MAX_UP 3.0
 
 # Tilt servos travel -15..90 deg rather than the stock 0..90. The negative
 # end is what gives hover yaw authority in BOTH directions: at a vertical
@@ -121,11 +178,11 @@ param set-default CA_SV_TL_COUNT 3
 param set-default CA_SV_TL0_MINA -15
 param set-default CA_SV_TL0_MAXA 90
 param set-default CA_SV_TL0_TD 0
-param set-default CA_SV_TL0_CT 1
+param set-default CA_SV_TL0_CT 1  # Yaw -- re-enabled now that CA_ROTORi_CT is correctly tuned (was disabled while CT was still wrongly oversized at 24.12; see that comment)
 param set-default CA_SV_TL1_MINA -15
 param set-default CA_SV_TL1_MAXA 90
 param set-default CA_SV_TL1_TD 0
-param set-default CA_SV_TL1_CT 1
+param set-default CA_SV_TL1_CT 1  # Yaw -- re-enabled, see CA_SV_TL0_CT above
 # Tilt 3 (rear/tail): same range and fore-aft plane as the front two, but
 # CT = None (not Yaw or Pitch) -- see the header comment above for why
 # (pitch-tilt-control is hardcoded off for this vehicle type in PX4, and
@@ -190,21 +247,49 @@ param set-default FW_T_SINK_MAX 2.7
 param set-default FW_T_SINK_MIN 2.2
 
 param set-default MC_AIRMODE 1
-# Yaw gains are DELIBERATELY far below the stock tiltrotor's (P 0.4 / I 0.1).
-# On a quad, yaw comes from rotor drag-torque differential, which responds as
-# fast as the props can change RPM. Here it comes from tilting two nacelles
-# with position servos -- a much lower-bandwidth actuator -- so the stock
-# gains drive an unstable oscillation: verified live at P=0.4, the vehicle
-# spun at +-8..15 rad/s with the sign flipping every cycle and flew 1050 m off
-# course. Authority was never the issue (the rear rotor's untrimmed torque is
-# ~0.84 Nm, needing only ~4 deg of differential tilt out of the +-15 available);
-# it is purely loop bandwidth. Capping the yaw-rate setpoint matters for the
-# same reason -- the stock 200 deg/s is a rate these servos cannot deliver.
-param set-default MC_YAWRATE_P 0.12
-param set-default MC_YAWRATE_I 0.02
+# Yaw gains history -- TWO different yaw actuation mechanisms have been
+# tuned here at different times, and these gains only make sense for
+# whichever one is CURRENTLY active (CA_SV_TL0/1_CT, above):
+#   1. Tilt-servo yaw (CA_SV_TL0/1_CT=Yaw, current). Stock tiltrotor
+#      default (P 0.4 / I 0.1) was tried first and spun the vehicle at
+#      +-8..15 rad/s, sign flipping every cycle, 1050 m off course --
+#      servos are a much lower-bandwidth actuator than the stock tiltrotor
+#      assumes, and 0.4/0.1 way overshoots that bandwidth.
+#   2. Differential-thrust yaw (CA_SV_TL0/1_CT=0/None, used temporarily
+#      while tilt-yaw was disabled for an unrelated diagnostic). 0.075/
+#      0.0125/0.0025 (rescaled /1.6 from a 0.12/0.02/0.004 baseline
+#      alongside a 1.6x model.sdf motorConstant increase) was tuned for
+#      THIS mechanism -- a much faster rotor-speed-based path than tilt
+#      servos. Re-enabling tilt-yaw and testing live with these gains
+#      still in place gave a small steady-state yaw drift: too weak to
+#      hold heading tightly against the tilt servos' slower response, not
+#      an oscillation. Retuned live for tilt-yaw, landing well short of
+#      the stock 0.4/0.1 that caused the sign-flipping spin in (1): P 0.075
+#      -> 0.16, I scaled proportionally 0.0125 -> 0.027, D left closer to
+#      unchanged (0.0025 -> 0.004, D mostly damps rate noise, less tied to
+#      which actuator produces the torque). If this drifts again, raise P
+#      first in small steps; if it starts oscillating/hunting, you've
+#      crossed back toward the servo-bandwidth wall from (1) and should
+#      back off P before I.
+param set-default MC_YAWRATE_P 0.16
+param set-default MC_YAWRATE_I 0.027
 param set-default MC_YAWRATE_D 0.004
 param set-default MPC_MAN_Y_MAX 60
 param set-default MC_YAWRATE_MAX 60
+
+# Roll stability, raised above PX4's stock default (MC_ROLL_P 4.0,
+# MC_ROLLRATE_P/I/D 0.15/0.2/0.003) -- unlike the yaw gains above, this
+# wasn't chasing an instability, just tightening a request for less roll
+# wander during manual flight. Roll (front-left/front-right rotor pair) is
+# geometrically symmetric on this airframe, unlike pitch (front pair vs.
+# the single rear rotor), so the stock quad-tuned defaults are a
+# reasonable starting point here in a way they weren't for yaw's very
+# different actuator (tilt servos, not rotor speed). Re-tune down if this
+# starts hunting/oscillating rather than just holding tighter.
+param set-default MC_ROLL_P 5.0
+param set-default MC_ROLLRATE_P 0.2
+param set-default MC_ROLLRATE_I 0.2
+param set-default MC_ROLLRATE_D 0.004
 
 # Pitch/roll limit. PX4's default 45 deg is what let the observed transits
 # reach +45..47 deg of pitch. This is the ONLY enforced tilt bound in
