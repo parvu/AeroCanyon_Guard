@@ -176,7 +176,15 @@ device). With no physical RC transmitter connected (see below), two
 Mode 2 RC-style proportional sticks (left: yaw + throttle, right: roll +
 pitch) stream continuously while touched and self-center on release;
 `arm` requests offboard mode + arm, `land now` hands off to PX4's
-`AUTO_LAND`.
+`AUTO_LAND`. `transition FW` / `transition MC` send PX4
+`VEHICLE_CMD_DO_VTOL_TRANSITION` directly -- this bypasses
+`controller_node`'s own `ENABLE_VTOL_TRANSITION=False` (that only gates
+the autonomous trial's logic, not PX4 itself), but fixed-wing flight has
+had no tuning at all here: the front transition currently just times out
+and PX4's own quad-chute safety reverts it back to MC, since there's no
+airspeed sensor for the open-loop transition timer to use and no
+forward-flight/cruise gains have ever been verified. Treat these two
+buttons as a hook for future FW tuning work, not a working transition yet.
 
 ### Fly with a physical RC transmitter instead
 
