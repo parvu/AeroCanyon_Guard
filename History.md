@@ -292,3 +292,62 @@ later, the disarm-safety problem (not the heading problem) is what
 actually needs solving first -- e.g. investigating PX4's force-disarm
 parameter (mavlink `PARAM2=21196` convention) rather than another
 settle-detection heuristic.
+
+### Rear rotor made tiltable: a working pusher, not just a stop
+
+The rear rotor was fixed vertical and simply stopped in forward flight
+(`CA_ROTOR2_TILT=0`, untiltable). Changed it to tilt like the front pair
+(`model.sdf`'s new `motor_1` link/joint, mirroring `motor_0`/`motor_2`;
+PX4's `CA_ROTOR2_TILT=3`, a new third tilt servo) -- vertical for
+takeoff/landing/hover as before, tilted aft as an active cruise pusher.
+Sized to half the vehicle's weight: mass 5.165 kg (base_link 5.0 + 3x0.05
+motor housings, now including the rear one + 3x0.005 rotor blades) *
+9.80665 = 50.65 N weight, so target thrust 25.33 N. Gazebo's
+`motorConstant` for `rotor_1_joint` -> `25.33 / 1500^2 = 1.126e-05` (front
+two unchanged at `2e-05`); PX4's own `CA_ROTOR2_CT` (its independent
+`Thrust = CT * u^2` allocation model, which has to stay proportionally
+consistent with what Gazebo will actually produce) scaled by the same
+ratio: `6.5 * (1.126e-05 / 2e-05) = 3.66`.
+
+Two follow-on asks -- front pair stop in cruise, rear tilt servo used for
+pitch control -- turned out to conflict with how PX4's actual tiltrotor
+firmware works, found by reading
+`src/modules/control_allocator/VehicleActuatorEffectiveness/
+ActuatorEffectivenessTiltrotorVTOL.cpp` and `ActuatorEffectivenessTilts.cpp`
+at the PX4 commit this workspace is pinned to (not guessed from memory):
+
+1. A rotor only auto-stops in forward flight if it has no tilt servo
+   assigned at all (`CA_ROTORi_TILT=None` puts it in the firmware's
+   untiltable-motor mask, zeroed in `FlightPhase::FORWARD_FLIGHT`). A
+   tiltable rotor -- which the front pair have to be, for hover
+   differential-tilt yaw, their only yaw mechanism -- keeps spinning in
+   cruise; there's no PX4 param for "tiltable in hover, stopped in FW".
+   Resolved (with the user): front pair stay tiltable and keep
+   contributing thrust in cruise rather than sacrificing hover yaw
+   authority to force a literal stop.
+2. Pitch-tilt-control is hardcoded off for the Tiltrotor VTOL type:
+   `getEffectivenessMatrix()` always calls
+   `_tilts.updateTorqueSign(geometry, /*disable_pitch=*/true)`, and that
+   function only applies a tilt's pitch torque when `disable_pitch` is
+   false -- so `CA_SV_TLi_CT=Pitch` is a silent no-op here (`CT=Yaw` is
+   the only differential-control mode that does anything for a tilt on
+   this firmware). Resolved: the rear tilt uses `CT=None` rather than
+   configure something that silently wouldn't work; its thrust still
+   gets pitch authority for free from plain geometry (`CA_ROTOR2_PX`
+   puts it off the CG on the X axis).
+
+**Not flight-verified.** This session's sandbox has no ROS2/Gazebo/PX4
+runtime and no Docker daemon (see the Dockerfile added earlier), so this
+was checked statically only: `model.sdf` XML validity, the airframe
+shell script's syntax, and every new/changed param name/enum value
+cross-checked against the firmware source above. It has not actually
+flown. Thrust margin arithmetic, for whoever runs the first real hover:
+an even three-way hover split would ask ~16.9 N of the rear rotor (1/3
+of the 50.65 N weight); its new 25.33 N cap leaves real headroom above
+that (unlike an earlier 1/3-weight-cap version of this same change,
+which would have left it almost none). Total available max thrust drops
+from 135 N (three uniform 45 N rotors) to 115.3 N (two unchanged 45 N
+front rotors + the capped 25.33 N rear) -- about a 15% reduction, still
+~2.3x the 50.65 N weight. Worth a real hover check regardless, since none
+of this accounts for how the allocator actually splits thrust given the
+vehicle's CG and geometry, only the even-split approximation.

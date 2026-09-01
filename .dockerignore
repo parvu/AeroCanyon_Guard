@@ -1,0 +1,21 @@
+# Not needed in the build context: px4_msgs is fetched directly by pinned
+# commit (see Dockerfile) rather than via git submodule metadata, and the
+# rest of .git isn't needed once cloned into the image.
+.git/
+
+# colcon build artifacts -- rebuilt fresh in the image
+build/
+install/
+log/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# ROS logs / generated trial output
+.ros/
+trials/
+
+.superpowers/sdd/

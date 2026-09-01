@@ -1,7 +1,7 @@
 # ros2_pinn_sim
 
 ROS2 / Gazebo Harmonic simulation environment for **AeroCanyon-Guard**: a
-tilt-rotor VTOL transiting an urban canyon under spatially-varying wind
+tricopter VTOL transiting an urban canyon under spatially-varying wind
 disturbance, controlled by a fractional-order physics-informed neural network
 (FO-PINN) with a control-barrier-function (CBF) safety filter.
 
@@ -21,25 +21,45 @@ Cloned/built separately, outside this workspace (not part of this repo):
 
 - **ROS2 Jazzy + Gazebo Harmonic:** `sudo apt install ros-jazzy-ros-gz* ros-jazzy-rosidl*`
 - **[PX4-Autopilot](https://github.com/PX4/PX4-Autopilot)** cloned at `~/PX4-Autopilot`,
-  built for SITL: `make px4_sitl gz_tiltrotor`
+  built for SITL: `make px4_sitl gz_tricopter` (after installing the
+  airframe below — it does not exist in stock PX4)
 - **[Micro-XRCE-DDS-Agent](https://github.com/eProsima/Micro-XRCE-DDS-Agent)**
   built at `~/Micro-XRCE-DDS-Agent` (bridges ROS2 ↔ PX4)
 
-### PX4 patches for tilt-rotor + wind
+### PX4 setup for the tricopter + wind
 
-Apply these edits to `PX4-Autopilot`:
+The vehicle is a **tricopter VTOL** in the style of the E-flite
+Convergence: three tilting rotors -- two front (which also give yaw in
+hover, via differential tilt) and one rear, an active pusher in cruise
+sized to half the vehicle's weight rather than a fixed rotor that stops
+in forward flight. PX4 has a real-hardware airframe for the Convergence
+(ID 13012) but has **never shipped a simulation model** for it, so this
+project carries its own — both files live in this repo and get copied
+into `PX4-Autopilot`:
 
-1. **Enable wind effects on the vehicle:**
+1. **Install the tricopter model and airframe:**
    ```bash
-   # In Tools/simulation/gz/models/tiltrotor/model.sdf, add to base_link:
-   <enable_wind>true</enable_wind>
+   cp -r ~/ros2_pinn_sim/src/aerocanyon/models/tricopter \
+         ~/PX4-Autopilot/Tools/simulation/gz/models/
+   cp ~/ros2_pinn_sim/src/aerocanyon/airframes/4022_gz_tricopter \
+      ~/PX4-Autopilot/ROMFS/px4fmu_common/init.d-posix/airframes/
+   # then register it and rebuild
+   #   add `4022_gz_tricopter` to that directory's CMakeLists.txt
+   #   make px4_sitl gz_tricopter
    ```
+   The model is derived from PX4's stock quad `tiltrotor`: one rear rotor
+   removed, the other moved to the centreline, and the tilt joints
+   widened to `-15..90°` so the allocator can trim the (now inherently
+   unbalanced) single rear rotor's torque in both yaw directions.
 
 2. **Place the canyon world:**
    ```bash
    cp ~/ros2_pinn_sim/src/aerocanyon/worlds/urban_canyon.sdf \
       ~/PX4-Autopilot/Tools/simulation/gz/worlds/urban_canyon.sdf
    ```
+   This world loads `gz-sim-air-speed-system`; without it the model's
+   airspeed sensor declares itself but never publishes, and PX4 refuses
+   to arm with "Preflight Fail: Airspeed invalid".
 
 3. **Disable GCS requirement for offboard arming:**
    ```bash
@@ -48,19 +68,29 @@ Apply these edits to `PX4-Autopilot`:
    param save
    ```
 
-4. **White `base_link` visual (cosmetic, optional):** in
-   `Tools/simulation/gz/models/tiltrotor/model.sdf`, `base_link_visual`'s
-   `<material>` is changed from the stock dark grey to white
-   (`<ambient>`/`<diffuse>` both `1.0 1.0 1.0 1.0`) — purely for
-   visibility against the canyon buildings in the demo video/GUI, no
-   effect on simulation behaviour.
+Wind effects are already enabled on the model (`<enable_wind>true</enable_wind>`
+on `base_link`), and its `base_link_visual` is white rather than the
+stock dark grey — purely for visibility against the canyon buildings in
+the demo video/GUI, no effect on simulation behaviour.
 
-The airframe file `4020_gz_tiltrotor` already has SITL sensor checks
-disabled, and the stock tiltrotor model's motor topic already matches
-what PX4's `gz_bridge` publishes -- neither needs editing. See
+The airframe file `4022_gz_tricopter` has SITL sensor checks disabled,
+and the model's motor topics already match what PX4's `gz_bridge`
+publishes -- neither needs editing. See
 [History.md](History.md#known-good-arming-and-telemetry-configuration)
 for the pitfalls that look like they need a patch here but don't (and the
 ones that actually do, elsewhere in the stack).
+
+## Docker
+
+`Dockerfile` builds the entire stack above in one image: ROS2 Jazzy,
+Gazebo Harmonic, PX4-Autopilot SITL (pinned to the commit the vendored
+`px4_msgs` submodule was generated against, with this project's tricopter
+airframe registered into it), and Micro-XRCE-DDS-Agent. See the comment
+block at the top of the Dockerfile for build/run invocations, including
+the X11 flags GUI trials need. It's an alternative to the manual
+Prerequisites setup above, not a replacement for anything below this
+section — everything from "Build this workspace" onward still applies,
+just run inside the container.
 
 ## Build this workspace
 
@@ -71,9 +101,9 @@ source /opt/ros/jazzy/setup.bash
 colcon build --symlink-install
 ```
 
-## AeroCanyon-Guard: Tilt-rotor Canyon Transit
+## AeroCanyon-Guard: Tricopter Canyon Transit
 
-Autonomous mission: tilt-rotor VTOL transits an urban canyon (6 box buildings)
+Autonomous mission: tricopter VTOL transits an urban canyon (6 box buildings)
 under spatially-varying wind disturbance. FO-PINN estimates wind forces,
 CBF safety filter prevents collisions and stalls.
 
@@ -169,7 +199,7 @@ it's the single source of truth for the airframe parameters; don't
 duplicate them here, they've drifted out of sync with reality before.
 
 **Watching a trial fly, or flying manually (no `run_trial.py`):** if you
-want to fly the tiltrotor by hand instead — e.g. to sanity-check a fresh
+want to fly the tricopter by hand instead — e.g. to sanity-check a fresh
 PX4/model checkout, watch it in the GUI without the trial harness's own
 PX4/agent lifecycle management, or fly it yourself from QGroundControl —
 Gazebo and PX4 need to be started externally and kept running, exactly
@@ -182,7 +212,7 @@ export GZ_IP=127.0.0.1
 
 # Terminal 1: Gazebo
 # MUST source gz_env.sh first (sets GZ_SIM_RESOURCE_PATH) -- without it
-# gz-sim can't resolve model://tiltrotor and the vehicle silently never
+# gz-sim can't resolve model://tricopter and the vehicle silently never
 # spawns (nothing shows up in `gz model --list`, no error visible unless
 # you check the server's own stderr for "Unable to find uri[...]").
 source build/px4_sitl_default/rootfs/gz_env.sh
@@ -195,7 +225,7 @@ sleep 2
 
 # Terminal 3: PX4 SITL
 export R="build/px4_sitl_default/rootfs/"
-export PX4_SIM_MODEL=gz_tiltrotor
+export PX4_SIM_MODEL=gz_tricopter
 export PX4_GZ_WORLD=urban_canyon
 export PX4_GZ_MODEL_POSE="-100,0,0.246,0,0,0"  # ground, at the canyon entry -- see run_trial.py's SPAWN_POSE
 ./build/px4_sitl_default/bin/px4 &

@@ -16,7 +16,7 @@
     <plugin filename="gz-sim-air-pressure-system" name="gz::sim::systems::AirPressure" />
     <plugin filename="gz-sim-magnetometer-system" name="gz::sim::systems::Magnetometer" />
     <plugin filename="gz-sim-navsat-system" name="gz::sim::systems::NavSat" />
-    <!-- The tiltrotor model (models/airspeed, included via model.sdf)
+    <!-- The tricopter model (models/airspeed, included via model.sdf)
          declares a sensor of type "air_speed", but declaring the sensor
          alone doesn't make it publish anything -- like Imu/AirPressure/
          Magnetometer/NavSat above, each sensor TYPE needs its own system

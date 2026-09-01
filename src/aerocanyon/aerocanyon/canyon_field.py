@@ -171,7 +171,18 @@ class DrydenGust:
     in a paper.
     """
 
-    def __init__(self, dt, sigma=1.5, length_scale=200.0, seed=0):
+    # length_scale sets the correlation time via tau = length_scale / airspeed.
+    # It was 200 m, which at this vehicle's ~8 m/s cruise gives tau ~= 25 s --
+    # so the "gust" was really a slowly wandering steady bias, not turbulence.
+    # Measured consequences: raising sigma barely moved the unsteady content
+    # (detrended gust std went 0.15 -> 0.22 m/s for a 2.7x sigma increase)
+    # because the energy all sat below PX4's position-integrator bandwidth,
+    # and a large slow bias acted as a random head/tailwind that stopped the
+    # vehicle completing the transit at all (130 m in 216 s, against 300 m in
+    # 99 s before). 25 m gives tau ~= 3 s at cruise: genuinely unsteady, which
+    # is both the regime a feedforward estimate can uniquely help with and the
+    # one the fractional-memory term exists to capture.
+    def __init__(self, dt, sigma=2.5, length_scale=25.0, seed=0):
         self.dt = float(dt)
         self.sigma = float(sigma)
         self.length_scale = float(length_scale)

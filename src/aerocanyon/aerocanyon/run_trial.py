@@ -75,7 +75,7 @@ WS = pathlib.Path(__file__).resolve().parents[3]
 
 # Spawn/reset position: the canyon entry's horizontal position (ENU east,
 # north from CANYON_ENTRY), not the world origin -- which sits almost
-# exactly under the middle tower row. 0.246 m is the tiltrotor model's own
+# exactly under the middle tower row. 0.246 m is the tricopter model's own
 # stock ground clearance (its unpatched <pose> z value); reusing it here
 # keeps the landing gear resting on the ground instead of floating or
 # clipping through it. Facing yaw=0 in Gazebo's ENU-frame pose already
@@ -93,7 +93,7 @@ def _gazebo_env():
     needed because this process launches `gz sim` itself now (see
     _spawn_gazebo) instead of relying on it already being started,
     sourced, externally. Without GZ_SIM_RESOURCE_PATH, gz-sim can't
-    resolve model://tiltrotor and the vehicle silently never spawns."""
+    resolve model://tricopter and the vehicle silently never spawns."""
     models = str(PX4_DIR / 'Tools/simulation/gz/models')
     worlds = str(PX4_DIR / 'Tools/simulation/gz/worlds')
     plugins = str(PX4_DIR / 'build/px4_sitl_default/src/modules/simulation/gz_plugins')
@@ -135,7 +135,7 @@ def _spawn_gazebo():
 
 
 def _reset_gazebo_model():
-    """Teleport the tiltrotor entity back to the spawn pose, if it exists
+    """Teleport the tricopter entity back to the spawn pose, if it exists
     from a previous trial (a no-op the first time nothing has spawned
     yet), instead of destroying and recreating it -- see the module
     docstring for why recreating it is unreliable. This doesn't reset
@@ -171,7 +171,7 @@ def _reset_gazebo_model():
 
 
 def _recreate_gazebo_model():
-    """Remove the tiltrotor entity outright instead of teleporting it, so
+    """Remove the tricopter entity outright instead of teleporting it, so
     PX4's own create-on-boot call produces a genuinely fresh entity with
     no carried-over physics state, on the theory that the live-observed
     spawn-time flip (see _reset_gazebo_model) comes from repeatedly
@@ -277,17 +277,17 @@ def _kill(proc):
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
 
 
-def run_one(mode, trial, duration, clean_respawn=False, seed=0):
+def run_one(mode, trial, duration, clean_respawn=False, seed=0, turbulence=2.5, ff_gain=0.2):
     if clean_respawn:
         _recreate_gazebo_model()
     else:
         _reset_gazebo_model()
 
     env = dict(os.environ,
-               # NOTE: the airframe file is 4020_gz_tiltrotor; PX4 matches
-               # PX4_SIM_MODEL against that suffix, so the bare 'tiltrotor'
-               # named in the original spec fails to boot (see task 2).
-               PX4_SIM_MODEL='gz_tiltrotor',
+               # NOTE: the airframe file is 4022_gz_tricopter; PX4 matches
+               # PX4_SIM_MODEL against that suffix, so a bare 'tricopter'
+               # fails to boot (the same trap the old gz_tiltrotor hit).
+               PX4_SIM_MODEL='gz_tricopter',
                PX4_GZ_WORLD='urban_canyon',
                PX4_GZ_MODEL_POSE=SPAWN_POSE,
                GZ_IP='127.0.0.1')
@@ -310,7 +310,8 @@ def run_one(mode, trial, duration, clean_respawn=False, seed=0):
     launch = (f'bash -lc "source /opt/ros/jazzy/setup.bash && '
               f'source {WS}/install/setup.bash && '
               f'ros2 launch aerocanyon canyon_sim.launch.py '
-              f'mode:={mode} trial:={trial} seed:={seed}"')
+              f'mode:={mode} trial:={trial} seed:={seed} '
+              f'turbulence_sigma:={turbulence} feedforward_gain:={ff_gain}"')
     nodes = _spawn(launch, cwd=WS)
 
     # Both modes hand off to PX4's own AUTO_LAND, in place, once
@@ -334,7 +335,7 @@ def run_one(mode, trial, duration, clean_respawn=False, seed=0):
     return csv
 
 
-def run_leg(mode, trial, duration, seed=0):
+def run_leg(mode, trial, duration, seed=0, turbulence=2.5, ff_gain=0.2):
     """Own one leg's entire Gazebo+PX4 lifecycle: spawn a fresh `gz sim`,
     run the leg, tear the world back down -- always, even if the leg
     raises. This is what main() runs as a separate OS process per leg
@@ -342,7 +343,8 @@ def run_leg(mode, trial, duration, seed=0):
     the next one."""
     gz = _spawn_gazebo()
     try:
-        return run_one(mode, trial, duration, seed=seed)
+        return run_one(mode, trial, duration, seed=seed, turbulence=turbulence,
+                       ff_gain=ff_gain)
     finally:
         _kill(gz)
         # Belt-and-suspenders: verified live that `gz sim ... -g` (the
@@ -373,12 +375,19 @@ def main():
     ap.add_argument('--seed', type=int, default=0,
                     help='Dryden gust RNG seed -- vary this across trials '
                          'for wind diversity (e.g. when building a training set)')
+    ap.add_argument('--turbulence', type=float, default=2.5,
+                    help='Dryden gust intensity (m/s). The scenario default is '
+                         '4.0; the original 1.5 left the disturbance dominated '
+                         'by the steady mean flow, which PX4 absorbs on its own')
+    ap.add_argument('--ff-gain', type=float, default=0.2, dest='ff_gain',
+                    help='scales the PINN feedforward (treatment mode only)')
     ap.add_argument('--mode', choices=('baseline', 'treatment'), default=None,
                     help=argparse.SUPPRESS)  # internal: run_leg's own subprocess re-invokes with this set
     args = ap.parse_args()
 
     if args.mode:
-        run_leg(args.mode, args.trial, args.duration, seed=args.seed)
+        run_leg(args.mode, args.trial, args.duration, seed=args.seed,
+                turbulence=args.turbulence, ff_gain=args.ff_gain)
         return
 
     # Each leg gets its own OS process, and inside that its own fresh
@@ -387,7 +396,9 @@ def main():
     for mode in ('baseline', 'treatment'):
         cmd = [sys.executable, '-m', 'aerocanyon.run_trial',
                '--mode', mode, '--trial', args.trial,
-               '--duration', str(args.duration), '--seed', str(args.seed)]
+               '--duration', str(args.duration), '--seed', str(args.seed),
+               '--turbulence', str(args.turbulence),
+               '--ff-gain', str(args.ff_gain)]
         result = subprocess.run(cmd, cwd=WS)
         if result.returncode != 0:
             raise SystemExit(f'{mode} leg failed (exit code {result.returncode})')
