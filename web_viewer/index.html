@@ -1,0 +1,897 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset='utf-8' />
+    <title>AeroCanyon-Guard Web Viewer</title>
+  <script src='protobuf.min.js'></script>
+  <script src='eventemitter2.min.js'></script>
+  <script src='gz.js'></script>
+  <script src='gz3d.js'></script>
+
+  <script>
+    // Create the Connection to the Gazebo websocket server
+    // This configuration uses SSL and authentication. You can disable both
+    // by replacing `wss://` with `ws://` and remove the `key` parameter.
+    // Make sure to also disable SSL and authentication in the
+    // websocket_server plugin.
+    //
+    // Real request 2026-08-26: view from a phone on the LAN. Was hardcoded to
+    // 'localhost', which only ever means "this same device" -- a phone loading
+    // this page from the Windows host's real LAN IP still needs to reach the
+    // websocket server at THAT same IP, not its own localhost. Uses
+    // location.hostname so it adapts to whatever host the page itself was
+    // loaded from (localhost, 192.168.x.x, etc.) instead of hardcoding one.
+    var gz = new Gazebo({
+      url: 'ws://' + location.hostname + ':9002',
+      key: "aerocanyon_dev"
+    });
+
+    // Listen for the 'connection' event.
+    gz.on('connection', function() {
+      // Real bug found live 2026-08-27: this used to target #status
+      // directly with .innerHTML, which now also contains the #output
+      // (clock) span as a child -- overwriting it would wipe that span out
+      // the moment a connection event fires. Targets the dedicated text
+      // span instead.
+      var statusText = document.getElementById('statusText');
+      statusText.innerHTML = 'Status: connected';
+    });
+
+    // Real bug found live: this file shipped hardcoded to gz-launch's own demo world
+    // ("shapes") both here and in the /world/.../dynamic_pose/info subscription below --
+    // against our real world (urban_canyon) that meant "scene" requested a world that
+    // doesn't exist, so the client fell back to an empty default grid with nothing in
+    // it. Both hardcoded to the real world name now.
+    gz.on('worlds', function(_worlds) {
+      // \todo Switch this to a service call when this issue is
+      // resolved:
+      // https://github.com/gazebosim/gz-transport/issues/135
+      gz.once('scene', function(_sceneInfo) {
+        // console.log(_sceneInfo);
+        for (var i = 0; i < _sceneInfo.model.length; ++i) {
+          var modelObj = createModelFromMsg(_sceneInfo.model[i]);
+          scene.add(modelObj);
+        }
+      });
+      gz.socket.send(buildMsg(['scene','urban_canyon','','']));
+    });
+
+    // Create the clock subscriber
+    var clockSub = new Topic({
+      gz: gz,
+      name: '/clock',
+      messageType : 'gz.msgs.Clock',
+      callback: function(msg) {
+        var output = document.getElementById('output');
+        output.innerHTML = 'Clock: ' + msg.sim.sec + '.' + msg.sim.nsec;
+      }
+    });
+
+    // Real request 2026-08-26: "camera looking at the boat" -- a fixed
+    // resetCameraPose() snapshot only helps at load time, and the boat moves
+    // (it's been driven all over the map this session). Tracked it live for
+    // a while (repositioned the camera at a fixed offset behind/above the
+    // boat on every dynamic_pose/info update), but real request 2026-08-27:
+    // that fought the user's own manual pan/zoom/rotate every single frame,
+    // snapping the view back before any manual adjustment could stick.
+    // Model poses (including the boat's) still update normally below --
+    // only the camera auto-follow is gone; resetCameraPose() at load is now
+    // the only thing that ever moves the camera, same as a fresh RViz/
+    // Foxglove view the user is expected to navigate themselves.
+
+    // Create the pos subscriber
+    var poseSub = new Topic({
+      gz: gz,
+      name: '/world/urban_canyon/dynamic_pose/info',
+      messageType : 'gz.msgs.Pose_V',
+      callback: function(msg) {
+        for (var i = 0; i < msg.pose.length; ++i) {
+          var entity = scene.getByName(msg.pose[i].name);
+          if (entity && entity !== scene.modelManipulator.object
+              && entity.parent !== scene.modelManipulator.object) {
+            scene.updatePose(entity, msg.pose[i].position,
+              msg.pose[i].orientation);
+          }
+        }
+      }
+    });
+
+
+
+    var camera, renderer;
+
+    // Initialize GZ3D objects.
+    const shaders = new GZ3D.Shaders();
+    var scene = new GZ3D.Scene(shaders);
+    var sdfParser = new GZ3D.SdfParser(scene);
+    const ogre2json = new GZ3D.Ogre2Json();
+
+    entityMaterial = {};
+    protocol = "http:";
+    // Real bug found live: this was 'localhost' with no port -- parseMaterial()
+    // below builds its own asset URL from this (not the relative 'assets' path
+    // GZ3D.Scene's MATERIAL_ROOT uses), so every material/texture fetch went to
+    // localhost:80 instead of this page's real origin, silently failing (which
+    // reads as "no color" -- geometry can still load via the relative path, but
+    // material lookups can't). location.host already carries the real
+    // hostname:port this page was served from.
+    url = location.host;
+
+    function init() {
+      // gz3d viewer decorations, NOT world geometry: scene.grid is the
+      // green origin grid ("green square") and sun_lightHelper is the
+      // directional-light gizmo ("pointer" / arrow at the origin). Both off.
+      scene.grid.visible = false;
+      // The domElement the renderer will be appended to.
+      var sceneElement = window.document.getElementById('container');
+      if (sceneElement === undefined || sceneElement === null) {
+        console.log("Invalid scene element");
+      }
+
+      sceneElement.appendChild(scene.renderer.domElement);
+      scene.setSize(sceneElement.clientWidth, sceneElement.clientHeight);
+
+      // Hide the sun light helper gizmo (retry a few times -- the light
+      // object may not be in the scene graph yet on the first frame).
+      (function hideSunHelper(tries) {
+        var h = scene.scene.getObjectByName('sun_lightHelper');
+        if (h) { h.visible = false; return; }
+        if (tries > 0) { setTimeout(function () { hideSunHelper(tries - 1); }, 500); }
+      })(20);
+
+      resetCameraPose();
+
+      // And sun orientation
+      /*const sunLight = scene.scene.getObjectByName('sun').children[0];
+      const sunDir = new THREE.Vector3(-0.4, 0.4, -0.4);
+      console.log("2");
+
+      sunLight.direction = new THREE.Vector3();
+      sunLight.direction.copy(sunDir);
+      sunLight.target.position.copy(sunDir);
+      */
+
+      // Start rendering.
+      animate();
+
+      /*
+      var obj = scene.createSphere(1.0);
+      obj.updateMatrix();
+      scene.add(obj);
+      */
+    }
+
+    function resetCameraPose() {
+      // Ported from CaveX-Explorer-Pro's web viewer -- default gz-launch
+      // camera pose is sized for its own tiny demo "shapes" world and
+      // points at empty space here. Points at the tricopter's actual spawn
+      // (-100, 0, 0.246 -- see run_trial.py's SPAWN_POSE / the README's
+      // PX4_GZ_MODEL_POSE).
+      //
+      // Real bug found live: an earlier version framed this as a bird's-eye
+      // view of the whole canyon (~137m out), sized for CaveX's own larger
+      // ground vehicle -- verified live via a headless Playwright check that
+      // the tricopter model itself renders correctly (in the scene graph,
+      // visible, correctly positioned in world space) at that distance, but
+      // a ~1m aircraft at 137m is a few pixels against 20x16x60m buildings,
+      // easy to mistake for "not there at all". Close-up framing instead;
+      // the orbit/pan controls (Interactive view control plugin) still let
+      // the user zoom out to see the whole canyon themselves.
+      const cam = scene.camera;
+      cam.position.set(-100 + 2.5, -2.5, 1.8);
+      // Real bug found live 2026-08-27: this vendored three.js build (r86,
+      // see gz3d.js) only supports Object3D.lookAt(vector) -- a single
+      // Vector3 -- not the (x,y,z) numbers form modern three.js added later.
+      // Calling it with three raw numbers passes the number 20 as the whole
+      // "vector" arg; reading .x/.y/.z off it is undefined - undefined =
+      // NaN, permanently corrupting the camera's quaternion into NaN. Every
+      // draw call after that transforms geometry through a NaN matrix, so
+      // nothing rasterizes: renderer.info still reports draw calls (tens of
+      // thousands), but the canvas is uniform grey -- the clear color and
+      // nothing else. Root-caused by reproducing lookAt(20,0,7.9) on a bare
+      // scratch camera in the browser console and finding the resulting
+      // quaternion was already NaN before any render happened.
+      cam.lookAt(new THREE.Vector3(-100, 0, 0.246));
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      scene.render();
+    }
+
+    function createModelFromMsg(model)
+    {
+      var modelObj = new THREE.Object3D();
+      modelObj.name = model.name;
+      modelObj.userData.id = model.id;
+      if (model.pose) {
+        scene.setPose(modelObj,
+          model.pose.position, model.pose.orientation);
+      }
+      for (var j = 0; j < model.link.length; ++j)
+      {
+        var link = model.link[j];
+        var linkObj = new THREE.Object3D();
+        linkObj.name = link.name;
+        linkObj.userData.id = link.id;
+        linkObj.serverProperties =
+            {
+              self_collide: link.self_collide,
+              gravity: link.gravity,
+              kinematic: link.kinematic
+            };
+
+        if (link.inertial)
+        {
+          var inertialPose, inertialMass, inertia = {};
+          linkObj.userData.inertial = {};
+          inertialPose = link.inertial.pose;
+          inertialMass = link.inertial.mass;
+          inertia.ixx = link.inertial.ixx;
+          inertia.ixy = link.inertial.ixy;
+          inertia.ixz = link.inertial.ixz;
+          inertia.iyy = link.inertial.iyy;
+          inertia.iyz = link.inertial.iyz;
+          inertia.izz = link.inertial.izz;
+          linkObj.userData.inertial.inertia = inertia;
+          if (inertialMass) {
+            linkObj.userData.inertial.mass = inertialMass;
+          }
+          if (inertialPose) {
+            linkObj.userData.inertial.pose = inertialPose;
+          }
+        }
+
+        if (link.pose) {
+          scene.setPose(linkObj, link.pose.position,
+              link.pose.orientation);
+        }
+        modelObj.add(linkObj);
+        for (var k = 0; k < link.visual.length; ++k)
+        {
+          var visual = link.visual[k];
+          var visualObj = createVisualFromMsg(visual);
+          if (visualObj && !visualObj.parent) {
+            linkObj.add(visualObj);
+          }
+        }
+
+        for (var l = 0; l < link.collision.length; ++l) {
+          var collision = link.collision[l];
+          for (var m = 0; m < link.collision[l].visual.length; ++m) {
+            var collisionVisual = link.collision[l].visual[m];
+            var collisionVisualObj = createVisualFromMsg(collisionVisual);
+            if (collisionVisualObj && !collisionVisualObj.parent) {
+              linkObj.add(collisionVisualObj);
+            }
+          }
+        }
+      }
+
+      if (model.joint) {
+        modelObj.joint = model.joint;
+      }
+
+      return modelObj;
+    }
+
+    function createVisualFromMsg(visual)
+    {
+      if (visual.geometry)
+      {
+        var geom = visual.geometry;
+        var visualObj = new THREE.Object3D();
+        visualObj.name = visual.name;
+        if (visual.pose)
+        {
+          scene.setPose(visualObj, visual.pose.position,
+              visual.pose.orientation);
+        }
+
+        visualObj.castShadow = visual.cast_shadows;
+        visualObj.receiveShadow = visual.receive_shadows;
+
+        createGeom(geom, visual.material, visualObj);
+
+        return visualObj;
+      }
+    }
+
+    function parseMaterial(material)
+    {
+      if (!material) {
+        return null;
+      }
+
+      var uriPath = protocol + '//' + url + '/assets';
+      var texture;
+      var normalMap;
+      var textureUri;
+      var ambient;
+      var diffuse;
+      var specular;
+      var opacity;
+      var scale;
+      var mat;
+
+      // get texture from material script
+      var script  = material.script;
+      if (script) {
+        if (script.name) {
+          mat = material[script.name];
+          if (mat) {
+            ambient = mat['ambient'];
+            diffuse = mat['diffuse'];
+            specular = mat['specular'];
+            opacity = mat['opacity'];
+            scale = mat['scale'];
+
+            var textureName = mat['texture'];
+            if (textureName) {
+              for (var i = 0; i < script.uri.length; ++i) {
+                // handle the weird case where empty scripts become converted to
+                // a single '__default__' script
+                var scriptUri = script.uri[i];
+                if (scriptUri === '__default__')
+                {
+                  scriptUri = 'file://media/materials/scripts/gazebo.material';
+                }
+
+                var type = scriptUri.substring(0,
+                      scriptUri.indexOf('://'));
+
+                if (type === 'model')
+                {
+                  if (scriptUri.indexOf('textures') > 0)
+                  {
+                    textureUri = scriptUri.substring(
+                        scriptUri.indexOf('://') + 3);
+                    break;
+                  }
+                }
+                else if (type === 'file')
+                {
+                  if (scriptUri.indexOf('materials') > 0)
+                  {
+                    textureUri = scriptUri.substring(
+                        scriptUri.indexOf('://') + 3,
+                        scriptUri.indexOf('materials') + 9) + '/textures';
+                    break;
+                  }
+                }
+              }
+              if (textureUri)
+              {
+                texture = uriPath + '/' +
+                    textureUri  + '/' + textureName;
+              }
+            }
+          }
+        }
+      }
+
+      // Real bug found live: this whole function only ever read colors out of a
+      // named material SCRIPT sub-object (material[script.name].ambient/diffuse/
+      // specular) -- the old Gazebo-classic .material-script convention. None of
+      // this project's own materials use scripts; they set ambient/diffuse/
+      // specular directly on the Material message (gz.msgs.Color: r/g/b/a), which
+      // this function never looked at, so every one of our own colors came back
+      // undefined regardless of the asset-path/port fixes (those only fixed
+      // texture/mesh fetches, not inline colors). Falls back to these direct
+      // fields -- converted from {r,g,b,a} objects to the [r,g,b] arrays
+      // GZ3D.Scene.setMaterial() expects -- only when a script didn't already
+      // supply a color.
+      function colorToArray(c) {
+        return c ? [c.r, c.g, c.b] : undefined;
+      }
+      if (!ambient && material.ambient) {
+        ambient = colorToArray(material.ambient);
+      }
+      if (!diffuse && material.diffuse) {
+        diffuse = colorToArray(material.diffuse);
+      }
+      if (!specular && material.specular) {
+        specular = colorToArray(material.specular);
+      }
+      // Ported from CaveX-Explorer-Pro: a world material sets its see-through
+      // look via diffuse's own alpha, not a separate opacity/transparency
+      // tag (the Material message here has no such field) -- carry that alpha
+      // through as opacity so setMaterial() applies it. Not currently
+      // exercised by urban_canyon.sdf's own materials, but harmless to keep.
+      if (opacity === undefined && material.diffuse &&
+          material.diffuse.a !== undefined && material.diffuse.a < 1) {
+        opacity = material.diffuse.a;
+      }
+
+      // normal map
+      if (material.normal_map) {
+        var mapUri;
+        if (material.normal_map.indexOf('://') > 0)
+        {
+          mapUri = material.normal_map.substring(
+              material.normal_map.indexOf('://') + 3,
+              material.normal_map.lastIndexOf('/'));
+        }
+        else
+        {
+          mapUri = textureUri;
+        }
+        if (mapUri)
+        {
+          var startIndex = material.normal_map.lastIndexOf('/') + 1;
+          if (startIndex < 0)
+          {
+            startIndex = 0;
+          }
+          var normalMapName = material.normal_map.substr(startIndex,
+              material.normal_map.lastIndexOf('.') - startIndex);
+          normalMap = uriPath + '/' +
+            mapUri  + '/' + normalMapName + '.png';
+        }
+      }
+
+      return {
+          texture: texture,
+          normalMap: normalMap,
+          ambient: ambient,
+          diffuse: diffuse,
+          specular: specular,
+          opacity: opacity,
+          scale: scale
+      };
+    }
+
+    function createGeom (geom, material, parent)
+    {
+      var obj;
+      var uriPath = 'assets';
+      var that = this;
+      var mat = parseMaterial(material);
+
+      if (geom.box)
+      {
+        obj = scene.createBox(geom.box.size.x, geom.box.size.y,
+            geom.box.size.z);
+      }
+      else if (geom.cylinder)
+      {
+        obj = scene.createCylinder(geom.cylinder.radius,
+            geom.cylinder.length);
+      }
+      else if (geom.sphere)
+      {
+        obj = scene.createSphere(geom.sphere.radius);
+      }
+      else if (geom.plane)
+      {
+        obj = scene.createPlane(geom.plane.normal.x, geom.plane.normal.y,
+            geom.plane.normal.z, geom.plane.size.x, geom.plane.size.y);
+      }
+      else if (geom.mesh)
+      {
+        // get model name which the mesh is in
+        var rootModel = parent;
+        while (rootModel.parent)
+        {
+          rootModel = rootModel.parent;
+        }
+
+        // find model from database, download the mesh if it exists
+        // var manifestXML;
+        // var manifestURI = GAZEBO_MODEL_DATABASE_URI + '/manifest.xml';
+        // var request = new XMLHttpRequest();
+        // request.open('GET', manifestURI, false);
+        // request.onreadystatechange = function(){
+        //   if (request.readyState === 4)
+        //   {
+        //     if (request.status === 200 || request.status === 0)
+        //     {
+        //         manifestXML = request.responseXML;
+        //     }
+        //   }
+        // };
+        // request.send();
+
+        // var uriPath;
+        // var modelAvailable = false;
+        // var modelsElem = manifestXML.getElementsByTagName('models')[0];
+        // var i;
+        // for (i = 0; i < modelsElem.getElementsByTagName('uri').length; ++i)
+        // {
+        //   var uri = modelsElem.getElementsByTagName('uri')[i];
+        //   var model = uri.substring(uri.indexOf('://') + 3);
+        //   if (model === rootModel)
+        //   {
+        //     modelAvailable = true;
+        //   }
+        // }
+
+        // if (modelAvailable)
+        {
+          var meshUri = geom.mesh.filename;
+          var submesh = geom.mesh.submesh;
+          var centerSubmesh = geom.mesh.center_submesh;
+
+          var uriType = meshUri.substring(0, meshUri.indexOf('://'));
+          var modelName = '';
+          // file:// or model:// or models:// -- real bug found live: our own
+          // vehicle model (blueboat/model.sdf.tracked) uses "models://" (plural),
+          // which this check silently dropped, leaving modelName empty and the
+          // mesh never loaded at all. That's most of "lots of elements lost".
+          if (uriType === 'file' || uriType === 'model' || uriType === 'models')
+          {
+            modelName = meshUri.substring(meshUri.indexOf('://') + 3);
+          }
+          // absolute path - happens when an urdf model is spawned
+          // into gazebo through gazebo_ros_pkgs
+          else if (meshUri.length > 0 && meshUri[0] === '/')
+          {
+            // hacky but try to guess the model name from uri based on the
+            // meshes directory string
+            var idx = meshUri.indexOf('/meshes/');
+            if (idx > 1)
+            {
+              modelName = meshUri.substring(meshUri.lastIndexOf('/', idx-1));
+            }
+          }
+          if (modelName.length > 0)
+          {
+            if (geom.mesh.scale)
+            {
+              parent.scale.x = geom.mesh.scale.x;
+              parent.scale.y = geom.mesh.scale.y;
+              parent.scale.z = geom.mesh.scale.z;
+            }
+
+            var modelUri = uriPath + '/' + modelName;
+            // Use coarse version on touch devices
+            if (modelUri.indexOf('.dae') !== -1 && isTouchDevice)
+            {
+              modelUri = modelUri.substring(0,modelUri.indexOf('.dae'));
+
+              var checkModel = new XMLHttpRequest();
+              checkModel.open('HEAD', modelUri+'_coarse.dae', false);
+              checkModel.send();
+              if (checkModel.status === 404)
+              {
+                modelUri = modelUri+'.dae';
+              }
+              else
+              {
+                modelUri = modelUri+'_coarse.dae';
+              }
+            }
+
+            var ext = modelUri.substr(-4).toLowerCase();
+            var materialName = parent.name + '::' + modelUri;
+            entityMaterial[materialName] = mat;
+
+            modelUri = protocol + '//' + url + '/' + modelUri;
+
+            scene.loadMeshFromUri(modelUri, submesh, centerSubmesh,
+              function(mesh) {
+                if (mat)
+                {
+                  // Because the stl mesh doesn't have any children we cannot set
+                  // the materials like other mesh types.
+                  if (modelUri.indexOf('.stl') === -1)
+                  {
+                    // Real bug found live: the original "break" here stopped after the
+                    // FIRST Mesh child, so a .dae with multiple sub-meshes (our own
+                    // hull.dae has several) only ever got the SDF material applied to
+                    // one of them -- the rest kept the .dae's own embedded default,
+                    // reading as grey/uncolored. Apply to every Mesh child instead.
+                    var allChildren = [];
+                    mesh.getDescendants(allChildren);
+                    for (var c = 0; c < allChildren.length; ++c)
+                    {
+                      if (allChildren[c] instanceof THREE.Mesh)
+                      {
+                        that.scene.setMaterial(allChildren[c], mat);
+                      }
+                    }
+                  }
+                  else
+                  {
+                    that.scene.setMaterial(mesh, mat);
+                  }
+                }
+                else
+                {
+                  if (ext === '.stl')
+                  {
+                    that.scene.setMaterial(mesh, {'ambient': [1,1,1,1]});
+                  }
+                }
+                parent.add(mesh);
+                loadGeom(parent);
+            });
+          }
+        }
+      }
+      else if (geom.heightmap)
+      {
+        var request = new ROSLIB.ServiceRequest({
+          name : that.scene.name
+        });
+
+        // redirect the texture paths to the assets dir
+        var textures = geom.heightmap.texture;
+        for ( var k = 0; k < textures.length; ++k)
+        {
+          textures[k].diffuse = parseUri(textures[k].diffuse);
+          textures[k].normal = parseUri(textures[k].normal);
+        }
+
+        var sizes = geom.heightmap.size;
+
+        // send service request and load heightmap on response
+        heightmapDataService.callService(request,
+            function(result)
+            {
+              var heightmap = result.heightmap;
+              // gazebo heightmap is always square shaped,
+              // and a dimension of: 2^N + 1
+              that.scene.loadHeightmap(heightmap.heights, heightmap.size.x,
+                  heightmap.size.y, heightmap.width, heightmap.height,
+                  heightmap.origin, textures,
+                  geom.heightmap.blend, parent);
+                //console.log('Result for service call on ' + result);
+            });
+
+        //scene.loadHeightmap(parent)
+      }
+
+      if (obj)
+      {
+        if (mat)
+        {
+          // texture mapping for simple shapes and planes only,
+          // not used by mesh and terrain
+          scene.setMaterial(obj, mat);
+        }
+        obj.updateMatrix();
+        parent.add(obj);
+        loadGeom(parent);
+      }
+
+      function loadGeom(visualObj)
+      {
+        var allChildren = [];
+        visualObj.getDescendants(allChildren);
+        for (var c = 0; c < allChildren.length; ++c)
+        {
+          if (allChildren[c] instanceof THREE.Mesh)
+          {
+            allChildren[c].castShadow = true;
+            allChildren[c].receiveShadow = true;
+
+            if (visualObj.castShadows)
+            {
+              allChildren[c].castShadow = visualObj.castShadows;
+            }
+            if (visualObj.receiveShadows)
+            {
+              allChildren[c].receiveShadow = visualObj.receiveShadows;
+            }
+
+            if (visualObj.name.indexOf('COLLISION_VISUAL') >= 0)
+            {
+              allChildren[c].castShadow = false;
+              allChildren[c].receiveShadow = false;
+
+              allChildren[c].visible = scene.showCollisions;
+            }
+            break;
+          }
+        }
+      }
+    }
+
+    function parseUri(uri) {
+      var uriPath = 'assets';
+      var idx = uri.indexOf('://');
+      if (idx > 0)
+      {
+        idx +=3;
+      }
+      return uriPath + '/' + uri.substring(idx);
+    }
+
+    // Todo:
+    // 2. Show simple shapes.
+    // 3. Get the meshes and other resource from the server.
+  </script>
+  </head>
+
+  <body onload="init()">
+    <!-- Real request 2026-08-27: moved from the top (where it pushed the 3D
+         view down) to a fixed band at the bottom of the page. Real bug found
+         live: the WebGL canvas THREE.js appends into #container can paint
+         over regular DOM content under this environment's GPU compositing
+         path despite #status's higher z-index (a browser/WSLg-RDP
+         compositing quirk, not a CSS spec violation -- #container itself has
+         no explicit z-index, so this pins it below #status's stacking level
+         explicitly rather than relying on the implicit "auto" default). -->
+    <div id='status' style="position: fixed; bottom: 0; left: 0; right: 0;
+        background: white; font-family: sans-serif; padding: 4px 10px;
+        z-index: 9999; display: flex; justify-content: space-between;">
+      <span id='statusText'>Status: disconnected</span>
+      <!-- Real bug found live 2026-08-27: this was a SEPARATE #output div
+           with no styling at all -- the clock callback below writes into it,
+           not #status, so moving #status to the bottom left #output's clock
+           text stranded at its default top-left position, overlapping the
+           dpad's "fwd" button. Folded into the same bottom band instead of
+           being its own untouched element. -->
+      <span id='output'></span>
+    </div>
+
+    <div id="container" style="height: 800px; position: relative; z-index: 0;">
+    </div>
+
+    <!-- Manual offboard controls for the tricopter's separate fly-by-hand
+         path (README: "Watching a trial fly, or flying manually" -- no
+         run_trial.py involved, so there's no autonomous controller_node
+         setpoint stream to fight with). control_server.py's /api/stick
+         takes proportional Mode 2 RC stick axes (yaw/throttle/roll/pitch,
+         each -1..1), continuously streamed at STICK_SEND_HZ below while a
+         stick is touched -- not a click-and-decay nudge.
+
+         Real request: when a physical RC transmitter is connected
+         (rc_bridge.py, reading a real joystick device directly -- see its
+         own docstring for the hardware), it owns all four axes and these
+         on-screen sticks hide themselves; with no transmitter connected,
+         both virtual sticks show and work exactly as before. Polls
+         /api/rc_status (see updateRcStatus below) rather than assuming
+         either state, since the transmitter can be plugged/unplugged
+         mid-session. -->
+    <div id="virtualSticks">
+      <div id="leftStick" class="stickPad" style="position: fixed; top: 10px; left: 10px;">
+        <div class="stickKnob"></div>
+      </div>
+      <div id="rightStick" class="stickPad" style="position: fixed; top: 10px; left: 160px;">
+        <div class="stickKnob"></div>
+      </div>
+    </div>
+    <div id="rcStatusText" style="position: fixed; top: 160px; left: 10px;
+        font-family: sans-serif; font-size: 12px; z-index: 10;
+        background: rgba(0,0,0,0.5); color: #fff; padding: 2px 6px;
+        border-radius: 3px;">checking for RC...</div>
+    <style>
+      .stickPad {
+        width: 140px; height: 140px; border-radius: 50%;
+        background: rgba(0,0,0,0.15); border: 1px solid rgba(0,0,0,0.3);
+        touch-action: none; z-index: 10; user-select: none;
+      }
+      .stickKnob {
+        width: 48px; height: 48px; border-radius: 50%;
+        background: rgba(40,40,40,0.7); position: relative;
+        left: 46px; top: 46px; pointer-events: none;
+      }
+    </style>
+
+    <div id="missionControls" style="position: fixed; top: 10px; left: 50%;
+        transform: translateX(-50%); font-family: sans-serif; z-index: 10;
+        display: flex; gap: 4px;">
+      <button onclick="manualCmd('arm')">arm</button>
+      <button onclick="manualCmd('disarm')">disarm</button>
+      <button onclick="manualCmd('land')">land now</button>
+    </div>
+
+    <div id="speedControls" style="position: fixed; top: 10px; right: 10px;
+        font-family: sans-serif; z-index: 10;
+        display: flex; flex-direction: column; gap: 4px;">
+      <button onclick="changeSpeed('speed_up')">spd +</button>
+      <span id="spdVal" style="text-align: center; background: rgba(0,0,0,0.5);
+          color: #fff; padding: 2px 4px; border-radius: 3px;
+          font-family: monospace;">1.00 m/s</span>
+      <button onclick="changeSpeed('speed_down')">spd -</button>
+    </div>
+
+    <script>
+      function manualCmd(cmd) {
+        fetch('/api/manual?cmd=' + cmd);
+      }
+      // Client-side mirror of control_server.py's speed_scale
+      // (MAX_VELOCITY_MPS 1.0, step 0.25, clamp [0.25, 3.0]).
+      var speedScale = 1.0;
+      function changeSpeed(cmd) {
+        manualCmd(cmd);
+        speedScale += (cmd === 'speed_up') ? 0.25 : -0.25;
+        speedScale = Math.min(3.0, Math.max(0.25, speedScale));
+        document.getElementById('spdVal').textContent =
+          speedScale.toFixed(2) + ' m/s';
+      }
+
+      // Mode 2 dual-stick input: each pad reports a normalized (x, y) in
+      // [-1, 1], continuously streamed to /api/stick when no physical RC
+      // is present (see updateRcStatus). Vertical Y is "up on screen =
+      // +1" (throttle/pitch stick convention), same as a real
+      // transmitter, so DOM's down-is-positive pixel Y gets negated below.
+      var sticks = { left: { x: 0, y: 0 }, right: { x: 0, y: 0 } };
+
+      function setupStick(padId, key) {
+        var pad = document.getElementById(padId);
+        var knob = pad.querySelector('.stickKnob');
+        var radius = pad.clientWidth / 2;
+        var knobRadius = knob.clientWidth / 2;
+        var activePointerId = null;
+
+        function setKnob(x, y) {
+          sticks[key].x = x;
+          sticks[key].y = y;
+          knob.style.left = (radius + x * (radius - knobRadius) - knobRadius) + 'px';
+          knob.style.top = (radius - y * (radius - knobRadius) - knobRadius) + 'px';
+        }
+
+        function updateFromEvent(ev) {
+          var rect = pad.getBoundingClientRect();
+          var dx = (ev.clientX - rect.left - radius) / (radius - knobRadius);
+          var dy = -(ev.clientY - rect.top - radius) / (radius - knobRadius);
+          var mag = Math.hypot(dx, dy);
+          if (mag > 1) { dx /= mag; dy /= mag; }
+          setKnob(dx, dy);
+        }
+
+        pad.addEventListener('pointerdown', function (ev) {
+          activePointerId = ev.pointerId;
+          pad.setPointerCapture(ev.pointerId);
+          updateFromEvent(ev);
+        });
+        pad.addEventListener('pointermove', function (ev) {
+          if (ev.pointerId === activePointerId) updateFromEvent(ev);
+        });
+        function release(ev) {
+          if (ev.pointerId !== activePointerId) return;
+          activePointerId = null;
+          setKnob(0, 0);  // self-centering, like a real Mode 2 stick
+        }
+        pad.addEventListener('pointerup', release);
+        pad.addEventListener('pointercancel', release);
+
+        setKnob(0, 0);
+      }
+      setupStick('leftStick', 'left');
+      setupStick('rightStick', 'right');
+
+      // Continuous stream, matching a real transmitter's telemetry rate --
+      // not just on change, so control_server.py's STICK_TIMEOUT_S
+      // dead-man's-switch never trips while a stick is centered but the
+      // page is still open and connected. Skipped entirely while a
+      // physical RC is present (rcPresent below) -- rc_bridge.py owns all
+      // four axes then, and sending zeros here would fight it every
+      // STICK_TIMEOUT_S the moment the browser tab out-races the dongle.
+      var rcPresent = false;
+      var STICK_SEND_HZ = 20;
+      setInterval(function () {
+        if (rcPresent) return;
+        var params = new URLSearchParams({
+          yaw: sticks.left.x.toFixed(3),
+          throttle: sticks.left.y.toFixed(3),
+          roll: sticks.right.x.toFixed(3),
+          pitch: sticks.right.y.toFixed(3),
+        });
+        fetch('/api/stick?' + params.toString());
+      }, 1000 / STICK_SEND_HZ);
+
+      // Polls control_server.py's own view of whether rc_bridge.py has
+      // posted recently (RC_PRESENT_TIMEOUT_S there) -- not a one-time
+      // check at page load, since the transmitter can be plugged in or
+      // unplugged at any point during a session.
+      function updateRcStatus() {
+        fetch('/api/rc_status')
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            rcPresent = data.present;
+            document.getElementById('virtualSticks').hidden = rcPresent;
+            document.getElementById('rcStatusText').textContent =
+              rcPresent ? 'RC: physical transmitter connected'
+                        : 'RC: none detected -- using on-screen sticks';
+          })
+          .catch(function () { /* server not up yet -- try again next poll */ });
+      }
+      updateRcStatus();
+      setInterval(updateRcStatus, 500);
+    </script>
+  </body>
+</html>

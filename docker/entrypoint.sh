@@ -9,12 +9,12 @@ set -e
 
 source /opt/ros/"${ROS_DISTRO:-jazzy}"/setup.bash
 
-if [ -f "$HOME/ros2_pinn_sim/install/setup.bash" ]; then
-    source "$HOME/ros2_pinn_sim/install/setup.bash"
+if [ -f "$HOME/AeroCanyon_Guard/install/setup.bash" ]; then
+    source "$HOME/AeroCanyon_Guard/install/setup.bash"
 fi
 
-if [ -f "$HOME/ros2_pinn_sim/.venv/bin/activate" ]; then
-    source "$HOME/ros2_pinn_sim/.venv/bin/activate"
+if [ -f "$HOME/AeroCanyon_Guard/.venv/bin/activate" ]; then
+    source "$HOME/AeroCanyon_Guard/.venv/bin/activate"
 fi
 
 if [ -f "$HOME/PX4-Autopilot/build/px4_sitl_default/rootfs/gz_env.sh" ]; then

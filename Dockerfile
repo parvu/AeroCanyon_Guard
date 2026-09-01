@@ -129,8 +129,8 @@ RUN git clone --branch ${UXRCE_REF} --depth 1 \
 # ---------------------------------------------------------------------------
 # This workspace
 # ---------------------------------------------------------------------------
-COPY --chown=${USERNAME}:${USERNAME} . ros2_pinn_sim
-WORKDIR /home/${USERNAME}/ros2_pinn_sim
+COPY --chown=${USERNAME}:${USERNAME} . AeroCanyon_Guard
+WORKDIR /home/${USERNAME}/AeroCanyon_Guard
 
 # px4_msgs is a git submodule (.gitmodules); fetch it directly by pinned
 # commit rather than relying on the build context carrying .git metadata.

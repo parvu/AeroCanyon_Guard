@@ -77,29 +77,39 @@ param set-default CA_AIRFRAME 3
 # (x fwd, y left) to PX4 FRD (x fwd, y right): front pair at x=+0.35,
 # y=+-0.35; rear rotor on the centreline at x=-0.35, y=0.
 param set-default CA_ROTOR_COUNT 3
+# All three CT below are PX4's own thrust coefficient (Thrust = CT * u^2),
+# scaled down from PX4's stock default (6.5, sized for a rotor whose max
+# thrust matches Gazebo's original motorConstant=2e-05) by the same ratio
+# as model.sdf's MulticopterMotorModel motorConstant, so PX4's allocator
+# stays consistent with what the sim will actually produce: 6.5 *
+# (7.504e-06 / 2e-05) = 2.44. Real bug found live: the rear motor used to
+# be undersized to half this (a "cruise pusher only needs to beat drag,
+# not full weight" assumption that doesn't apply here -- this project
+# never uses the fixed-wing cruise phase, ENABLE_VTOL_TRANSITION=False in
+# controller_node) -- it saturated during the climb-out throttle
+# transient before the front tilt servos' differential-yaw correction
+# caught up, producing a visible yaw-right at every takeoff. All three
+# rotors now share one 1/3-of-weight thrust target; see model.sdf's
+# rotor_0/1/2_joint MulticopterMotorModel plugins for the underlying sizing.
 # Rotor 0: front right, CCW, tilted by servo 1
 param set-default CA_ROTOR0_PX 0.35
 param set-default CA_ROTOR0_PY 0.35
 param set-default CA_ROTOR0_KM 0.05
 param set-default CA_ROTOR0_TILT 1
+param set-default CA_ROTOR0_CT 2.44
 # Rotor 1: front left, CW, tilted by servo 2
 param set-default CA_ROTOR1_PX 0.35
 param set-default CA_ROTOR1_PY -0.35
 param set-default CA_ROTOR1_KM -0.05
 param set-default CA_ROTOR1_TILT 2
+param set-default CA_ROTOR1_CT 2.44
 # Rotor 2: rear centre, CCW, now tiltable (servo 3) -- vertical for
-# hover/takeoff/landing, tilted aft as a pusher in cruise. CT below is
-# PX4's own thrust coefficient (Thrust = CT * u^2), scaled down from the
-# front rotors' default (6.5) by the same ratio as the Gazebo motorConstant
-# reduction in model.sdf, so PX4's allocator stays consistent with what the
-# sim will actually produce: 6.5 * (1.126e-05 / 2e-05) = 3.66. See
-# model.sdf's rotor_1_joint MulticopterMotorModel plugin for the underlying
-# half-vehicle-weight thrust sizing.
+# hover/takeoff/landing, tilted aft as a pusher in cruise.
 param set-default CA_ROTOR2_PX -0.35
 param set-default CA_ROTOR2_PY 0.0
 param set-default CA_ROTOR2_KM 0.05
 param set-default CA_ROTOR2_TILT 3
-param set-default CA_ROTOR2_CT 3.66
+param set-default CA_ROTOR2_CT 2.44
 
 # Tilt servos travel -15..90 deg rather than the stock 0..90. The negative
 # end is what gives hover yaw authority in BOTH directions: at a vertical

@@ -1,4 +1,4 @@
-# ros2_pinn_sim
+# AeroCanyon_Guard
 
 ROS2 / Gazebo Harmonic simulation environment for **AeroCanyon-Guard**: a
 tricopter VTOL transiting an urban canyon under spatially-varying wind
@@ -39,9 +39,9 @@ into `PX4-Autopilot`:
 
 1. **Install the tricopter model and airframe:**
    ```bash
-   cp -r ~/ros2_pinn_sim/src/aerocanyon/models/tricopter \
+   cp -r ~/AeroCanyon_Guard/src/aerocanyon/models/tricopter \
          ~/PX4-Autopilot/Tools/simulation/gz/models/
-   cp ~/ros2_pinn_sim/src/aerocanyon/airframes/4022_gz_tricopter \
+   cp ~/AeroCanyon_Guard/src/aerocanyon/airframes/4022_gz_tricopter \
       ~/PX4-Autopilot/ROMFS/px4fmu_common/init.d-posix/airframes/
    # then register it and rebuild
    #   add `4022_gz_tricopter` to that directory's CMakeLists.txt
@@ -54,7 +54,7 @@ into `PX4-Autopilot`:
 
 2. **Place the canyon world:**
    ```bash
-   cp ~/ros2_pinn_sim/src/aerocanyon/worlds/urban_canyon.sdf \
+   cp ~/AeroCanyon_Guard/src/aerocanyon/worlds/urban_canyon.sdf \
       ~/PX4-Autopilot/Tools/simulation/gz/worlds/urban_canyon.sdf
    ```
    This world loads `gz-sim-air-speed-system`; without it the model's
@@ -95,7 +95,7 @@ just run inside the container.
 ## Build this workspace
 
 ```bash
-cd ~/ros2_pinn_sim
+cd ~/AeroCanyon_Guard
 git submodule update --init --recursive
 source /opt/ros/jazzy/setup.bash
 colcon build --symlink-install
@@ -111,7 +111,7 @@ CBF safety filter prevents collisions and stalls.
 ### Regenerate the world and the wind grid
 
 ```bash
-cd ~/ros2_pinn_sim
+cd ~/AeroCanyon_Guard
 source /opt/ros/jazzy/setup.bash && source install/setup.bash
 python3 -m aerocanyon.canyon_geometry        # writes worlds/urban_canyon.sdf
 python3 -m aerocanyon.canyon_field           # writes data/wind_grid.npy
@@ -175,7 +175,7 @@ both legs — the whole flight flies in stable multicopter mode; see
 History.md for why.
 
 ```bash
-cd ~/ros2_pinn_sim
+cd ~/AeroCanyon_Guard
 source /opt/ros/jazzy/setup.bash && source install/setup.bash
 source .venv/bin/activate
 python3 -m aerocanyon.run_trial --trial live_full  # --duration defaults to 220s, see --help
@@ -233,11 +233,93 @@ sleep 15
 ```
 
 Then either fly manually from QGroundControl (it auto-connects to PX4
-over MAVLink UDP), or launch just the mission nodes without
-`run_trial.py`'s process orchestration:
+over MAVLink UDP), from the browser (see below), or launch just the
+mission nodes without `run_trial.py`'s process orchestration:
 `ros2 launch aerocanyon canyon_sim.launch.py mode:=baseline trial:=manual`.
 
 Do not run `run_trial.py` on top of this -- see the warning above.
+
+#### Fly from a browser instead
+
+`web_viewer/` is a small browser-based Gazebo 3D viewer (ported from a
+sibling project) plus a manual control panel, useful when the native `gz
+sim` GUI window won't render (a known issue under WSLg -- window shows in
+the taskbar but never paints, `[WARN:COPY MODE]` in its log). Like
+QGroundControl above, it targets this fly-by-hand path only, not a real
+`run_trial.py` leg -- `controller_node` is the sole source of setpoints
+during a trial, and this server isn't meant to run alongside one.
+
+One-time setup -- the vehicle's mesh files aren't vendored into this repo,
+the browser fetches them straight from PX4-Autopilot's own copy:
+```bash
+mkdir -p web_viewer/assets
+ln -s ~/PX4-Autopilot/Tools/simulation/gz/models/standard_vtol web_viewer/assets/standard_vtol
+```
+
+```bash
+# tab 1: browser viewer (scene stream) -- needs the gz sim from above running
+gz launch web_viewer/websocket.gzlaunch
+
+# tab 2: control server (static files + manual offboard velocity setpoints)
+cd web_viewer && source /opt/ros/jazzy/setup.bash && source ../install/setup.bash
+python3 control_server.py 8080
+```
+
+Then open `http://localhost:8080` (or the host's LAN IP, from another
+device). With no physical RC transmitter connected (see below), two
+Mode 2 RC-style proportional sticks (left: yaw + throttle, right: roll +
+pitch) stream continuously while touched and self-center on release;
+`arm` requests offboard mode + arm, `land now` hands off to PX4's
+`AUTO_LAND`.
+
+#### Fly with a physical RC transmitter instead
+
+`rc_bridge.py` reads a real RC transmitter's USB "simulator" dongle as a
+standard Linux joystick (`/dev/input/js0`) and forwards all four Mode 2
+axes to `control_server.py`'s `/api/stick` -- no MAVLink/PX4 RC
+parameter config involved, this is a second poster to the same
+offboard-velocity path the browser sticks use. When it's running, the
+page's own virtual sticks **hide themselves automatically** (polling
+`/api/rc_status`) and show again if the transmitter is unplugged
+mid-session -- nothing to toggle by hand.
+
+An earlier dongle tried here (a Tactic transmitter's Nordic
+Semiconductor RF adapter, VID:PID `1781:0e58`) turned out not to be
+viable: its HID report is an undocumented vendor-specific format with no
+public docs, and after extensive live reverse-engineering (holding each
+stick at known positions, diffing raw `/dev/hidraw0` reports, checking
+trim-button behaviour) pitch's byte never carried a signed direction --
+only "how far from center", not which way. The dongle that IS wired up
+now (Novatek "ART TECH GAME", VID:PID `0603:1a13`) declares a real HID
+joystick usage page, so the kernel's own `usbhid`/`joydev` drivers
+create a normal, already-calibrated `/dev/input/js0` -- no protocol
+guessing needed. `rc_bridge.py`'s axis mapping (`AXIS_ROLL` etc.) was
+still confirmed live, one stick at a time, since axis-number-to-function
+isn't standardized across devices.
+
+One-time setup, since this is WSL2 and the dongle needs USB passthrough:
+```powershell
+# Windows PowerShell (elevated), once usbipd-win is installed (winget install usbipd):
+usbipd list                       # find the dongle's BUSID
+usbipd bind --busid <BUSID>
+usbipd attach --wsl --busid <BUSID>
+```
+```bash
+# In WSL2, once per attach -- the input device node is root-only by default:
+sudo modprobe hid hid-generic usbhid joydev   # if not already loaded
+sudo chmod 666 /dev/input/js0
+```
+
+Then, alongside `control_server.py` from above:
+```bash
+python3 rc_bridge.py 8080
+```
+
+A different transmitter (even a different unit of the same dongle model)
+may use different axis numbers for roll/pitch/throttle/yaw -- confirm
+with `python3 -c "import struct; ..."` reading `/dev/input/js0`'s
+`struct js_event` stream while moving one stick at a time, the same way
+`AXIS_ROLL`/`AXIS_PITCH`/`AXIS_THROTTLE`/`AXIS_YAW` were confirmed here.
 
 ### View the figures
 

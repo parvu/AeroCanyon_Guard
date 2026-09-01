@@ -883,7 +883,19 @@
       <timeConstantUp>0.0125</timeConstantUp>
       <timeConstantDown>0.025</timeConstantDown>
       <maxRotVelocity>1500</maxRotVelocity>
-      <motorConstant>2e-05</motorConstant>
+      <!-- Real bug found live: with the rear motor undersized to half
+           the front motors' thrust (its original "cruise pusher" sizing
+           -- see motor_1's own comment below), it saturated during the
+           climb-out throttle transient before the front tilt servos'
+           differential-yaw correction caught up, producing a visible
+           yaw-right at every takeoff. This project never actually uses
+           the fixed-wing cruise phase that sizing was for
+           (ENABLE_VTOL_TRANSITION=False in controller_node), so there's
+           no reason for it -- all three motors now share one thrust
+           target, 1/3 of the vehicle's weight each: mass 5.165 kg *
+           9.80665 = 50.65 N weight / 3 = 16.88 N target thrust / 1500^2
+           = 7.504e-06. See matching CA_ROTOR0/1/2_CT in the airframe file. -->
+      <motorConstant>7.504e-06</motorConstant>
       <momentConstant>0.06</momentConstant>
       <commandSubTopic>command/motor_speed</commandSubTopic>
       <motorNumber>0</motorNumber>
@@ -906,14 +918,14 @@
       <cmd_min>-2</cmd_min>
       <err_max>0.2</err_max>
     </plugin>
-    <!-- Rear/tail rotor: now tiltable (motor_1_joint) rather than fixed,
-         and resized as an active cruise pusher rather than a rotor that
-         just stops in forward flight. motorConstant is sized so max
-         thrust (motorConstant * maxRotVelocity^2) is half the vehicle's
-         weight: mass 5.165 kg (base_link 5.0 + 3x0.05 motor housings +
-         3x0.005 rotor blades) * 9.80665 = 50.65 N weight; target thrust
-         25.33 N / 1500^2 = 1.126e-05. See CA_ROTOR2_CT in the airframe
-         file for the matching PX4-side allocation coefficient. -->
+    <!-- Rear/tail rotor: tiltable (motor_1_joint) rather than fixed.
+         Originally sized to half the vehicle's weight, on the theory
+         that it only had to be an active cruise pusher overcoming drag,
+         not full weight -- see motor_0's own comment above for why that
+         turned out wrong (undersized it enough to saturate and cause a
+         real yaw-right at every takeoff) and got reverted: all three
+         motors now share one 1/3-of-weight thrust target, 7.504e-06.
+         See matching CA_ROTOR0/1/2_CT in the airframe file. -->
     <plugin filename="gz-sim-multicopter-motor-model-system"
       name="gz::sim::systems::MulticopterMotorModel">
       <jointName>rotor_1_joint</jointName>
@@ -922,7 +934,7 @@
       <timeConstantUp>0.0125</timeConstantUp>
       <timeConstantDown>0.025</timeConstantDown>
       <maxRotVelocity>1500</maxRotVelocity>
-      <motorConstant>1.126e-05</motorConstant>
+      <motorConstant>7.504e-06</motorConstant>
       <momentConstant>0.06</momentConstant>
       <commandSubTopic>command/motor_speed</commandSubTopic>
       <motorNumber>2</motorNumber>
@@ -953,7 +965,7 @@
       <timeConstantUp>0.0125</timeConstantUp>
       <timeConstantDown>0.025</timeConstantDown>
       <maxRotVelocity>1500</maxRotVelocity>
-      <motorConstant>2e-05</motorConstant>
+      <motorConstant>7.504e-06</motorConstant>
       <momentConstant>0.06</momentConstant>
       <commandSubTopic>command/motor_speed</commandSubTopic>
       <motorNumber>1</motorNumber>
