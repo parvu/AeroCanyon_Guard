@@ -1,5 +1,4 @@
 """Single source of truth for physical and interface constants."""
-import math
 
 # Sum of every link mass in PX4-Autopilot's tricopter model.sdf: base_link
 # (5 kg) + 2x tilting motor (0.05 kg each) + 3x rotor (0.005 kg each); the
@@ -29,53 +28,15 @@ TOPIC_WIND_SPEED_SCALE = '/aerocanyon/wind_speed_scale'
 
 GZ_WIND_TOPIC = f'/world/{WORLD_NAME}/wind'
 
-# controller_node's new outer-loop gains (Phase 2 MAVROS port -- PX4's
-# own position controller used to make these unnecessary, since it
-# accepted a position setpoint directly; ArduPilot exposes no equivalent
-# injection path for this airframe in any flight mode). Starting points,
-# not yet live-tuned -- see docs/superpowers/plans/
-# 2026-09-02-mission-stack-mavros-port.md Task 8 for the verification
-# this needs before being trusted.
-#
-# Task 8 live-verified (2026-09-02): a 60s baseline leg armed, flew, and
-# logged real continuously-varying telemetry throughout (no NaNs, no
-# frozen/zero readings except a normal ~0.3s tail at teardown) -- the
-# pipeline itself works end to end.
-#
-# The initial "just untuned" read turned out to be wrong -- checked by
-# plotting the resulting trajectory and reading the logged data
-# directly, not by assumption. What actually needed fixing:
-#
-# HEADING_KP mapped angle error directly, at gain 1.0, into QHOVER's
-# yaw-RATE channel with no damping -- a proportional-only controller
-# driving a rate (not position) actuator, which saturates and
-# overshoots on any real error. Confirmed live: logged yaw swung
-# 90 -> 98 -> 110 -> -171 -> 122 -> 25 -> -169 degrees within a few
-# seconds, an actual spin, not gentle imprecision -- and since the
-# position loop's lean commands are rotated into the body frame using
-# that same (garbage) yaw reading every tick, the whole trajectory went
-# nowhere useful regardless of how correct the position math itself was.
-# Dropped by more than 3x below as a first mitigation, not a proper
-# tuning pass (a real fix likely needs a rate-damping term, not just a
-# lower gain on the same P-only law).
-#
-# A SEPARATE hypothesis (that self.pos needed a spawn-relative-to-
-# absolute offset added before comparing against mission.target()) was
-# tried, live-tested, and DISPROVEN: querying LOCAL_POSITION_NED
-# directly at spawn (unarmed, no control input) showed self.pos is
-# already in the same absolute canyon-frame as mission.target() --
-# reads CANYON_ENTRY's own NED value there, not (0,0,0). The offset
-# code was reverted (controller_node.py); see that commit for the full
-# account of how a placeholder-zero CSV row before real telemetry
-# arrived was mistaken for a genuine spawn-time reading.
-#
-# With the heading fix alone: a fresh 70s baseline leg holds a stable
-# heading (~85-100 degrees throughout, no oscillation) and tracks the
-# mission target smoothly. Still not a real tuning pass -- re-verify
-# live before trusting a longer flight, and before sub-project 3's
-# 49-trial sweep runs on top of this.
-POSITION_KP = 0.5   # m/s^2 per metre of position error
-POSITION_KD = 0.8   # m/s^2 per m/s of velocity (damping)
-ALTITUDE_KP = 0.6   # climb-rate command [-1,1] per metre of altitude error
-HEADING_KP = 0.3    # yaw-rate command [-1,1] per radian of heading error -- was 1.0, oscillated
-MAX_LEAN_RAD = math.radians(20.0)  # lean angle that saturates the RC stick
+# controller_node's earlier outer-loop gains (POSITION_KP/KD,
+# ALTITUDE_KP, HEADING_KP, MAX_LEAN_RAD -- an RC-override-based P/D
+# position/altitude/heading controller, Phase 2's first MAVROS-port
+# attempt) are GONE, not just untuned: that whole approach was replaced
+# after a live demo watched it drift laterally under wind and strike a
+# canyon tower. See docs/superpowers/specs/
+# 2026-09-02-auto-mission-navigation-design.md -- controller_node now
+# uploads an ArduPilot AUTO mission and lets ArduPilot's own navigation
+# controller fly it, instead of a hand-rolled loop computing RC-override
+# lean angles every tick.
+MAX_WAYPOINT_OFFSET_M = 3.0  # clamp on treatment's cumulative waypoint nudge
+CORRECTION_UPDATE_HZ = 1.0   # how often treatment re-pushes the cruise waypoint

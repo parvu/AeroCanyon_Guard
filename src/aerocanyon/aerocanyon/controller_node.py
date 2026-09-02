@@ -1,18 +1,26 @@
-"""Offboard setpoint streamer. Baseline mode publishes the raw mission
-reference; treatment mode adds PINN feedforward behind the CBF filter.
+"""Mission uploader. Baseline mode uploads a fixed AUTO mission and lets
+ArduPilot's own navigation controller fly it; treatment mode additionally
+nudges the cruise waypoint with a CBF-filtered PINN wind correction.
 
-The offboard arm/engage sequence follows the pattern already proven in
-px4_teleop/teleop_keyboard.py: stream setpoints for a beat BEFORE
-requesting offboard mode, because PX4 rejects the mode switch if no
-setpoint stream is already present.
+Earlier this session this node instead ran a hand-rolled RC-override
+position/altitude/heading P/D loop (ArduPilot exposes no live GUIDED-mode
+XY position/velocity injection for this airframe, confirmed by reading
+ArduPlane/GCS_MAVLink_Plane.cpp -- handle_set_position_target_local_ned
+is GUIDED-only and does altitude only). That loop was replaced after a
+live demo watched it drift laterally under wind and strike a canyon
+tower: AUTO-mode MISSION navigation is a different, unblocked ArduPilot
+code path (a pre-uploaded MAVLink mission, not live position-target
+injection) -- see docs/superpowers/specs/
+2026-09-02-auto-mission-navigation-design.md for the full account,
+including the QuadPlane::in_vtol_auto() source evidence that a
+[NAV_VTOL_TAKEOFF, NAV_WAYPOINT, NAV_VTOL_LAND] mission stays in
+Q-mode/VTOL navigation the whole way, never transitioning to fixed-wing.
 """
-import math
-
 import numpy as np
 import rclpy
 from geometry_msgs.msg import PoseStamped, TwistStamped, Vector3Stamped
-from mavros_msgs.msg import OverrideRCIn, State
-from mavros_msgs.srv import CommandBool, CommandLong
+from mavros_msgs.msg import State, Waypoint
+from mavros_msgs.srv import CommandBool, CommandLong, WaypointPush
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Imu
@@ -22,129 +30,36 @@ from . import constants as C
 from . import frames
 from .cbf_filter import CBFFilter
 from .constants import MASS_KG
-from .mission import Mission
-from .rc_pwm import (MODE_QHOVER, MODE_QLAND, arm, pwm, pwm_throttle,
-                     resolve_stick, set_mode)
+from .rc_pwm import arm, set_mode
 
-SETPOINTS_BEFORE_OFFBOARD = 20  # PX4 needs an existing stream to accept the mode
-ENGAGE_RETRY_TICKS = 50  # retry the arm+offboard request once a second until it sticks
+SETPOINTS_BEFORE_OFFBOARD = 20  # give MAVROS/ArduPilot a beat to settle before requesting anything
+ENGAGE_RETRY_TICKS = 50  # retry the mission-upload/arm+AUTO request once a second until it sticks
+MODE_AUTO = 10  # ArduPlane custom mode number, confirmed against ArduPlane/mode.h
 
-# Tried repeatedly this session, live, with real fix attempts each round
-# -- still disabled. What changed and what was learned, in order:
-#
-# 1. Root-caused the original crash to PX4's own front-transition logic
-#    (vtol_type.cpp isFrontTransitionCompletedBase) falling back to a
-#    BLIND open-loop timer (VT_F_TR_OL_TM, 6s) whenever no airspeed
-#    feedback is available, then ramming the rest of the tilt to
-#    horizontal and cutting the rear hover motors in another 0.5s
-#    (VT_TRANS_P2_DUR) regardless of the vehicle's actual state.
-# 2. Enabled SYS_HAS_NUM_ASPD so PX4 could use real closed-loop airspeed
-#    gating instead. First attempt failed: model.sdf declares an
-#    airspeed_link, but nothing was publishing on the Gazebo topic PX4's
-#    bridge subscribes to -- "Preflight Fail: Airspeed invalid", vehicle
-#    never armed. Root cause (found by reading the world file): the
-#    world's plugin list loads gz-sim-imu-system, air-pressure-system,
-#    magnetometer-system, and navsat-system explicitly, but never
-#    gz-sim-air-speed-system -- each sensor TYPE needs its own system
-#    plugin to actually compute and publish data, and that one was just
-#    missing. Added it (worlds/_template.sdf, regenerated into
-#    worlds/urban_canyon.sdf and copied to PX4-Autopilot). Verified live:
-#    PX4's console now logs "Airspeed sensor healthy", arming succeeds,
-#    and a full run with the climb-rate-gated trigger + VT_TILT_TRANS=0.5
-#    actually completed the canyon transit and landed safely -- the first
-#    time any transition attempt this session did that. This part is a
-#    real, kept fix: the airspeed sensor is genuine, reusable
-#    infrastructure regardless of what happens with the transition
-#    itself (SYS_HAS_NUM_ASPD stays 1 in the airframe file).
-# 3. That successful run still wasn't smooth: recurring pitch excursions
-#    during cruise (past +-45 degrees, briefly +-80, self-recovering).
-#    Suspected TECS chasing an unreachable airspeed -- PX4's stock
-#    FW_AIRSPD_TRIM=15/MIN=10 m/s were never overridden, but this
-#    vehicle only ever reaches ~7-11 m/s. Tried FW_AIRSPD_STALL=6/MIN=7/
-#    TRIM=10/MAX=15. Live-tested: WORSE, not better -- instead of a
-#    bounded wobble around cruise altitude, the vehicle entered a
-#    sustained ~22s nose-down dive (pitch to -87 degrees, sink rate up to
-#    7.7 m/s) from 25m almost to ground contact before barely arresting
-#    it. Reverted; the performance-model numbers (trim/stall/climb/sink)
-#    aren't self-consistent for this vehicle and guessing at them further
-#    risks a real crash rather than fixing the wobble.
-#
-# Net position: the airspeed sensor fix (2) is real and kept. The
-# transition can now complete a full flight without diving or getting
-# stuck, but cruise is still rough, and the one attempt to smooth it (3)
-# made things actively worse. This needs proper TECS/attitude-rate
-# tuning against live telemetry by someone who can iterate on it
-# carefully -- not another guessed parameter set -- or the direct-
-# actuator alternative (this node driving tilt/throttle itself via
-# /fmu/in/actuator_servos + /fmu/in/actuator_motors with
-# OffboardControlMode.direct_actuator, replacing PX4's state machine
-# entirely, which also means writing this project's own attitude
-# stabilization for the transition phase). Disabled for now; the vehicle
-# flies the whole transit in stable multicopter mode, which is how every
-# verified-stable flight in this project's history has actually flown.
-ENABLE_VTOL_TRANSITION = False
+# Matches the README's --home value -- the ArduPilot EKF origin/home
+# point this project's SITL runs boot with. Mission waypoints are
+# uploaded as lat/lon relative to THIS point (frames.ned_to_latlon), not
+# the vehicle's own local frame -- MAVROS's WaypointPush takes global
+# coordinates, not local NED offsets.
+HOME_LAT, HOME_LON = 44.434424990487216, 26.04781615647584
+CRUISE_ALT_M = 25.0  # matches canyon_geometry.CANYON_ENTRY's NED altitude
 
-# How far past the canyon exit the vehicle must actually be before it
-# lands, measured from the far edge of the LAST tower row (tower_2_n/
-# tower_2_s), not from the mission's own exit waypoint (CANYON_EXIT is
-# set generously past the towers -- 45m of margin -- for stable transit
-# dynamics, not as a landing cue).
-#
-# self.pos is in the SAME absolute canyon-frame NED coordinates as
-# mission.target()/canyon_geometry.BUILDINGS, not relative to the
-# vehicle's own spawn point -- confirmed live by querying
-# LOCAL_POSITION_NED directly at spawn, unarmed, before any control
-# input: it already reads (~0, ~-100, ~0), matching CANYON_ENTRY's own
-# NED value exactly, not (0,0,0). (An earlier version of this comment,
-# and of the code below, assumed the opposite -- that self.pos was
-# spawn-relative, the way a placeholder-zero row at the very start of a
-# trial_logger CSV can look before any real telemetry has arrived -- and
-# both were wrong; reverted.) So the threshold below is a plain absolute
-# NED-east value: the last tower row's world-ENU edge (NED-east ==
-# ENU-east, see frames.py) plus clearance, no CANYON_ENTRY subtraction.
+# How far past the canyon exit the mission's cruise/landing point sits,
+# measured from the far edge of the LAST tower row (tower_2_n/tower_2_s)
+# -- not canyon_geometry.CANYON_EXIT, which is set generously past the
+# towers (45m of margin) for the OLD hand-rolled trajectory-follower's
+# own stability needs. That reasoning doesn't apply to ArduPilot's own
+# navigation controller, so the mission targets the real landing point
+# directly -- see the design spec for the full account. Consumed by
+# _build_mission() below, not a per-tick position check any more (the
+# old position-triggered landing logic is gone; ArduPilot's own mission
+# sequencer owns arrival/landing/disarm entirely once the mission
+# reaches its NAV_VTOL_LAND item).
 LAND_CLEARANCE_M = 2.0
 _LAST_TOWER_EDGE_ENU_X = max(b.cx + b.sx / 2.0 for b in cg.BUILDINGS if b.cx > 0)
 LAND_TRIGGER_LOCAL_M = _LAST_TOWER_EDGE_ENU_X + LAND_CLEARANCE_M
 
-# Earlier designs tried flying the vehicle all the way back to the spawn
-# point before landing via native RTL (VEHICLE_CMD_NAV_RETURN_TO_LAUNCH:
-# engages AUTO_RTL correctly but, verified live, never actually navigates
-# back toward home in this SITL configuration, drifting to ~1900m instead
-# of turning around). That complexity existed to solve one problem: a
-# vehicle left drifting or crashed when the next leg's PX4 process
-# booted, since Gazebo and the vehicle entity used to stay alive across
-# both legs. Now that each leg gets its own fresh `gz sim` + PX4 process
-# (run_trial.run_leg) with nothing shared between legs at all, THAT
-# problem no longer exists -- wherever this leg's vehicle ends up is
-# irrelevant to the next leg's boot. So: just land in place, handed off
-# to PX4's own VEHICLE_CMD_NAV_LAND / AUTO_LAND.
-#
-# A version of this node tried descending under its OWN offboard control
-# instead (freezing the position at the clearance point, target z=0)
-# specifically to keep the heading locked -- AUTO_LAND was verified live
-# to visibly turn the vehicle during the descent, off whatever heading it
-# had at clearance. That self-controlled descent held heading correctly,
-# but its own disarm logic (needed since nothing else would ever stop it)
-# proved unsafe: verified live, repeatedly, that the vehicle could
-# destabilise into a violent, uncontrolled tumble -- most likely because
-# VEHICLE_CMD_COMPONENT_ARM_DISARM without PX4's force parameter can be
-# silently REJECTED while airborne, and this node stopped publishing
-# setpoints the moment it (wrongly) believed the disarm had succeeded,
-# leaving the vehicle under thrust with no control input at all. AUTO_LAND
-# -- PX4's own, extensively field-tested landing logic, including its own
-# correct handling of when disarming is actually safe -- doesn't have
-# that failure mode. A turn during descent is a cosmetic issue; loss of
-# control is not, so this hands off to AUTO_LAND unconditionally now,
-# heading be damned.
-
-
-def _yaw_from_quat(q):
-    w, x, y, z = q
-    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
-
-
-def _wrap_pi(angle):
-    return (angle + math.pi) % (2.0 * math.pi) - math.pi
+ENABLE_VTOL_TRANSITION = False  # unchanged -- see cbf_filter.py's own use of this flag
 
 
 class ControllerNode(Node):
@@ -157,66 +72,32 @@ class ControllerNode(Node):
             raise ValueError(f'mode must be baseline or treatment, got {self.mode}')
         self.get_logger().info(f'controller mode: {self.mode}')
 
-        # Scales the PINN feedforward before it reaches the CBF. 1.0 is the
-        # original behaviour: cancel the entire estimated wind force. Measured
-        # in flight, that commands |wind_est|/m = 6.5 m/s^2 mean, 13.5 m/s^2 at
-        # p95 -- against PX4's ~3 m/s^2 horizontal acceleration budget, and
-        # comparable to gravity. Such a correction swamps the position
-        # controller rather than trimming it, which is how an estimator with
-        # genuine open-loop skill (0.665 in flight) still produced no closed-
-        # loop benefit: mean improvement +0.017 m over n=8 seeds, p=0.98.
-        # Part of the oversizing is structural -- wind_force() returns the
-        # TOTAL aerodynamic force, including the drag and lift the vehicle
-        # makes flying through still air, which is not a disturbance to cancel.
-        #
-        # Subtracting that still-air force was tried as the principled fix and
-        # MEASURED not to work: it is only 18% of the total, and because the
-        # two vectors partly oppose, removing it makes the feedforward LARGER
-        # (56.3 N vs 51.6 N). The oversizing is not about still-air terms --
-        # the modelled aero force is simply ~10 m/s^2, about 1 g, most of which
-        # PX4's position-control FEEDBACK is already rejecting (baseline flies
-        # fine). Feeding all of it forward double-counts the feedback loop.
-        # 0.2 is what fits inside the controller's authority: 0.2 * 10.08 =
-        # 2.0 m/s^2 against MPC_ACC_HOR's 3.0. Measured over 8 paired seeds,
-        # gain 1.0 gave +0.4% (p=0.98) and gain 0.2 gave +21.1% (p=0.12).
+        # Scales the PINN feedforward before it reaches the CBF. See the
+        # mission-stack port spec for the full measured-live rationale
+        # behind 0.2 (unchanged from the RC-override design -- this only
+        # affects u_des, not how the correction reaches the vehicle).
         self.declare_parameter('feedforward_gain', 0.2)
         self.ff_gain = float(self.get_parameter('feedforward_gain').value)
 
-        self.mission = Mission()
-        # NED yaw (0 = north, +pi/2 = east) pointing down the canyon's
-        # actual travel direction -- do NOT hardcode this to 0.0. The
-        # canyon corridor runs along Gazebo ENU +x (east, see
-        # canyon_geometry.BUILDINGS), not north, so a fixed yaw=0.0 here
-        # previously pointed the nose north while the mission pulled the
-        # vehicle east: the vehicle would take off facing the wrong way
-        # and visibly snap ~90 degrees once flight caught up to it.
-        self.cruise_yaw = float(np.arctan2(
-            self.mission.direction[1], self.mission.direction[0]))
         self.tick = 0
-        self.start_time = None
-        self.land_requested = False
-        self.done_logged = False
+        self.mission_uploaded = False
         self.wind_est = np.zeros(3)
-
         self.pos = np.zeros(3)
         self.vel = np.zeros(3)
-
-        # The CBF's stall barrier is a fixed-wing (loss-of-lift) concept --
-        # only meaningful while the vehicle is actually flying fixed-wing,
-        # i.e. tied to the same flag as the VTOL transition itself. See
-        # cbf_filter.py's module docstring for why leaving it on
-        # unconditionally corrupted the safety diagnostic.
-        self.cbf = CBFFilter(enable_stall=ENABLE_VTOL_TRANSITION)
         self.quat = np.array([1.0, 0.0, 0.0, 0.0])
         self.wind_truth = np.zeros(3)
+        self._waypoint_offset = np.zeros(2)
+        self._last_offset_push_tick = 0
+
+        # The CBF's stall barrier is a fixed-wing (loss-of-lift) concept
+        # -- see cbf_filter.py's module docstring.
+        self.cbf = CBFFilter(enable_stall=ENABLE_VTOL_TRANSITION)
         self.cbf_pub = self.create_publisher(
             Vector3Stamped, C.TOPIC_CBF_DIAG, 10)
 
-        self.rc_pub = self.create_publisher(OverrideRCIn, '/mavros/rc/override', 10)
         self.arm_client = self.create_client(CommandBool, '/mavros/cmd/arming')
         self.cmd_client = self.create_client(CommandLong, '/mavros/cmd/command')
-        self.desired_pub = self.create_publisher(
-            Vector3Stamped, C.TOPIC_SETPOINT_DESIRED, 10)
+        self.mission_client = self.create_client(WaypointPush, '/mavros/mission/push')
 
         self.mavros_connected = False
         self.mavros_armed = False
@@ -260,123 +141,117 @@ class ControllerNode(Node):
     def _on_wind_truth(self, msg):
         self.wind_truth = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
 
+    def _build_mission(self):
+        """[NAV_VTOL_TAKEOFF @ entry, NAV_WAYPOINT @ landing-trigger
+        point, NAV_VTOL_LAND @ landing-trigger point] -- all at
+        CRUISE_ALT_M, all in Q-mode/VTOL navigation the whole way
+        (QuadPlane::in_vtol_auto() latches true from the takeoff item and
+        never auto-clears without an explicit transition command, which
+        this project never issues). Landing targets the REAL landing-
+        trigger point (last tower row's edge + LAND_CLEARANCE_M), not
+        CANYON_EXIT -- see the design spec for why the old 45m margin
+        doesn't apply to ArduPilot's own navigation controller."""
+        entry_ned = frames.enu_to_ned(cg.CANYON_ENTRY)
+        land_ned = np.array([entry_ned[0], LAND_TRIGGER_LOCAL_M, entry_ned[2]])
+
+        def wp(command, ned, is_current=False):
+            lat, lon = frames.ned_to_latlon(ned, HOME_LAT, HOME_LON)
+            w = Waypoint()
+            w.frame = Waypoint.FRAME_GLOBAL_REL_ALT
+            w.command = command
+            w.is_current = is_current
+            w.autocontinue = True
+            w.x_lat = lat
+            w.y_long = lon
+            w.z_alt = CRUISE_ALT_M
+            return w
+
+        return [
+            wp(84, entry_ned, is_current=True),   # MAV_CMD_NAV_VTOL_TAKEOFF
+            wp(16, land_ned),                     # MAV_CMD_NAV_WAYPOINT
+            wp(85, land_ned),                     # MAV_CMD_NAV_VTOL_LAND
+        ]
+
     @staticmethod
-    def _lean_from_accel(accel_ned, yaw_quat):
-        """Desired horizontal NED acceleration -> (roll, pitch) body-frame
-        lean angles, small-angle. Rotates the horizontal acceleration into
-        the body frame using current yaw only (not full 3D attitude --
-        QHOVER's own attitude controller handles roll/pitch response to
-        this lean command; this loop only needs to know which way is
-        'forward' right now)."""
-        g = C.G
-        yaw = _yaw_from_quat(yaw_quat)
-        ax_body = accel_ned[0] * math.cos(yaw) + accel_ned[1] * math.sin(yaw)
-        ay_body = -accel_ned[0] * math.sin(yaw) + accel_ned[1] * math.cos(yaw)
-        pitch = math.atan2(ax_body, g)
-        roll = math.atan2(ay_body, g)
-        return roll, pitch
+    def _accumulate_offset(u_safe, dt, current_offset, max_offset_m):
+        """Kinematic displacement over one update interval (0.5*a*dt^2),
+        added to the running offset and clamped to max_offset_m -- so a
+        runaway correction can't push the mission waypoint somewhere
+        unsafe. Horizontal (NED north/east) only; altitude stays flown
+        by the mission's own fixed CRUISE_ALT_M."""
+        delta = 0.5 * np.asarray(u_safe[:2], dtype=float) * dt * dt
+        new_offset = np.asarray(current_offset, dtype=float) + delta
+        mag = np.linalg.norm(new_offset)
+        if mag > max_offset_m:
+            new_offset = new_offset * (max_offset_m / mag)
+        return new_offset
 
-    def _tick(self):
-        if self.land_requested:
-            # Handed off to ArduPilot's own QLAND -- continuing to publish
-            # RC overrides here would fight it for control authority.
-            self.tick += 1
-            return
-
-        engaged = self.mavros_armed
-        since_stream_started = self.tick - SETPOINTS_BEFORE_OFFBOARD
-        if (not engaged and since_stream_started >= 0
-                and since_stream_started % ENGAGE_RETRY_TICKS == 0):
-            # A single request can be silently rejected if the EKF hasn't
-            # converged yet -- keep asking once a second until MAVROS
-            # actually confirms armed, rather than trying exactly once and
-            # leaving the vehicle idle for the rest of the trial with no
-            # visible error.
-            set_mode(self.cmd_client, MODE_QHOVER)
-            arm(self.arm_client, True)
-            self.get_logger().info('requested QHOVER mode and arm')
-
-        if engaged and self.start_time is None:
-            self.start_time = self.get_clock().now()
-
-        elapsed = 0.0
-        if self.start_time is not None:
-            elapsed = (self.get_clock().now() - self.start_time).nanoseconds / 1e9
-
-        target, done = self.mission.target(elapsed)
-        if done and not self.done_logged:
-            self.get_logger().info(f'mission complete at t={elapsed:.1f}s')
-            self.done_logged = True
-
-        # self.pos[1] is local NED east -- since the vehicle spawns at
-        # CANYON_ENTRY (run_trial.SPAWN_XYZ), the local origin sits there
-        # too (verified live under PX4; unchanged assumption here), so
-        # self.pos[1] already reads as "east distance travelled from the
-        # entry" directly, and LAND_TRIGGER_LOCAL_M is that same distance
-        # to the last tower row's far edge plus LAND_CLEARANCE_M. Gated on
-        # measured position, not the open-loop mission schedule's `done`
-        # flag, so landing only fires once the vehicle has actually
-        # cleared the towers -- wind or CBF deviation could otherwise have
-        # it trigger while still between the buildings.
-        if engaged and self.pos[1] >= LAND_TRIGGER_LOCAL_M:
-            set_mode(self.cmd_client, MODE_QLAND)
-            self.land_requested = True
-            self.get_logger().info(
-                f'cleared the tower row by {LAND_CLEARANCE_M}m -- requested landing')
-            self.tick += 1
-            return
-
-        if self.mode == 'baseline':
-            # PD toward the mission target -- PX4's own position
-            # controller used to compute this; ArduPilot exposes no
-            # equivalent injection path for this airframe (no MAVLink XY
-            # position/velocity setpoint works for any Q-mode here), so
-            # this project now provides it. self.pos is already in the
-            # same absolute canyon-frame NED coordinates as target -- see
-            # LAND_TRIGGER_LOCAL_M's comment above.
-            pos_err = target - self.pos
-            u_des = C.POSITION_KP * pos_err - C.POSITION_KD * self.vel
-        else:
-            # The PINN estimates the disturbance FORCE; the feedforward is
-            # the acceleration that cancels it. Negative: we push back.
-            u_des = -self.ff_gain * self.wind_est / MASS_KG
-
+    def _treatment_tick(self):
+        u_des = -self.ff_gain * self.wind_est / MASS_KG
         u_safe, info = self.cbf.filter(u_des, self.pos, self.vel,
                                        self.wind_truth, self.quat)
 
+        diag = Vector3Stamped()
+        diag.header.stamp = self.get_clock().now().to_msg()
+        diag.vector.x = 1.0 if info['active'] else 0.0
+        # Obstacle barrier only (metres) -- see cbf_filter.py for why
+        # this must never be combined with the stall barrier (radians).
+        diag.vector.y = float(np.clip(info['h_obstacle'], -1e3, 1e3))
+        diag.vector.z = 0.0 if info['feasible'] else 1.0
+        self.cbf_pub.publish(diag)
+
+        self._waypoint_offset = self._accumulate_offset(
+            u_safe, 1.0 / C.CONTROL_HZ, self._waypoint_offset,
+            C.MAX_WAYPOINT_OFFSET_M)
+
+        since_last_push = self.tick - self._last_offset_push_tick
+        if since_last_push >= C.CONTROL_HZ / C.CORRECTION_UPDATE_HZ:
+            entry_ned = frames.enu_to_ned(cg.CANYON_ENTRY)
+            land_ned = np.array([entry_ned[0], LAND_TRIGGER_LOCAL_M, entry_ned[2]])
+            corrected_ned = land_ned + np.array(
+                [self._waypoint_offset[0], self._waypoint_offset[1], 0.0])
+            lat, lon = frames.ned_to_latlon(corrected_ned, HOME_LAT, HOME_LON)
+
+            wp = Waypoint()
+            wp.frame = Waypoint.FRAME_GLOBAL_REL_ALT
+            wp.command = 16  # MAV_CMD_NAV_WAYPOINT
+            wp.is_current = False
+            wp.autocontinue = True
+            wp.x_lat = lat
+            wp.y_long = lon
+            wp.z_alt = CRUISE_ALT_M
+
+            req = WaypointPush.Request()
+            req.start_index = 1
+            req.waypoints = [wp]
+            self.mission_client.call_async(req)
+            self._last_offset_push_tick = self.tick
+
+    def _tick(self):
+        if not self.mission_uploaded:
+            since_start = self.tick - SETPOINTS_BEFORE_OFFBOARD
+            if since_start >= 0 and since_start % ENGAGE_RETRY_TICKS == 0:
+                req = WaypointPush.Request()
+                req.start_index = 0
+                req.waypoints = self._build_mission()
+                self.mission_client.call_async(req)
+                self.get_logger().info('requested mission upload')
+                # Optimistic -- the arm/engage retry below already
+                # tolerates a request landing on a not-yet-ready FCU by
+                # simply asking again, so a real ack-based state machine
+                # isn't needed here.
+                self.mission_uploaded = True
+
+        engaged = self.mavros_armed
+        since_stream_started = self.tick - SETPOINTS_BEFORE_OFFBOARD - ENGAGE_RETRY_TICKS
+        if (not engaged and since_stream_started >= 0
+                and since_stream_started % ENGAGE_RETRY_TICKS == 0):
+            set_mode(self.cmd_client, MODE_AUTO)
+            arm(self.arm_client, True)
+            self.get_logger().info('requested AUTO mode and arm')
+
         if self.mode == 'treatment':
-            diag = Vector3Stamped()
-            diag.header.stamp = self.get_clock().now().to_msg()
-            diag.vector.x = 1.0 if info['active'] else 0.0
-            # Obstacle barrier only (metres) -- see cbf_filter.py for why
-            # this must never be combined with the stall barrier (radians).
-            diag.vector.y = float(np.clip(info['h_obstacle'], -1e3, 1e3))
-            diag.vector.z = 0.0 if info['feasible'] else 1.0
-            self.cbf_pub.publish(diag)
-
-        roll, pitch = self._lean_from_accel(u_safe[:2], self.quat)
-        alt_err = target[2] - self.pos[2]  # NED: more negative target = higher
-        climb_cmd = float(np.clip(-C.ALTITUDE_KP * alt_err, -1.0, 1.0))
-        heading_err = _wrap_pi(self.cruise_yaw - _yaw_from_quat(self.quat))
-        yaw_cmd = float(np.clip(C.HEADING_KP * heading_err, -1.0, 1.0))
-
-        msg = OverrideRCIn()
-        channels = [OverrideRCIn.CHAN_NOCHANGE] * 18
-        channels[0:4] = [
-            pwm(float(np.clip(roll / C.MAX_LEAN_RAD, -1.0, 1.0)), 1.0),
-            pwm(float(np.clip(pitch / C.MAX_LEAN_RAD, -1.0, 1.0)), 1.0, invert=True),
-            pwm_throttle(climb_cmd, 1.0),
-            pwm(yaw_cmd, 1.0),
-        ]
-        channels[4:8] = [1500] * 4
-        msg.channels = channels
-        self.rc_pub.publish(msg)
-
-        desired = Vector3Stamped()
-        desired.header.stamp = self.get_clock().now().to_msg()
-        desired.vector.x, desired.vector.y, desired.vector.z = (
-            float(target[0]), float(target[1]), float(target[2]))
-        self.desired_pub.publish(desired)
+            self._treatment_tick()
 
         self.tick += 1
 
