@@ -436,16 +436,74 @@ git commit -m "Add ArduPilot tricopter param file (frame/tilt from spike, gains 
 
 ---
 
-### Task 5: First boot -- verify spawn, arm, and level stable hover
+### Task 5: Thrust rig + first boot -- verify spawn, arm, and level stable hover
+
+**Plan amendment (recorded after Task 3's review):** Task 3's
+`ArduPilotPlugin` `VELOCITY` motor controls only spin the rotor joints --
+confirmed against `ApplyMotorForces()` in `ArduPilotPlugin.cc` (writes a
+joint torque via `JointForceCmd`, never applies a `Wrench`/force to
+`base_link`) -- they do NOT replicate the PX4 `MulticopterMotorModel`
+plugin's real thrust-from-velocity-squared physics. This model currently
+cannot generate lift at all, not just "needs tuning." Fixing this is now
+Task 5's first step, not a tuning iteration -- see Step 0 below.
 
 **Files:**
-- Modify (if boot reveals a config bug): `src/aerocanyon/models/tricopter_ap/model.sdf`,
+- Modify: `src/aerocanyon/models/tricopter_ap/model.sdf` (Step 0: add the
+  thrust rig -- this is expected, not a config-bug fallback)
+- Modify (if boot reveals a further config bug): `src/aerocanyon/models/tricopter_ap/model.sdf`,
   `src/aerocanyon/ardupilot/tricopter.parm`
 
 **Interfaces:**
 - Consumes: Tasks 1-4's outputs (binaries, model, param file)
 - Produces: a running, armable, stably-hovering vehicle in Gazebo --
   the prerequisite every later manual-control task builds on.
+
+- [ ] **Step 0: Add a thrust-generating rig to `tricopter_ap/model.sdf`**
+
+Follow `ardupilot_gazebo`'s own `iris_with_ardupilot` reference model as
+the pattern (find it under `~/ardupilot_gazebo`, e.g. `find ~/ardupilot_gazebo
+-iname "iris_with_ardupilot*" -o -iname "*.sdf" | xargs grep -l LiftDrag`)
+-- it pairs each `ArduPilotPlugin` `VELOCITY` rotor control with a
+`gz-sim-lift-drag-system` (`LiftDrag`) plugin block on the same rotor
+link, which is what actually generates thrust force from the joint's
+spin. Add one `LiftDrag` block per rotor link (3 total: `rotor_0`,
+`rotor_1`, `rotor_2` -- match the link names Task 3 preserved from the
+PX4 model) alongside the existing `ArduPilotPlugin` block, not replacing
+it.
+
+Size the `LiftDrag` params (`cla`, `cda`, `area`, `forward`, `upward`,
+`cp` -- copy `iris_with_ardupilot`'s own param NAMES exactly, it's the
+verified-working reference) so that at `Q_TILT_MASK`'s rotors' expected
+hover RPM the resulting thrust is in the same ballpark as the PX4
+model's own live-tuned sizing: `motorConstant=1.608e-05`,
+`maxRotVelocity=1500` (from `src/aerocanyon/models/tricopter/model.sdf`
+-- read it for the exact numbers, don't guess) gives roughly
+`1.608e-05 * 1500^2 ≈ 36 N` max thrust per rotor. Treat this as a
+starting point to iterate from in this task's later steps, not a value
+to get exactly right up front -- the PX4 branch's own thrust sizing took
+several rounds of live flight-test tuning this session before it flew
+cleanly (see that model's own in-file history comments), and `LiftDrag`
+is a different force model (aerodynamic lift/drag coefficients, not a
+direct velocity-squared motor constant) so the numbers won't translate
+1:1 regardless.
+
+- [ ] **Step 0b: Sanity-check the SDF is still well-formed**
+
+```bash
+source /opt/ros/jazzy/setup.bash
+gz sdf --check /home/parvu/AeroCanyon_Guard/src/aerocanyon/models/tricopter_ap/model.sdf
+```
+
+Expected: same result as Task 3's own check (the pre-existing
+`model://airspeed` include-resolution CLI limitation, nothing new).
+
+- [ ] **Step 0c: Commit the thrust rig separately from the rest of this task's tuning**
+
+```bash
+cd /home/parvu/AeroCanyon_Guard
+git add src/aerocanyon/models/tricopter_ap/model.sdf
+git commit -m "Add LiftDrag thrust rig to tricopter_ap (ArduPilotPlugin's VELOCITY control alone generates no lift)"
+```
 
 - [ ] **Step 1: Confirm nothing is already running**
 
