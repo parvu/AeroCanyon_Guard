@@ -1,6 +1,7 @@
-"""Bring up the aerocanyon nodes. PX4 and the DDS agent are started
-separately (see the repo README) -- ROS2 launch has no clean way to own
-the PX4 shell, and trying to make it do so wastes more time than it saves.
+"""Bring up the aerocanyon nodes. Gazebo, ArduPilot SITL, and MAVROS are
+started separately (see the repo README / run_trial.py) -- ROS2 launch
+has no clean way to own those processes, and trying to make it do so
+wastes more time than it saves.
 """
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument

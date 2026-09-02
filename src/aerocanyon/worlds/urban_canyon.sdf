@@ -171,5 +171,21 @@
       <longitude_deg>8.546163739800146</longitude_deg>
       <elevation>0</elevation>
     </spherical_coordinates>
+
+    <!-- PX4's own SITL startup script used to spawn the vehicle into this
+         world dynamically via a gz service call (PX4_SIM_MODEL/
+         PX4_GZ_MODEL_POSE env vars in run_trial.py's old PX4 launch) --
+         no model was ever baked into this file. ArduPilot's SITL has no
+         equivalent: ArduPilotPlugin expects its model already present in
+         the world via <include>, connecting to it over its own FDM
+         socket (see src/aerocanyon/models/tricopter_ap/model.sdf). PX4
+         is gone from this repo entirely now, so there is no reason to
+         keep a second PX4-only copy of this world -- baked in directly.
+         run_trial.py's SPAWN_XYZ (canyon_geometry.CANYON_ENTRY, ground
+         clearance 0.246) sets this pose to match. -->
+    <include>
+      <uri>model://tricopter_ap</uri>
+      <pose>-100 0 0.246 0 0 0</pose>
+    </include>
   </world>
 </sdf>

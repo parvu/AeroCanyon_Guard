@@ -12,9 +12,13 @@ MASS_KG = 5.115
 G = 9.81
 
 WORLD_NAME = 'urban_canyon'
-# Matches PX4's own naming: <PX4_SIM_MODEL with the gz_ prefix stripped>_<instance>.
-# Instance is always 0 here -- nothing in this project runs multiple vehicles.
-MODEL_NAME = 'tricopter_0'
+# The Gazebo entity name for an <include> with no explicit <name> defaults
+# to the model directory's own name -- src/aerocanyon/models/tricopter_ap.
+# (Was 'tricopter_0', matching PX4's gz_bridge naming convention --
+# <PX4_SIM_MODEL with the gz_ prefix stripped>_<instance> -- back when
+# PX4 spawned the vehicle itself via a gz service call rather than a
+# static <include> in the world file.)
+MODEL_NAME = 'tricopter_ap'
 CONTROL_HZ = 50
 
 TOPIC_WIND_TRUTH = '/aerocanyon/wind_truth'
