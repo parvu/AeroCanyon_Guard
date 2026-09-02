@@ -79,6 +79,9 @@ Q_A_RAT_YAW_D     0.004
 # start from a bad feedforward on every takeoff.
 Q_M_THST_HOVER    0.47
 
+FLTMODE_CH        0        # disable RC mode-switch: control_server pins ch8 to 1500,
+                           # which ArduPilot would otherwise read as a mode-switch position
+
 # --- Arming / simulation ---
 # NOTE: this ArduPilot checkout has already migrated ARMING_CHECK (old
 # AP_Int16 "checks to perform" bitmask) to ARMING_SKIPCHK (new AP_Int32

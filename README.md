@@ -490,19 +490,12 @@ python3 control_server.py 8080
 ```
 
 Wait ~30 s total after SITL starts for EKF alignment and a 3D GPS fix
-before arming. Then open `http://localhost:8080`. After hitting `arm`,
-give it another 5-10 s before touching a stick: ArduPilot's built-in
-flight-mode-select channel (`FLTMODE_CH=8`, unrelated to any per-channel
-`RCn_OPTION`) briefly reads the override's neutral 1500 on channel 8 as a
-real mode-switch position and can pull the vehicle back toward a
-fixed-wing mode for a few seconds immediately after arming, before
-settling into `QHOVER` on its own -- visible as the tilt servos briefly
-sitting at a non-hover angle right after arming, then swinging to the
-hover position (front/front/rear ~1181/1181/1818) once it settles. This
-was observed on a genuinely fresh stack during this task's own
-verification and is not a sign anything is broken; just don't judge
-"is manual control working" from the first couple of seconds after
-arming.
+before arming. Then open `http://localhost:8080` and hit `arm`; the
+vehicle goes straight to `QHOVER`. (`tricopter.parm` sets `FLTMODE_CH=0`
+to disable ArduPilot's RC mode-switch, so channel 8 being pinned to 1500
+by `control_server.py` is never misread as a mode-switch position --
+without that, the vehicle would briefly pull toward a fixed-wing mode
+right after arming before self-settling.)
 
 **Manual flight here is not the PX4 branch's world-frame velocity
 offboard control.** Arming engages `QHOVER` and the sticks drive
@@ -513,10 +506,14 @@ yaw-rotated world-frame velocity setpoints. A centred/stale stick resolves
 to PWM 1500, which in `QHOVER` means *hold attitude, hold altitude* -- a
 real RC failsafe behaviour, and a difference worth knowing if you're
 used to the PX4 branch's zero-velocity failsafe. `land now` switches to
-`QLAND` and disarms automatically on touchdown. Fixed-wing transition and
-the `rc_bridge.py` physical-transmitter path are unaffected by any of
-this (same `/api/stick` HTTP surface both ways) but forward-flight is out
-of scope here -- see below.
+`QLAND` and disarms automatically on touchdown. The `rc_bridge.py`
+physical-transmitter path is unaffected by any of this (same
+`/api/stick` HTTP surface). The `transition FW`/`transition MC` buttons,
+however, are inert on this branch: `control_server.py` deliberately has
+no handler for those commands (forward-flight is out of scope here --
+see below), so clicking them fires a `fetch()` that gets an unread HTTP
+error and silently does nothing, same as any other unrecognized
+`/api/manual?cmd=...` value.
 
 ### What's not here yet (Phase 2)
 

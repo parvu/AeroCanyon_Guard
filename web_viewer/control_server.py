@@ -218,8 +218,9 @@ class WebControlNode(Node):
         channels = [OverrideRCIn.CHAN_NOCHANGE] * 18
         channels[0:4] = [roll, pitch, throttle, yaw]
         # Channels 5-8 pinned to centre, matching the SITL runs this was
-        # verified on. Nothing in tricopter.parm assigns them an RCn_OPTION,
-        # so they are inert either way.
+        # verified on. tricopter.parm sets FLTMODE_CH=0, explicitly
+        # disabling ArduPilot's RC mode-switch, so channel 8 being pinned
+        # here is never misread as a flight-mode-switch position.
         channels[4:8] = [RC_CENTER] * 4
         msg.channels = channels
         self.rc_pub.publish(msg)
