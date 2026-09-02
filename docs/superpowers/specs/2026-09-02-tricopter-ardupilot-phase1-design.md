@@ -16,6 +16,15 @@ https://ardupilot.org/plane/docs/guide-tilt-rotor.html) rather than the
 hand-derived allocator tuning PX4 required here, is a better fit for this
 vehicle -- without disturbing the working PX4 branch.
 
+**Concrete, not just "tuning was hard":** the vehicle's actual intended
+design (see Geometry below) has the front rotors fully stop and fold
+their propeller blades in forward flight -- and PX4's control allocator
+has no way to express "tiltable (for hover yaw) AND auto-stopped in FW"
+on the same rotor (see `4022_gz_tricopter`'s own header comment, point
+1). The current PX4 config's front rotors keep spinning in cruise as a
+direct consequence of that limitation, not by design choice. This is a
+real capability gap, not just an empirical-tuning inconvenience.
+
 This is Phase 1 of a two-phase migration: **flight only**. Getting the
 tricopter armed, hovering stably, and manually flyable through the
 existing browser viewer under ArduPilot SITL. The autonomous
@@ -34,33 +43,67 @@ started only after Phase 1 lands and is verified.
   flyable vehicle under ArduPilot's own control loop, not a numeric
   comparison between autopilots (that's a natural Phase 2+ question,
   once both stacks fly the actual mission).
-- VTOL fixed-wing transition. Exactly as with the PX4 branch (see
-  `README.md`'s honest caveat there), forward-flight/cruise tuning is out
-  of scope -- hover/multicopter flight only.
+- VTOL fixed-wing transition **flight-testing**. Exactly as with the PX4
+  branch (see `README.md`'s honest caveat there), actually flying to
+  cruise and tuning that regime is out of scope -- hover/multicopter
+  flight only. The tilt ranges/roles themselves (see Geometry below)
+  still need to be configured correctly in Phase 1's param file, since
+  the front pair's yaw-trim sub-range is genuinely a hover-flight
+  mechanism -- only flying the transition itself is deferred.
+
+## Geometry (corrected -- authoritative, from the user, supersedes any
+## earlier guess in this doc or in PX4-side comments about "all three tilt
+## the same way")
+
+- **Front motors** (the pair): tilt **-20 deg to +90 deg**, where 90 deg
+  is the horizontal axis (thrust pointing forward) and 0 deg is vertical
+  (hover). The **-20..0 deg range is dedicated to yaw trim** (differential
+  tilt past vertical, same purpose as the PX4 branch's negative-range
+  extension) -- it is not used in the hover-to-cruise transition itself.
+  **In forward/cruise flight the front motors fully stop and fold their
+  propeller blades** -- they contribute zero thrust in cruise.
+- **Rear motor**: a pusher with a **high-pitch propeller** (sized for
+  cruise efficiency, not hover). Tilts in the vertical plane from
+  **-90 deg (vertical/hover) to 0 deg (horizontal/cruise)** -- note this
+  is the opposite sign convention from the front pair's range, and covers
+  a different span (90 deg total, no yaw-trim-only sub-range). **It is
+  the only thruster active in forward/cruise flight.**
+
+This means the tricopter has **two structurally different tilt roles**,
+not one uniform "all rotors tilt together" mechanism:
+- Front pair: classic tiltrotor-with-fold -- vertical for hover (plus a
+  small negative range purely for yaw trim, never reached during an
+  actual hover-to-cruise transition), full stop+fold at the forward end.
+- Rear: an always-active tilting pusher, tilts through its own separate
+  range, contributes hover thrust throughout and is the sole cruise
+  thruster -- never stops.
 
 ## Open risk, resolved first
 
-This project's current tricopter tilts **all three** rotors (front pair
-+ rear), added specifically to fix a real live yaw-right-at-takeoff bug
-earlier this session (see `4022_gz_tricopter`'s own comments). ArduPilot's
-documented tilt-tricopter examples show only the front two tilting
-(`Q_TILT_MASK=3` for a 2-motor tilt mask on a 3-motor frame). Whether
-`Q_TILT_MASK` accepting all three bits set (7) on `Q_FRAME_CLASS=7` is
-actually supported is **unconfirmed** and must not be assumed.
+Whether ArduPilot's `Q_TILT_MASK`/tiltrotor system can represent **two
+motors with different tilt ranges and different forward-flight roles**
+within one frame is **unconfirmed** and must not be assumed. ArduPilot's
+documented tilt-tricopter examples (`Q_TILT_MASK=3`, front two tilt) all
+appear to assume every masked motor shares the same tilt schedule and
+role. This project's actual geometry doesn't fit that shape cleanly: the
+front pair needs stop+fold behavior the rear must NOT have, and the rear
+needs its own independent tilt range/schedule.
 
 **First implementation step, before any other Phase 1 work:** a bounded
-spike -- boot ArduPilot SITL with a stock/default multicopter frame,
-set `Q_TILT_MASK=7` on a 3-motor tri, and confirm via `param show` /
-arming-check behavior / SITL log whether ArduPilot accepts and correctly
-interprets it. If all-three-tilt is not supported:
-- Fall back to `Q_TILT_MASK=3` (front two tilt, matching ArduPilot's
-  documented examples) with the rear rotor a fixed vertical hover
-  rotor -- closer to this project's *pre-rebalance* PX4 design (see
-  `4022_gz_tricopter`'s own history comments on the rear motor's
-  original half-weight-pusher sizing), not the current all-tilt one.
-- Document the fallback and why in this spec (update it) before
-  continuing, since it changes the yaw-authority mechanism the rest of
-  the design assumes.
+spike investigating how ArduPilot actually models this, in order of
+preference:
+1. Whether `Q_TILT_MASK` supports per-motor tilt angle limits/roles (so
+   front and rear can have different ranges/behavior within one masked
+   group), via SITL param inspection and ArduPilot's own tiltrotor
+   source (`AP_MotorsTiltrotor`), not just the docs page.
+2. Whether the rear pusher should instead be modeled OUTSIDE
+   `Q_TILT_MASK` entirely -- e.g. a plain always-on motor with its own
+   tilt servo driven independently (`SERVOn_FUNCTION`), decoupled from
+   ArduPilot's tiltrotor transition state machine, while only the front
+   pair is a `Q_TILT_MASK` tiltrotor group.
+3. If neither cleanly represents the real geometry, document the closest
+   achievable approximation here (update this spec) before continuing,
+   and flag exactly what behavior is being approximated away.
 
 ## Architecture
 
