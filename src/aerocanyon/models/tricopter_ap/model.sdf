@@ -519,15 +519,24 @@
              before this session's rear-tilt rework, the prop rendered at
              the SAME +0.025 offset above the housing centre as the front
              (puller) rotors -- correct for them, backwards for a pusher.
-             Mirrored here (+0.025 -> -0.025 relative to the link's own
-             z=0.07 origin, i.e. a -0.05 local offset) so the blade disk
-             renders below the housing once the tilt joint is vertical
-             for hover, matching the front rotors' visual convention
-             flipped fore-aft rather than top-bottom. Purely cosmetic --
-             does not touch the collision/inertial placement above, the
-             joint definition, or the ArduPilotPlugin/LiftDrag thrust
-             mechanism, all of which stay keyed to the link's own origin. -->
-        <pose>0 0 -0.05 0 0 0</pose>
+
+             A -0.05 local offset (mirroring the front's +0.025 around the
+             link's z=0.07 origin) put the blade disk's own centre below
+             the housing centre, but its ~0.1 m sweep radius still crossed
+             above the housing's TOP edge and the mount boom's top surface
+             (rear_motor_boom, whose visual bbox tops out level with where
+             the blade landed) in a live screenshot -- confirmed by
+             comparing scene-graph world-space bounding boxes for
+             rotor_1_visual/motor_1_visual/rear_motor_boom, not guessed.
+             Real request 2026-09-02: still visibly above its support.
+             Deepened to -0.09 so the whole disk clears the boom's bottom
+             surface (not just the motor's centre-line) with margin,
+             instead of only nudging past the housing centre. Purely
+             cosmetic -- does not touch the collision/inertial placement
+             above, the joint definition, or the ArduPilotPlugin/LiftDrag
+             thrust mechanism, all of which stay keyed to the link's own
+             origin. -->
+        <pose>0 0 -0.09 0 0 0</pose>
         <geometry>
           <mesh>
             <scale>1 1 1</scale>
