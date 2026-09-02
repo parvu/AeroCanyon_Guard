@@ -1,0 +1,52 @@
+<?xml version="1.0" ?>
+<sdf version="1.8">
+  <world name="map_zone">
+    <!-- Real-world manual-flight testing ground for the ArduPilot branch
+         (tricopter-ap), replacing the synthetic urban_canyon.sdf box
+         buildings used for the CBF/PINN mission and the PX4 branch's own
+         manual-flight sections above. map_zone.dae (src/aerocanyon/map_zone/)
+         is an OSM-derived 3D model of the Politehnica/AFI area of
+         Bucharest, matching this project's ArduPilot --home coordinates
+         (44.434424990487216,26.04781615647584,76 -- see README). No
+         separate ground_plane: map_zone's own mesh is the ground and
+         buildings combined, static, so a flat plane underneath would
+         only z-fight it. -->
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics" />
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands" />
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster" />
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu" />
+    <plugin filename="gz-sim-air-pressure-system" name="gz::sim::systems::AirPressure" />
+    <plugin filename="gz-sim-magnetometer-system" name="gz::sim::systems::Magnetometer" />
+    <plugin filename="gz-sim-navsat-system" name="gz::sim::systems::NavSat" />
+    <plugin filename="gz-sim-air-speed-system" name="gz::sim::systems::AirSpeed" />
+    <plugin filename="gz-sim-wind-effects-system" name="gz::sim::systems::WindEffects">
+      <force_approximation_threshold>0.001</force_approximation_threshold>
+      <default_wind><linear>0.0 0.0 0.0</linear></default_wind>
+    </plugin>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+    </light>
+
+    <include>
+      <uri>model://map_zone</uri>
+      <pose>0 0 0 0 0 0</pose>
+    </include>
+
+    <include>
+      <uri>model://tricopter_ap</uri>
+      <pose>0 0 75 0 0 0</pose>
+    </include>
+  </world>
+</sdf>

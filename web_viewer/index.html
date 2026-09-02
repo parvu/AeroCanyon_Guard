@@ -26,6 +26,12 @@
       key: "aerocanyon_dev"
     });
 
+    // World name the sim is actually running (urban_canyon on the PX4
+    // branch, map_zone on tricopter-ap's real-world Bucharest terrain) --
+    // both the scene request and the pose subscription below must target
+    // whichever one is live, or the client silently gets nothing back.
+    var WORLD_NAME = 'map_zone';
+
     // Listen for the 'connection' event.
     gz.on('connection', function() {
       // Real bug found live 2026-08-27: this used to target #status
@@ -39,9 +45,9 @@
 
     // Real bug found live: this file shipped hardcoded to gz-launch's own demo world
     // ("shapes") both here and in the /world/.../dynamic_pose/info subscription below --
-    // against our real world (urban_canyon) that meant "scene" requested a world that
-    // doesn't exist, so the client fell back to an empty default grid with nothing in
-    // it. Both hardcoded to the real world name now.
+    // against our real world that meant "scene" requested a world that doesn't exist,
+    // so the client fell back to an empty default grid with nothing in it. Both now use
+    // WORLD_NAME (set above) instead of a second hardcoded literal.
     gz.on('worlds', function(_worlds) {
       // \todo Switch this to a service call when this issue is
       // resolved:
@@ -53,7 +59,7 @@
           scene.add(modelObj);
         }
       });
-      gz.socket.send(buildMsg(['scene','urban_canyon','','']));
+      gz.socket.send(buildMsg(['scene', WORLD_NAME, '', '']));
     });
 
     // Create the clock subscriber
@@ -82,7 +88,7 @@
     // Create the pos subscriber
     var poseSub = new Topic({
       gz: gz,
-      name: '/world/urban_canyon/dynamic_pose/info',
+      name: '/world/' + WORLD_NAME + '/dynamic_pose/info',
       messageType : 'gz.msgs.Pose_V',
       callback: function(msg) {
         for (var i = 0; i < msg.pose.length; ++i) {
