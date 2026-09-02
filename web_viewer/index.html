@@ -26,11 +26,17 @@
       key: "aerocanyon_dev"
     });
 
-    // World name the sim is actually running (urban_canyon on the PX4
-    // branch, map_zone on tricopter-ap's real-world Bucharest terrain) --
-    // both the scene request and the pose subscription below must target
-    // whichever one is live, or the client silently gets nothing back.
-    var WORLD_NAME = 'map_zone';
+    // Real bug found live twice now (once hardcoded to 'shapes', once to
+    // a hardcoded WORLD_NAME constant that only matched ONE of the several
+    // worlds this project actually runs -- urban_canyon for run_trial.py's
+    // baseline/treatment legs, map_zone for the manual-flight demo, and
+    // more could be added later): a mismatched world name means the scene
+    // request and pose subscription silently target a world that isn't
+    // running, and the client falls back to an empty grid with nothing in
+    // it -- no error anywhere. Fixed for good this time by never hardcoding
+    // a name at all: the 'worlds' event (below) already tells us the real
+    // one straight from the server gz-launch is actually bridging.
+    var poseSub = null;
 
     // Listen for the 'connection' event.
     gz.on('connection', function() {
@@ -43,12 +49,13 @@
       statusText.innerHTML = 'Status: connected';
     });
 
-    // Real bug found live: this file shipped hardcoded to gz-launch's own demo world
-    // ("shapes") both here and in the /world/.../dynamic_pose/info subscription below --
-    // against our real world that meant "scene" requested a world that doesn't exist,
-    // so the client fell back to an empty default grid with nothing in it. Both now use
-    // WORLD_NAME (set above) instead of a second hardcoded literal.
+    // _worlds is the actual list of worlds gz-launch's WebsocketServer is
+    // bridging, straight from the server -- worlds[0] is real, not a
+    // guess (see the comment above for why a hardcoded name doesn't
+    // survive this project running more than one world).
     gz.on('worlds', function(_worlds) {
+      var worldName = _worlds[0];
+
       // \todo Switch this to a service call when this issue is
       // resolved:
       // https://github.com/gazebosim/gz-transport/issues/135
@@ -59,7 +66,27 @@
           scene.add(modelObj);
         }
       });
-      gz.socket.send(buildMsg(['scene', WORLD_NAME, '', '']));
+      gz.socket.send(buildMsg(['scene', worldName, '', '']));
+
+      // Pose subscription needs the same real world name -- created here,
+      // not at module load, since this is the first point that name is
+      // actually known. scene (used in the callback) is assigned
+      // synchronously above, well before this async event can fire.
+      poseSub = new Topic({
+        gz: gz,
+        name: '/world/' + worldName + '/dynamic_pose/info',
+        messageType: 'gz.msgs.Pose_V',
+        callback: function(msg) {
+          for (var i = 0; i < msg.pose.length; ++i) {
+            var entity = scene.getByName(msg.pose[i].name);
+            if (entity && entity !== scene.modelManipulator.object
+                && entity.parent !== scene.modelManipulator.object) {
+              scene.updatePose(entity, msg.pose[i].position,
+                msg.pose[i].orientation);
+            }
+          }
+        }
+      });
     });
 
     // Create the clock subscriber
@@ -84,24 +111,6 @@
     // only the camera auto-follow is gone; resetCameraPose() at load is now
     // the only thing that ever moves the camera, same as a fresh RViz/
     // Foxglove view the user is expected to navigate themselves.
-
-    // Create the pos subscriber
-    var poseSub = new Topic({
-      gz: gz,
-      name: '/world/' + WORLD_NAME + '/dynamic_pose/info',
-      messageType : 'gz.msgs.Pose_V',
-      callback: function(msg) {
-        for (var i = 0; i < msg.pose.length; ++i) {
-          var entity = scene.getByName(msg.pose[i].name);
-          if (entity && entity !== scene.modelManipulator.object
-              && entity.parent !== scene.modelManipulator.object) {
-            scene.updatePose(entity, msg.pose[i].position,
-              msg.pose[i].orientation);
-          }
-        }
-      }
-    });
-
 
 
     var camera, renderer;
