@@ -13,18 +13,18 @@ setup(
         ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
         ('share/' + package_name + '/worlds', glob('worlds/*.sdf')),
         ('share/' + package_name + '/data', glob('data/*')),
-        # The tricopter vehicle: a Gazebo model and a PX4 airframe config
-        # this project authors itself (PX4 ships neither -- see the README).
-        # Installed into PX4-Autopilot by hand, not loaded from here, but
-        # kept in the package so the vehicle travels with the source.
-        ('share/' + package_name + '/models/tricopter', glob('models/tricopter/*')),
-        ('share/' + package_name + '/airframes', glob('airframes/*')),
+        # The tricopter vehicle's Gazebo model, driven by ArduPilot's own
+        # ArduPilotPlugin -- resolved at runtime via GZ_SIM_RESOURCE_PATH
+        # (see run_trial.py/README), not loaded from here, but kept in
+        # the package so the vehicle travels with the source.
+        ('share/' + package_name + '/models/tricopter_ap',
+         glob('models/tricopter_ap/*')),
     ],
     install_requires=['setuptools', 'numpy', 'scipy', 'torch', 'pandas', 'matplotlib'],
     zip_safe=True,
     maintainer='Conf. Petrisor Parvu',
     maintainer_email='petrisor.parvu@upb.ro',
-    description='Urban canyon FO-PINN/CBF simulation for a PX4 tricopter VTOL',
+    description='Urban canyon FO-PINN/CBF simulation for an ArduPilot tricopter VTOL',
     license='Apache-2.0',
     entry_points={
         'console_scripts': [

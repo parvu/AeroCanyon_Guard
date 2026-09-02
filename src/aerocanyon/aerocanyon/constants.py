@@ -35,6 +35,17 @@ GZ_WIND_TOPIC = f'/world/{WORLD_NAME}/wind'
 # not yet live-tuned -- see docs/superpowers/plans/
 # 2026-09-02-mission-stack-mavros-port.md Task 8 for the verification
 # this needs before being trusted.
+#
+# Task 8 live-verified (2026-09-02): a 60s baseline leg armed, flew, and
+# logged real continuously-varying telemetry throughout (no NaNs, no
+# frozen/zero readings except a normal ~0.3s tail at teardown) -- the
+# pipeline itself works end to end. Flight quality is untuned: the
+# vehicle covered ~100m of horizontal distance in that window against
+# the mission's ~12 m/s cruise target (which would cover ~250m+ in the
+# post-hold portion alone) and never got close to LAND_TRIGGER_LOCAL_M,
+# consistent with a sluggish/wobbly response from these starting gains,
+# not a bug. Real gain tuning is follow-up work, not blocking for this
+# sub-project.
 POSITION_KP = 0.5   # m/s^2 per metre of position error
 POSITION_KD = 0.8   # m/s^2 per m/s of velocity (damping)
 ALTITUDE_KP = 0.6   # climb-rate command [-1,1] per metre of altitude error

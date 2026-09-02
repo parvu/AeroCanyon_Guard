@@ -24,6 +24,16 @@ MAVROS for ROS2 ↔ ArduPilot bridging.
 Cloned/built separately, outside this workspace (not part of this repo):
 
 - **ROS2 Jazzy + Gazebo Harmonic:** `sudo apt install ros-jazzy-ros-gz* ros-jazzy-rosidl*`
+- **[PX4-Autopilot](https://github.com/PX4/PX4-Autopilot)** cloned at
+  `$HOME/PX4-Autopilot` -- **asset source only**, not built or run: PX4
+  itself, `px4_msgs`, and this project's own PX4 model/airframe were all
+  removed once the ArduPilot port landed, but `tricopter_ap`'s model.sdf
+  still reuses several stock meshes and the airspeed sensor model
+  verbatim from `Tools/simulation/gz/models/` (standard_vtol's wing/
+  prop/elevon `.dae` files, `model://airspeed`) rather than vendoring
+  copies into this repo. Confirmed live: without this on disk, `gz sim`
+  fails the whole world load outright (`Unable to find uri[model://
+  airspeed]` and several unresolved mesh URIs) -- not a silent no-op.
 - **[ArduPilot](https://github.com/ArduPilot/ardupilot)** cloned
   `--recursive` at `$HOME/ardupilot`, pinned to commit `b9439efde1`, built
   for SITL: `./waf configure --board sitl && ./waf plane` (produces
@@ -106,7 +116,11 @@ coordinates below, with the tricopter spawned 75 m above it.
 ```bash
 # Terminal 1: Gazebo (headless -- no native GUI needed for the browser viewer below)
 source /opt/ros/jazzy/setup.bash
-export GZ_SIM_RESOURCE_PATH=$HOME/AeroCanyon_Guard/src/aerocanyon/models:$HOME/AeroCanyon_Guard/src/aerocanyon
+# The last path is PX4-Autopilot's own model library, needed because
+# tricopter_ap's model.sdf still reuses several of its stock meshes and
+# the airspeed sensor model -- see the Prerequisites note above. Without
+# it gz sim fails the whole world load, not a silent/partial failure.
+export GZ_SIM_RESOURCE_PATH=$HOME/AeroCanyon_Guard/src/aerocanyon/models:$HOME/AeroCanyon_Guard/src/aerocanyon:$HOME/PX4-Autopilot/Tools/simulation/gz/models
 export GZ_SIM_SYSTEM_PLUGIN_PATH=$HOME/ardupilot_gazebo/build
 gz sim -v 2 -s -r $HOME/AeroCanyon_Guard/src/aerocanyon/worlds/map_zone_ap.sdf &
 sleep 5

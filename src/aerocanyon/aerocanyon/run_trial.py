@@ -115,13 +115,26 @@ def _gazebo_env():
     GZ_SIM_RESOURCE_PATH, gz-sim can't resolve model://tricopter_ap and
     the vehicle silently never spawns; without GZ_SIM_SYSTEM_PLUGIN_PATH,
     ArduPilotPlugin itself can't be found and the model.sdf's <plugin>
-    tag silently fails to load."""
+    tag silently fails to load.
+
+    tricopter_ap's model.sdf reuses several stock meshes (standard_vtol's
+    wing/prop/elevon .dae files) and the airspeed sensor model verbatim
+    from PX4-Autopilot's own Gazebo asset library, rather than vendoring
+    copies into this repo -- a Phase 1 decision, unrelated to PX4 itself
+    being gone from this project (px4_msgs, the old PX4 model, and PX4
+    SITL are all removed; this is asset reuse only, not a PX4 runtime
+    dependency). $HOME/PX4-Autopilot must still exist on disk for these
+    `model://` URIs to resolve -- confirmed live: omitting it fails the
+    whole world load with "Unable to find uri[model://airspeed]" and
+    several unresolved standard_vtol mesh URIs, not a silent no-op."""
     models = str(WS / 'src' / 'aerocanyon' / 'models')
     aerocanyon_dir = str(WS / 'src' / 'aerocanyon')
+    px4_models = str(pathlib.Path.home() / 'PX4-Autopilot' / 'Tools' / 'simulation' / 'gz' / 'models')
     plugins = str(pathlib.Path.home() / 'ardupilot_gazebo' / 'build')
     env = dict(os.environ)
     env['GZ_SIM_RESOURCE_PATH'] = ':'.join(
-        p for p in (env.get('GZ_SIM_RESOURCE_PATH', ''), models, aerocanyon_dir) if p)
+        p for p in (env.get('GZ_SIM_RESOURCE_PATH', ''), models, aerocanyon_dir,
+                    px4_models) if p)
     env['GZ_SIM_SYSTEM_PLUGIN_PATH'] = ':'.join(
         p for p in (env.get('GZ_SIM_SYSTEM_PLUGIN_PATH', ''), plugins) if p)
     return env
