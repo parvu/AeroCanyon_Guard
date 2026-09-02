@@ -14,6 +14,7 @@ import pathlib
 
 import numpy as np
 
+from . import canyon_geometry as cg
 from .canyon_field import WindGrid
 
 DATA_DIR = pathlib.Path(__file__).resolve().parents[1] / 'data'
@@ -21,7 +22,8 @@ OUT_PATH = (pathlib.Path(__file__).resolve().parents[3]
            / 'web_viewer' / 'wind_field_viz.json')
 
 
-def export(data_dir=DATA_DIR, out_path=OUT_PATH, z_targets=(10.0, 25.0),
+def export(data_dir=DATA_DIR, out_path=OUT_PATH,
+          z_targets=(cg.GROUND_Z + 10.0, cg.GROUND_Z + 25.0),
           x_stride=6, y_stride=5):
     grid = WindGrid.load(str(data_dir))
 

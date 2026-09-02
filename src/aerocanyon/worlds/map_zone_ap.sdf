@@ -41,12 +41,12 @@
 
     <include>
       <uri>model://map_zone</uri>
-      <pose>0 0 0 0 0 0</pose>
+      <pose>0 0 74 0 0 0</pose>
     </include>
 
     <include>
       <uri>model://tricopter_ap</uri>
-      <pose>0 0 75 0 0 0</pose>
+      <pose>0 0 76 0 0 0</pose>
     </include>
   </world>
 </sdf>

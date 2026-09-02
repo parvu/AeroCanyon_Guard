@@ -57,7 +57,7 @@ def test_wind_inside_a_building_is_near_zero():
     field, meta = cf.generate(nx=40, ny=30, nz=16)
     grid = cf.WindGrid(field, meta)
     b = cg.BUILDINGS[0]
-    inside = grid.at(np.array([b.cx, b.cy, b.sz / 2.0]))
+    inside = grid.at(np.array([b.cx, b.cy, cg.GROUND_Z + b.sz / 2.0]))
     assert np.linalg.norm(inside) < 1.0
 
 

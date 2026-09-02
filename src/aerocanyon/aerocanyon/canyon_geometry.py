@@ -7,13 +7,21 @@ disagree, the safety filter is protecting against buildings that are not
 in the simulation and every trial result is void.
 
 All coordinates are Gazebo ENU, metres. Boxes rest on the ground, so a
-box spans z in [0, sz].
+box spans z in [GROUND_Z, GROUND_Z + sz].
 """
 from collections import namedtuple
 
 import numpy as np
 
 Box = namedtuple('Box', 'name cx cy sx sy sz')
+
+# World-absolute Gazebo z of the ground plane. Raised from 0 to 74 to
+# match the ArduPilot SITL --home altitude (run_trial.HOME_ALT) and the
+# manual-flight demo world's own terrain height (worlds/map_zone_ap.sdf)
+# -- keeps a spawn near this ground level's relative-altitude math
+# consistent across both worlds rather than one assuming sea-level-ish
+# ground and the other a ~75m terrain.
+GROUND_Z = 74.0
 
 # Two facing rows of three towers, corridor running along +x at y = 0.
 # 24 m gap between the rows: wide enough for a tilt-rotor transition,
@@ -45,8 +53,8 @@ CANYON_HALF_WIDTH = _ROW_OFFSET - _DEPTH / 2.0
 # CANYON_ENTRY), centred on the ground plane rather than offset toward one
 # end). z = 25 m puts the vehicle in the shear layer rather than above the
 # roofline.
-CANYON_ENTRY = np.array([-100.0, 0.0, 25.0])
-CANYON_EXIT = np.array([100.0, 0.0, 25.0])
+CANYON_ENTRY = np.array([-100.0, 0.0, GROUND_Z + 25.0])
+CANYON_EXIT = np.array([100.0, 0.0, GROUND_Z + 25.0])
 
 
 def _box_distance_and_normal(p, b):
@@ -59,7 +67,7 @@ def _box_distance_and_normal(p, b):
     second-order term vanish.
     """
     half = np.array([b.sx / 2.0, b.sy / 2.0, b.sz / 2.0])
-    centre = np.array([b.cx, b.cy, b.sz / 2.0])
+    centre = np.array([b.cx, b.cy, GROUND_Z + b.sz / 2.0])
     d = np.abs(p - centre) - half
     outside = np.maximum(d, 0.0)
     dist = float(np.linalg.norm(outside))
@@ -92,7 +100,7 @@ def to_sdf():
         blocks.append(f"""
     <model name="{b.name}">
       <static>true</static>
-      <pose>{b.cx} {b.cy} {b.sz / 2.0} 0 0 0</pose>
+      <pose>{b.cx} {b.cy} {GROUND_Z + b.sz / 2.0} 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry><box><size>{b.sx} {b.sy} {b.sz}</size></box></geometry>

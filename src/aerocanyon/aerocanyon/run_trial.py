@@ -76,21 +76,24 @@ TRICOPTER_PARM = WS / 'src' / 'aerocanyon' / 'ardupilot' / 'tricopter.parm'
 # hard-aborts on startup without the dataset (see README) -- installed
 # once, machine-wide, to a user-writable path instead.
 GEOGRAPHICLIB_DATA = pathlib.Path.home() / '.local' / 'share' / 'GeographicLib'
-# Matches the README's --home value -- an arbitrary real-world point
-# (Bucharest), not tied to the canyon's own local-frame geometry, which
-# is unrelated to ArduPilot's EKF origin.
-HOME_LAT, HOME_LON, HOME_ALT = 44.434424990487216, 26.04781615647584, 76
+# An arbitrary real-world point (Bucharest), not tied to the canyon's own
+# local-frame geometry, which is unrelated to ArduPilot's EKF origin.
+# Altitude matches canyon_geometry.GROUND_Z (74) -- the manual-flight
+# demo's README instructions use a separate, unrelated home altitude (76)
+# for map_zone_ap.sdf's own terrain height, not this world.
+HOME_LAT, HOME_LON, HOME_ALT = 44.434424990487216, 26.04781615647584, 74
 
 # Spawn/reset position: the canyon entry's horizontal position (ENU east,
 # north from CANYON_ENTRY), not the world origin -- which sits almost
 # exactly under the middle tower row. 0.246 m is the tricopter model's own
-# stock ground clearance (its unpatched <pose> z value); reusing it here
-# keeps the landing gear resting on the ground instead of floating or
-# clipping through it. Facing yaw=0 in Gazebo's ENU-frame pose already
-# points the nose along +x (east), which is the mission's actual direction
-# of travel -- see the yaw fix in controller_node.py for why 0 is not the
-# answer over in NED-land.
-SPAWN_XYZ = (float(cg.CANYON_ENTRY[0]), float(cg.CANYON_ENTRY[1]), 0.246)
+# stock ground clearance (its unpatched <pose> z value) added on top of
+# canyon_geometry.GROUND_Z; reusing it here keeps the landing gear resting
+# on the ground instead of floating or clipping through it. Facing yaw=0
+# in Gazebo's ENU-frame pose already points the nose along +x (east),
+# which is the mission's actual direction of travel -- see the yaw fix in
+# controller_node.py for why 0 is not the answer over in NED-land.
+SPAWN_XYZ = (float(cg.CANYON_ENTRY[0]), float(cg.CANYON_ENTRY[1]),
+             cg.GROUND_Z + 0.246)
 # Matches worlds/urban_canyon.sdf's own <include><pose> for tricopter_ap
 # -- that static XML can't reference this value directly, so keep them
 # in sync by hand if either changes.

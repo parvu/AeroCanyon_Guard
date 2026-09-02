@@ -25,9 +25,10 @@ KARMAN = 0.41
 def log_law(z, u_ref=10.0, z_ref=30.0, z0=1.0):
     """Neutral-stability logarithmic wind profile.
 
-    z0 = 1.0 m is the standard roughness length for a dense urban centre.
-    Below z0 the profile is undefined, so it clamps to zero rather than
-    returning a negative wind speed.
+    z is height ABOVE GROUND (AGL), not absolute Gazebo world z -- see
+    canyon_geometry.GROUND_Z. z0 = 1.0 m is the standard roughness length
+    for a dense urban centre. Below z0 the profile is undefined, so it
+    clamps to zero rather than returning a negative wind speed.
     """
     if z <= z0:
         return 0.0
@@ -37,9 +38,10 @@ def log_law(z, u_ref=10.0, z_ref=30.0, z0=1.0):
 def _channeling(y, z):
     """Speedup factor for flow squeezed between the two tower rows.
 
-    Peaks on the canyon axis and decays to 1.0 (no effect) outside the
-    throat. Only applies below the roofline; above it the flow is not
-    channelled.
+    z is height ABOVE GROUND (AGL), matching log_law -- see
+    canyon_geometry.GROUND_Z. Peaks on the canyon axis and decays to 1.0
+    (no effect) outside the throat. Only applies below the roofline;
+    above it the flow is not channelled.
     """
     w = cg.CANYON_HALF_WIDTH
     if abs(y) > 3.0 * w:
@@ -58,7 +60,7 @@ def _recirculation(p):
     """
     v = np.zeros(3)
     for b in cg.BUILDINGS:
-        centre = np.array([b.cx + b.sx * 0.75, b.cy, b.sz * 0.5])
+        centre = np.array([b.cx + b.sx * 0.75, b.cy, cg.GROUND_Z + b.sz * 0.5])
         r = p - centre
         scale = np.array([b.sx, b.sy, b.sz])
         d2 = float(np.sum((r / scale) ** 2))
@@ -78,7 +80,10 @@ def generate(nx=60, ny=40, nz=24):
     """
     xs_lo, xs_hi = cg.CANYON_ENTRY[0] - 20.0, cg.CANYON_EXIT[0] + 20.0
     ys_lo, ys_hi = -150.0, 150.0
-    zs_lo, zs_hi = 0.0, 100.0
+    # Absolute Gazebo z, spanning canyon_geometry.GROUND_Z (ground) to
+    # GROUND_Z + 100 (well above the tallest building) -- log_law/
+    # _channeling below convert back to AGL height internally.
+    zs_lo, zs_hi = cg.GROUND_Z, cg.GROUND_Z + 100.0
 
     xs = np.linspace(xs_lo, xs_hi, nx)
     ys = np.linspace(ys_lo, ys_hi, ny)
@@ -92,7 +97,8 @@ def generate(nx=60, ny=40, nz=24):
                 d, _ = cg.distance_and_normal(p)
                 if d <= 0.0:
                     continue  # inside a building: no flow
-                base = log_law(z) * _channeling(y, z)
+                agl = z - cg.GROUND_Z
+                base = log_law(agl) * _channeling(y, agl)
                 # Prevailing wind along +x, down the canyon axis.
                 v = np.array([base, 0.0, 0.0]) + _recirculation(p)
                 # Blend to zero at the walls (no-slip).

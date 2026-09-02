@@ -42,7 +42,13 @@ MODE_AUTO = 10  # ArduPlane custom mode number, confirmed against ArduPlane/mode
 # the vehicle's own local frame -- MAVROS's WaypointPush takes global
 # coordinates, not local NED offsets.
 HOME_LAT, HOME_LON = 44.434424990487216, 26.04781615647584
-CRUISE_ALT_M = 25.0  # matches canyon_geometry.CANYON_ENTRY's NED altitude
+# 25m relative-to-home (Waypoint.z_alt under FRAME_GLOBAL_REL_ALT), not
+# an absolute value -- unaffected by canyon_geometry.GROUND_Z, since
+# ArduPilot's home-relative altitude is a delta from wherever the
+# vehicle armed, and the vehicle's own spawn height moves by the same
+# offset as GROUND_Z (see run_trial.SPAWN_XYZ). Chosen to match
+# canyon_geometry.CANYON_ENTRY's height above the ground it spawns on.
+CRUISE_ALT_M = 25.0
 
 # How far past the canyon exit the mission's cruise/landing point sits,
 # measured from the far edge of the LAST tower row (tower_2_n/tower_2_s)
