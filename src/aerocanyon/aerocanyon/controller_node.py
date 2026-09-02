@@ -88,30 +88,23 @@ ENABLE_VTOL_TRANSITION = False
 # lands, measured from the far edge of the LAST tower row (tower_2_n/
 # tower_2_s), not from the mission's own exit waypoint (CANYON_EXIT is
 # set generously past the towers -- 45m of margin -- for stable transit
-# dynamics, not as a landing cue). local NED east = distance from
-# CANYON_ENTRY (== the spawn point, verified live), so this is the last
-# tower row's world-ENU edge shifted into that same local frame.
+# dynamics, not as a landing cue).
+#
+# self.pos is in the SAME absolute canyon-frame NED coordinates as
+# mission.target()/canyon_geometry.BUILDINGS, not relative to the
+# vehicle's own spawn point -- confirmed live by querying
+# LOCAL_POSITION_NED directly at spawn, unarmed, before any control
+# input: it already reads (~0, ~-100, ~0), matching CANYON_ENTRY's own
+# NED value exactly, not (0,0,0). (An earlier version of this comment,
+# and of the code below, assumed the opposite -- that self.pos was
+# spawn-relative, the way a placeholder-zero row at the very start of a
+# trial_logger CSV can look before any real telemetry has arrived -- and
+# both were wrong; reverted.) So the threshold below is a plain absolute
+# NED-east value: the last tower row's world-ENU edge (NED-east ==
+# ENU-east, see frames.py) plus clearance, no CANYON_ENTRY subtraction.
 LAND_CLEARANCE_M = 2.0
 _LAST_TOWER_EDGE_ENU_X = max(b.cx + b.sx / 2.0 for b in cg.BUILDINGS if b.cx > 0)
-LAND_TRIGGER_LOCAL_M = _LAST_TOWER_EDGE_ENU_X - float(cg.CANYON_ENTRY[0]) + LAND_CLEARANCE_M
-
-# MAVROS's local_position is relative to ArduPilot's own EKF origin,
-# which for the JSON SITL backend is wherever the vehicle physically
-# spawned (Gazebo entity pose) -- i.e. self.pos reads (0,0,0) AT the
-# spawn point, not at CANYON_ENTRY's own absolute canyon-frame
-# coordinates. mission.target() and CBFFilter (which compares position
-# against cg.BUILDINGS' absolute placements) both work in that absolute
-# canyon frame, so self.pos needs this horizontal offset added back
-# before it's usable there. Live-verified: without it, the hold-phase
-# target (mission.start, CANYON_ENTRY's own NED value -- not near zero)
-# read as a ~100m error against a self.pos starting at (0,0,0), and the
-# baseline controller flew hard away from the mission the entire leg.
-# Altitude (z) needs NO such offset -- CANYON_ENTRY's z=25 (cruise
-# altitude) against a spawn-relative self.pos[2] starting at 0 (ground)
-# already correctly expresses "climb 25 m", which is the hold phase's
-# actual job (see Mission's own docstring), not a bug to fix.
-_ENTRY_NED_HORIZONTAL = frames.enu_to_ned(cg.CANYON_ENTRY)
-_POS_OFFSET_NED = np.array([_ENTRY_NED_HORIZONTAL[0], _ENTRY_NED_HORIZONTAL[1], 0.0])
+LAND_TRIGGER_LOCAL_M = _LAST_TOWER_EDGE_ENU_X + LAND_CLEARANCE_M
 
 # Earlier designs tried flying the vehicle all the way back to the spawn
 # point before landing via native RTL (VEHICLE_CMD_NAV_RETURN_TO_LAUNCH:
@@ -333,26 +326,22 @@ class ControllerNode(Node):
             self.tick += 1
             return
 
-        pos_absolute = self.pos + _POS_OFFSET_NED
-
         if self.mode == 'baseline':
             # PD toward the mission target -- PX4's own position
             # controller used to compute this; ArduPilot exposes no
             # equivalent injection path for this airframe (no MAVLink XY
             # position/velocity setpoint works for any Q-mode here), so
-            # this project now provides it.
-            pos_err = target - pos_absolute
+            # this project now provides it. self.pos is already in the
+            # same absolute canyon-frame NED coordinates as target -- see
+            # LAND_TRIGGER_LOCAL_M's comment above.
+            pos_err = target - self.pos
             u_des = C.POSITION_KP * pos_err - C.POSITION_KD * self.vel
         else:
             # The PINN estimates the disturbance FORCE; the feedforward is
             # the acceleration that cancels it. Negative: we push back.
             u_des = -self.ff_gain * self.wind_est / MASS_KG
 
-        # CBFFilter compares position against cg.BUILDINGS' absolute
-        # canyon-frame placements -- pos_absolute, not self.pos, or the
-        # obstacle barrier is computed against the wrong building
-        # distances entirely (see _POS_OFFSET_NED's comment above).
-        u_safe, info = self.cbf.filter(u_des, pos_absolute, self.vel,
+        u_safe, info = self.cbf.filter(u_des, self.pos, self.vel,
                                        self.wind_truth, self.quat)
 
         if self.mode == 'treatment':
