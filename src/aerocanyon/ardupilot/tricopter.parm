@@ -18,7 +18,7 @@ Q_TILT_MASK       3        # front pair (motors 1+2) ONLY -- rear stays out, see
 Q_TILT_TYPE       2        # VectoredYaw -- required for the rear tilt servo (k_tiltMotorRear) to move at all
 Q_TILT_YAW_ANGLE  20       # front pair's -20..0 deg hover yaw-trim sub-range
 Q_TILT_FIX_ANGLE  0        # must stay 0, or it eats into the range maths
-Q_TILT_MAX        45
+Q_TILT_MAX        8         # degrees, down from 45 -- see the AUTO-mission note further down
 Q_TILT_RATE_UP    40
 Q_TILT_RATE_DN    0
 
@@ -112,6 +112,48 @@ RC_OVERRIDE_TIME  15       # seconds, up from the 3s default
 # 47-49% throttle. Leaving the default 0.35 makes QHOVER's altitude loop
 # start from a bad feedforward on every takeoff.
 Q_M_THST_HOVER    0.47
+
+# --- Q-mode waypoint-navigation speed (AUTO-mission redesign) ---
+# AC_WPNav's Q_WP_SPD defaults to 10 m/s (WP_SPD_DEFAULT, AC_WPNav.cpp).
+# Lowered as a first attempt at the climb-then-crash symptom below;
+# kept at this more conservative value even after finding the real
+# cause (Q_TILT_MAX, above) since 10 m/s is still an aggressive cruise
+# target for this frame's thrust margin.
+Q_WP_SPD          3.0        # m/s, down from the 10 m/s default
+
+# --- Root cause of the above: Tiltrotor::continuous_update's AUTO-mode
+# forward-tilt fallback (Q_TILT_MAX, moved up next to the other tilt
+# params) ---
+# Live-verified this session: in AUTO (unlike QHOVER, which this
+# project's earlier hover tuning was done in), ArduPlane/tiltrotor.cpp's
+# continuous_update() does NOT hold the front tilt motors near their
+# hover baseline. With Q_FWD_THR_USE left at its OFF default (no
+# forward-thrust-motor substitute configured), get_vfwd_method()
+# returns NONE, and continuous_update() falls through to its final,
+# unconditional branch: settilt = (throttle_output - throttle_min) *
+# 0.02, slew(MIN(settilt * Q_TILT_MAX / 90, ~1.0)) -- forward tilt
+# driven straight off throttle percentage, with NO mode-specific gating
+# and no dependency on Q_VFWD_GAIN/Q_FWD_THR_GAIN actually being
+# configured (their descriptions suggest otherwise, but the code path
+# taken here doesn't check them). At the climb throttle this frame
+# needs (hovers around 47%, Q_M_THST_HOVER above), that formula was
+# already commanding tilt near Q_TILT_MAX degrees on the front pair --
+# and since only the front pair tilts (Q_TILT_MASK=3, rear stays
+# vertical), tilting them forward directly removes vertical thrust with
+# nothing compensating for it. Confirmed live: at the old Q_TILT_MAX=45
+# this reproduced on every AUTO-mission attempt regardless of Q_WP_SPD
+# -- climb to ~10-12m during NAV_VTOL_TAKEOFF, then a rapid descent to
+# near-ground once cruise throttle triggered the tilt, settling into a
+# low crawl instead of continuing to the next waypoint. This project
+# never wants ANY forward-tilt thrust assist (ENABLE_VTOL_TRANSITION
+# stays False in controller_node.py -- pure Q-mode navigation the whole
+# flight), so rather than wiring up Q_FWD_THR_USE/GAIN correctly for a
+# behavior this project doesn't want, Q_TILT_MAX is capped low enough
+# that this fallback's worst case is a few degrees of unwanted tilt,
+# not a lift-destroying 45. (Q_TILT_YAW_ANGLE's own -20..0 deg hover-
+# yaw-trim sub-range is a separate, absolute-degree servo-calibration
+# offset applied in Tiltrotor::vectoring() -- confirmed unaffected by
+# this change.)
 
 FLTMODE_CH        0        # disable RC mode-switch: control_server pins ch8 to 1500,
                            # which ArduPilot would otherwise read as a mode-switch position
