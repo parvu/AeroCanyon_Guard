@@ -91,7 +91,73 @@ But a single shared axis/reference point is a much more promising fit
 for ArduPilot's tiltrotor mixer than two unrelated conventions would be
 -- see the spike below.
 
-## Open risk, resolved first
+## Open risk -- RESOLVED (geometry spike, 2026-09-02)
+
+**Hypothesis 1 is confirmed**, with one material refinement: the rear
+tilt servo does not need to be a `Q_TILT_MASK` member at all. The
+statement of the risk and the three candidate answers are kept below for
+the record; the confirmed answer follows.
+
+### Confirmed mechanism
+
+ArduPilot computes **one** normalized transition value, `current_tilt`
+(0..1), and hands it to every tilt servo. Two facts make the asymmetric
+geometry fall out for free:
+
+1. **`Q_TILT_TYPE=2` (VectoredYaw) drives three distinct servo
+   functions** off that single value:
+   `k_tiltMotorLeft` (75) and `k_tiltMotorRight` (76) get
+   `base_output ± yaw_offset`, while `k_tiltMotorRear` (45) gets
+   `base_output` alone, with **no** yaw term
+   (`ArduPlane/tiltrotor.cpp:655-659`). That is exactly this vehicle:
+   front pair differential-tilts for hover yaw, rear does not.
+2. **Each servo's own `SERVOn_MIN`/`SERVOn_MAX`/`SERVOn_REVERSED`
+   independently maps that shared 0..1000 value to PWM**
+   (`SRV_Channel::pwm_from_range`, `SRV_Channel.cpp:186-196`). Setting
+   `SERVOn_REVERSED=1` on the rear makes it sweep the opposite way
+   along the shared axis from the same transition value.
+
+`Q_TILT_YAW_ANGLE` is the ArduPilot equivalent of PX4's
+`CA_SV_TL0/1_CT=Yaw`. It extends the front pair's travel *past vertical*
+by that many degrees and reserves the extra range for yaw trim:
+`total_angle = 90 + Q_TILT_YAW_ANGLE + Q_TILT_FIX_ANGLE`, and hover sits
+at `zero_out = Q_TILT_YAW_ANGLE / total_angle`
+(`tiltrotor.cpp:553-560`). With `Q_TILT_YAW_ANGLE=20` this *is* the
+front pair's -20..0 deg hover-only yaw-trim sub-range.
+
+Verified live on a `quadplane-tilttrivec` SITL frame with
+`Q_TILT_YAW_ANGLE=20`, front tilts on SERVO12/13 (1000-2000, not
+reversed) and a rear tilt added on SERVO14 (function 45, 1000-2000,
+`REVERSED=1`):
+
+| state | front (ch12/13) | rear (ch14) |
+|---|---|---|
+| hover (`current_tilt=0`) | 1181 = **0 deg** | 1818 = **180 deg** |
+| forward (`current_tilt=1`) | 2000 = **90 deg** | 1000 = **90 deg** |
+| hover + half right rudder | 1289 / 1073 (differential) | 1818 (**unmoved**) |
+
+Both servos are the same linear scale, 0.11 deg/us; only the offset
+differs. The rear tracks the front in exact lockstep and in the opposite
+direction, and the yaw trim moves the front pair only.
+
+`Q_TILT_MASK` stays at **3** (motors 1+2, the front pair). Motor order
+for `Q_FRAME_CLASS=7` is motor 1 = front right, motor 2 = front left,
+motor 4 = rear (`AP_MotorsTri.cpp:109-111`); the rear tilt servo is
+driven by the vectoring code regardless of mask membership, so the rear
+motor does not join the mask.
+
+### Flagged for Phase 2, not approximated away now
+
+In pure fixed-wing flight `continuous_update()` runs the **masked**
+motors as forward thrusters (`tiltrotor.cpp:248-249`) -- i.e. ArduPilot
+wants the front pair to push in cruise, the exact opposite of this
+vehicle's stop-and-fold front rotors, and it shuts down the unmasked
+rear, which is meant to be the sole cruise thruster. Phase 1 is
+hover-only (see Non-goals), so this is recorded, not solved. It will
+need either a fixed forward motor (`SERVO3_FUNCTION=70`) on the rear or
+Lua scripting when cruise is actually flown.
+
+### Original statement of the risk (kept for context)
 
 Whether ArduPilot's `Q_TILT_MASK`/tiltrotor system can represent **two
 motors with different tilt ranges and different forward-flight roles**
