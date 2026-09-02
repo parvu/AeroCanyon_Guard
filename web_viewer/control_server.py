@@ -51,6 +51,7 @@ Run from web_viewer/, with Gazebo + SITL + MAVROS already up (see README
 "Watching a trial fly, or flying manually"):
     python3 control_server.py [port]
 """
+import pathlib
 import sys
 import threading
 import time
@@ -61,30 +62,22 @@ from mavros_msgs.msg import OverrideRCIn
 from mavros_msgs.srv import CommandBool, CommandLong
 from rclpy.node import Node
 
+# rc_pwm.py lives in the aerocanyon ROS2 package, not on web_viewer's own
+# path -- web_viewer/ is a standalone script directory (Phase 1), not a
+# ROS2 package with aerocanyon as an installed dependency. An import-path
+# workaround, not a proper package dependency; fine for now, flagged as a
+# wart rather than solved properly here.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]
+                       / 'src' / 'aerocanyon'))
+from aerocanyon.rc_pwm import (MODE_QHOVER, MODE_QLAND, RC_CENTER, RC_SPAN,
+                               THROTTLE_MID, THROTTLE_SPAN, arm, pwm,
+                               pwm_throttle, resolve_stick, set_mode)
+# RC_SPAN/THROTTLE_MID/THROTTLE_SPAN aren't used directly in this file
+# anymore (rc_pwm.pwm/pwm_throttle own that math now) but stay imported
+# here -- test_control_server.py imports them from this module by name.
+
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
 CONTROL_HZ = 50
-# RC override PWM: 1500 centre, +/-500 at full stick deflection, the
-# standard 1000-2000 us band ArduPilot's RCn_MIN/MAX default to.
-RC_CENTER = 1500
-RC_SPAN = 500
-# Throttle's own PWM range: unlike the other three channels' shared
-# 1000-2000 (RC_CENTER +/- RC_SPAN), throttle caps at 1900, not 2000, per
-# request -- its on-screen stick also stopped self-centering to match a
-# real Mode 2 transmitter's ratcheted throttle gimbal (see index.html).
-# Internal stick value stays the same [-1, 1] range every other axis uses
-# (rc_bridge.py's real hardware already sends that range for its own
-# throttle too) -- only this output mapping differs.
-THROTTLE_MID = 1450
-THROTTLE_SPAN = 450
-# ArduPlane custom mode numbers (ArduPlane/mode.h). QHOVER is the
-# altitude-holding VTOL hover mode -- centred throttle stick holds
-# altitude, which is exactly what the browser's self-centering stick
-# gives when it is released or goes stale. QLAND replaces PX4's
-# VEHICLE_CMD_NAV_LAND.
-MODE_QHOVER = 18
-MODE_QLAND = 20
-MAV_CMD_DO_SET_MODE = 176
-MAV_MODE_FLAG_CUSTOM_MODE_ENABLED = 1.0
 # Mode 2 RC sticks are proportional and self-centering -- the browser
 # streams the live stick position continuously (see index.html) rather
 # than a click-and-decay nudge, so there's no HOLD_S here. This is instead
@@ -105,16 +98,6 @@ RC_PRESENT_TIMEOUT_S = 1.0
 COMMAND_COMMANDS = {'arm', 'disarm', 'land'}
 
 
-def resolve_stick(stick, stick_time, now, timeout):
-    """Per-axis dead-man's-switch: an axis whose last update is older than
-    `timeout` reads as 0.0 regardless of its last commanded value. Pure
-    function -- see test_control_server.py."""
-    return {
-        name: (0.0 if now - stick_time[name] > timeout else stick[name])
-        for name in stick
-    }
-
-
 def stick_to_rc(stick, scale):
     """Mode 2 stick state -> (roll, pitch, throttle, yaw) PWM for RC
     channels 1-4. Pure function, no ROS/rclpy needed -- see
@@ -129,18 +112,10 @@ def stick_to_rc(stick, scale):
 
     Throttle is also the one axis with its own PWM range (THROTTLE_MID +/-
     THROTTLE_SPAN, capping at 1900 rather than the other channels' shared
-    2000) -- see those constants' own comment.
+    2000) -- see those constants' own comment in rc_pwm.py.
     """
-    def pwm(value, invert=False):
-        v = max(-1.0, min(1.0, value * scale))
-        return int(round(RC_CENTER + (-v if invert else v) * RC_SPAN))
-
-    def pwm_throttle(value):
-        v = max(-1.0, min(1.0, value * scale))
-        return int(round(THROTTLE_MID + v * THROTTLE_SPAN))
-
-    return (pwm(stick['roll']), pwm(stick['pitch'], invert=True),
-            pwm_throttle(stick['throttle']), pwm(stick['yaw']))
+    return (pwm(stick['roll'], scale), pwm(stick['pitch'], scale, invert=True),
+            pwm_throttle(stick['throttle'], scale), pwm(stick['yaw'], scale))
 
 
 class WebControlNode(Node):
@@ -198,24 +173,12 @@ class WebControlNode(Node):
         if cmd == 'arm':
             # Mode first, then arm -- the same ordering the PX4 version used,
             # and the ordering the live SITL runs were verified with.
-            self._set_mode(MODE_QHOVER)
-            self._arm(True)
+            set_mode(self.cmd_client, MODE_QHOVER)
+            arm(self.arm_client, True)
         elif cmd == 'disarm':
-            self._arm(False)
+            arm(self.arm_client, False)
         elif cmd == 'land':
-            self._set_mode(MODE_QLAND)
-
-    def _arm(self, value):
-        req = CommandBool.Request()
-        req.value = value
-        self.arm_client.call_async(req)
-
-    def _set_mode(self, mode):
-        req = CommandLong.Request()
-        req.command = MAV_CMD_DO_SET_MODE
-        req.param1 = MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
-        req.param2 = float(mode)
-        self.cmd_client.call_async(req)
+            set_mode(self.cmd_client, MODE_QLAND)
 
     def _tick(self):
         now = time.monotonic()
