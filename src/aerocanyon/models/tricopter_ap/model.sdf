@@ -10,7 +10,26 @@
         <enable_wind>true</enable_wind>
       <pose>0 0 0 0 0 0</pose>
       <inertial>
-        <pose>0 0 0 0 0 0</pose>
+        <!-- Task 5: CG moved forward from x=0 to x=0.11667 m. This is the
+             ONLY inertial change from the PX4 model, and it is required by
+             ArduPilot, not cosmetic.
+
+             AP_MotorsTri::output_armed_stabilizing() (lines 202-204,
+             266-268) gives all three motors the SAME thrust at zero
+             roll/pitch demand -- it has no per-rotor moment arms, unlike
+             PX4's control allocator, which is why the PX4 model could keep
+             its CG at the origin. With the rotors at x=+0.35 (front pair)
+             and x=-0.35 (rear), equal thrust about a CG at x=0 leaves a
+             standing pitch moment of 0.35*F ~ 5.9 N.m at hover -- about
+             40 rad/s^2 on Iyy=0.1459, which pitched the airframe over
+             within ~1 s of leaving the ground (observed live before this
+             fix).
+
+             The balance point for equal thrust is the rotor centroid,
+             (0.35 + 0.35 - 0.35)/3 = 0.11667 m. The motor/rotor link
+             masses share that same centroid, so putting base_link's CG
+             there puts the whole vehicle's CG there too. -->
+        <pose>0.11666666666666667 0 0 0 0 0</pose>
         <mass>5</mass>
         <inertia>
           <ixx>0.197563</ixx>
@@ -102,6 +121,26 @@
 
       <sensor name="imu_sensor" type="imu">
         <gz_frame_id>base_link</gz_frame_id>
+        <!-- Task 5: roll the IMU 180 deg so it reports in FRD (x fwd,
+             y right, z down), the frame ArduPilot expects. Copied from
+             ~/ardupilot_gazebo/models/iris_with_standoffs/model.sdf's own
+             imu_sensor, which carries exactly this pose.
+
+             A Gazebo IMU reports in the SENSOR frame. Without this pose
+             that frame is base_link, i.e. FLU, and ArduPilotPlugin does
+             NOT rotate the IMU itself -- only the pose/velocity path goes
+             through <modelXYZToAirplaneXForwardZDown>. PX4's plugin did
+             its own conversion, which is why the model it was forked from
+             needed no pose here.
+
+             The result was gyro pitch/yaw rates with inverted sign
+             relative to the attitude ArduPilot computed: caught live on
+             PID_TUNING telemetry, where the pitch rate controller read
+             achieved=-0.52 rad/s at the same instant ATTITUDE's own pitch
+             angle was climbing at +0.52 rad/s. Positive feedback in the
+             rate loop -- the airframe pitched up, the controller pushed it
+             further up, and it flipped every time. -->
+        <pose degrees="true">0 0 0 180 0 0</pose>
         <always_on>1</always_on>
         <update_rate>250</update_rate>
         <imu>
@@ -408,17 +447,28 @@
       <axis>
         <xyz>0 1 0</xyz>
         <!-- motor_1 is the REAR tilt, driven by ArduPilotPlugin's rear
-             tilt <control> block below. Per Task 2's report, ArduPilot's
-             k_tiltMotorRear reuses the front pair's linear PWM-to-angle
-             scale rather than getting its own, so on that shared axis
-             convention the rear's calibrated range is +90..+200 deg
-             (1.5708..3.4907 rad), with its actual hover/usable position
-             at +180 deg -- a completely different range from the front
-             joints', hence widened (not just extended) from the PX4
-             model's -0.2618..1.57. -->
+             tilt <control> block below.
+
+             Task 5 correction: Task 3 put this joint's range at
+             +90..+200 deg, taking Task 2's rear angles as SDF joint
+             angles. They are not. Task 2's rear datum is the SPEC's
+             vehicle-description convention, in which the rear reads
+             180 deg when pointing UP and 90 deg when pointing forward
+             -- i.e. offset 180 deg from this SDF's, because rotor_1's
+             link pose here has NO 180 deg mounting rotation baked in
+             (see <link name='rotor_1'><pose>-0.35 0 0.07 0 0 0</pose>:
+             identity rotation, +z up, exactly like the front rotors).
+             With the old range the rear rotor sat inverted at hover and
+             pushed DOWN, flipping the airframe within ~2 s of arming --
+             observed live before this fix.
+
+             So the rear uses the SAME SDF range as the front: 0 rad =
+             upright/hover, +pi/2 = tilted forward for cruise. The
+             ArduPilot-side 180 deg offset lives entirely in the
+             <control> block's multiplier/offset below. -->
         <limit>
-          <lower>1.5707963267948966</lower>
-          <upper>3.490658503988659</upper>
+          <lower>-0.3490658503988659</lower>
+          <upper>1.5707963267948966</upper>
         </limit>
         <dynamics>
           <friction>1.0</friction>
@@ -895,6 +945,32 @@
       <joint_name>rudder_joint</joint_name>
       <sub_topic>servo_5</sub_topic>
     </plugin> -->
+    <!-- Task 5: this plugin is what makes the three tilt servos work at
+         all. ArduPilotPlugin's POSITION + useForce=1 path reads the
+         joint's gz::sim::components::JointPosition component
+         (ArduPilotPlugin.cc:1368-1379) and does NOTHING AT ALL if that
+         component is absent -- and the plugin only ever creates
+         JointForceCmd / JointVelocityCmd for its controls (same file,
+         :413-438), never JointPosition. Nothing else in this model
+         touches the three tilt joints, so the component never existed and
+         all three <control type="POSITION"> blocks were silent no-ops:
+         ArduPilot swung its vectored-yaw command across a third of its
+         range while the joints sat at exactly 0.0 deg and the airframe
+         wound up to 2.1 rad/s of yaw -- measured live off
+         /world/urban_canyon/dynamic_pose/info.
+
+         JointStatePublisher creates JointPosition for every joint it is
+         given, which is all this needs; the published joint_state topic
+         itself is a harmless side effect. Listing only the three tilt
+         joints -- the rotor joints use VELOCITY, which reads JointVelocity
+         (already populated by the physics system) and works as-is. -->
+    <plugin filename="gz-sim-joint-state-publisher-system"
+            name="gz::sim::systems::JointStatePublisher">
+      <joint_name>motor_0_joint</joint_name>
+      <joint_name>motor_1_joint</joint_name>
+      <joint_name>motor_2_joint</joint_name>
+    </plugin>
+
     <!-- Rotor thrust rig, ardupilot-phase1 Task 5 (Step 0).
          ArduPilotPlugin's VELOCITY <control> blocks below only spin the
          rotor JOINTS (ApplyMotorForces() writes JointForceCmd, never a
@@ -1164,23 +1240,42 @@
                (PWM 1181 -> 0 deg) and the widened motor_0/2_joint
                <limit> above.
 
-             rear (motor_1_joint): PWM 1000->+90 deg, PWM 2000->+200 deg,
-             REVERSED on the ArduPilot side (SERVO14_REVERSED=1, Task 4's
-             concern, already baked into the PWM Task 2 measured on the
-             wire) -- so this SDF applies no additional reversal, just the
-             same 110 deg span at a different offset:
-               multiplier = 1.9198621771937625 (same span)
-               offset     = 90 deg in rad / multiplier = 0.81818181...
-               check: raw=0 -> 1.570796 rad (+90 deg); raw=1 -> 3.490659
-               rad (+200 deg). Matches Task 2's verified hover waypoint
-               (PWM 1818 -> 180 deg, i.e. the middle of this joint's
-               widened <limit> above) and its verified cruise waypoint
-               (PWM 1000 -> 90 deg).
+             rear (motor_1_joint): Task 2's wire-verified waypoints are
+             PWM 1000 -> "90 deg" (cruise, thrust forward) and PWM 1818
+             -> "180 deg" (hover, thrust up), in the SPEC's rear-datum
+             convention. In THIS SDF's joint convention 0 rad is upright
+             (rotor_1's link pose carries no 180 deg mounting rotation),
+             so subtract 180 deg from both: PWM 1818 -> 0 rad and
+             PWM 1000 -> +pi/2, the same +pi/2 = forward the front pair
+             uses. That makes the rear's PWM->angle slope NEGATIVE, hence
+             the negative multiplier -- the only sign inversion in this
+             file, and it is a real physical one, not a duplicate of
+             SERVO14_REVERSED=1 (which is already baked into the PWM Task
+             2 measured on the wire):
+               multiplier = -1.9198621771937625 (same 110 deg span, reversed)
+               offset     = -0.8181818181818182
+               check: raw=0    -> +1.570796 rad (+90 deg, cruise)
+                      raw=0.818-> +0.000000 rad (hover, PWM 1818)
+                      raw=1    -> -0.349066 rad (-20 deg, unused end)
+             Task 5 fix: Task 3's +1.9199/+0.8182 pair put the rear rotor
+             at +180 deg (inverted, thrusting DOWN) at hover; the vehicle
+             flipped within ~2 s of arming until this was corrected.
 
-           p_gain=10.0, cmd_max/min=2.5 are zephyr_with_ardupilot's
-           verified-working POSITION-control values (a lighter surface
-           than these ~0.05 kg tilt-motor links, so likely needs
-           retuning once flown -- Task 5's job, not guessed at here). -->
+           Task 5 retuned these from zephyr_with_ardupilot's p_gain=10.0 /
+           cmd_max=2.5 (Task 3 copied them and flagged them as untuned for
+           this heavier joint). zephyr drives a near-frictionless control
+           surface; these tilt joints carry <friction>1.0</friction>, so a
+           P-only controller capped at 2.5 N.m needed a 0.25 rad error just
+           to reach the cap and could not break static friction for the few
+           degrees of vectored-yaw trim ArduPilot actually asks for. The
+           joints stayed pinned at hover position, the yaw loop saw no
+           response, wound its command open-loop, and the airframe spun up
+           to 0.74 rad/s of yaw while climbing -- observed live.
+
+           p_gain=500 puts the stick-slip deadband at 1.0/500 = 0.002 rad
+           (0.11 deg); at p_gain=100 the residual +-0.57 deg deadband showed
+           up as a slow +-8 deg yaw limit cycle in flight. cmd_max=20 N.m
+           leaves headroom to slew, d_gain=5.0 damps the stiff loop. -->
       <control channel="11"> <!-- SERVO12: k_tiltMotorRight -> front right -->
         <jointName>motor_0_joint</jointName>
         <useForce>1</useForce>
@@ -1189,13 +1284,13 @@
         <servo_min>1000</servo_min>
         <servo_max>2000</servo_max>
         <type>POSITION</type>
-        <p_gain>10.0</p_gain>
+        <p_gain>500.0</p_gain>
         <i_gain>0</i_gain>
-        <d_gain>0</d_gain>
+        <d_gain>5.0</d_gain>
         <i_max>0</i_max>
         <i_min>0</i_min>
-        <cmd_max>2.5</cmd_max>
-        <cmd_min>-2.5</cmd_min>
+        <cmd_max>20.0</cmd_max>
+        <cmd_min>-20.0</cmd_min>
       </control>
       <control channel="12"> <!-- SERVO13: k_tiltMotorLeft -> front left -->
         <jointName>motor_2_joint</jointName>
@@ -1205,29 +1300,29 @@
         <servo_min>1000</servo_min>
         <servo_max>2000</servo_max>
         <type>POSITION</type>
-        <p_gain>10.0</p_gain>
+        <p_gain>500.0</p_gain>
         <i_gain>0</i_gain>
-        <d_gain>0</d_gain>
+        <d_gain>5.0</d_gain>
         <i_max>0</i_max>
         <i_min>0</i_min>
-        <cmd_max>2.5</cmd_max>
-        <cmd_min>-2.5</cmd_min>
+        <cmd_max>20.0</cmd_max>
+        <cmd_min>-20.0</cmd_min>
       </control>
       <control channel="13"> <!-- SERVO14: k_tiltMotorRear -> rear -->
         <jointName>motor_1_joint</jointName>
         <useForce>1</useForce>
-        <multiplier>1.9198621771937625</multiplier>
-        <offset>0.8181818181818182</offset>
+        <multiplier>-1.9198621771937625</multiplier>
+        <offset>-0.8181818181818182</offset>
         <servo_min>1000</servo_min>
         <servo_max>2000</servo_max>
         <type>POSITION</type>
-        <p_gain>10.0</p_gain>
+        <p_gain>500.0</p_gain>
         <i_gain>0</i_gain>
-        <d_gain>0</d_gain>
+        <d_gain>5.0</d_gain>
         <i_max>0</i_max>
         <i_min>0</i_min>
-        <cmd_max>2.5</cmd_max>
-        <cmd_min>-2.5</cmd_min>
+        <cmd_max>20.0</cmd_max>
+        <cmd_min>-20.0</cmd_min>
       </control>
     </plugin>
     <static>0</static>

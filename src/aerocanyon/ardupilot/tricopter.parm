@@ -71,6 +71,14 @@ Q_A_RAT_YAW_P     0.16
 Q_A_RAT_YAW_I     0.027
 Q_A_RAT_YAW_D     0.004
 
+# --- Hover thrust (Task 5, measured in flight) ---
+# The Gazebo model's LiftDrag rig gives ~36.2 N per rotor at full command
+# vs 50.7 N of vehicle weight, so hover sits near 47% thrust, not the 35%
+# ArduPilot defaults to. Confirmed live: steady hover in QHOVER settles at
+# 47-49% throttle. Leaving the default 0.35 makes QHOVER's altitude loop
+# start from a bad feedforward on every takeoff.
+Q_M_THST_HOVER    0.47
+
 # --- Arming / simulation ---
 # NOTE: this ArduPilot checkout has already migrated ARMING_CHECK (old
 # AP_Int16 "checks to perform" bitmask) to ARMING_SKIPCHK (new AP_Int32
