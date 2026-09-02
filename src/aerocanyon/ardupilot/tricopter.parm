@@ -88,6 +88,23 @@ Q_A_RAT_YAW_D     0.004
 # gain-tuning trail.
 Q_A_ANGLE_MAX     35       # degrees, up from the 30 deg default
 
+# --- RC-override failsafe margin (Phase 2, mid-flight-landing bug) ---
+# RC_OVERRIDE_TIME (RC_Channel.cpp / RC_Channels_VarInfo.h, confirmed
+# against ArduPilot's own Tools/autotest/rover.py usage) is how long an
+# RC_CHANNELS_OVERRIDE is honoured after the last one arrives before
+# ArduPilot falls back to its own RC failsafe handling -- default 3.0s.
+# controller_node.py publishes overrides at 50 Hz continuously, but was
+# live-verified this session to occasionally miss that cadence for long
+# enough to trip this and self-land mid-mission, well short of the
+# canyon exit, with no error anywhere in the stack (root-caused to
+# cbf_filter.py calling its scipy optimizer on every tick regardless of
+# whether anything was actually constraining the command -- fixed
+# separately, see that file's own fast-path comment). Raised as
+# defense-in-depth against any OTHER source of publish jitter (this is
+# a simulated vehicle on a shared, loaded machine, not real hardware
+# with a dedicated RC link) -- not a substitute for the real fix above.
+RC_OVERRIDE_TIME  15       # seconds, up from the 3s default
+
 # --- Hover thrust (Task 5, measured in flight) ---
 # The Gazebo model's LiftDrag rig gives ~36.2 N per rotor at full command
 # vs 50.7 N of vehicle weight, so hover sits near 47% thrust, not the 35%
