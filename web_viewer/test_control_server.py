@@ -1,12 +1,10 @@
-"""Smallest self-check for control_server's stick-to-velocity math --
-catches a wrong sign or axis swap without needing a live ROS2/PX4
-runtime. Run: python3 test_control_server.py
+"""Smallest self-check for control_server's stick-to-RC math -- catches a
+wrong sign or axis swap without needing a live ROS2/MAVROS/SITL runtime.
+Run: python3 test_control_server.py
 """
-import numpy as np
+from control_server import (COMMAND_COMMANDS, RC_CENTER, RC_SPAN,
+                            resolve_stick, stick_to_rc)
 
-from control_server import COMMAND_COMMANDS, resolve_stick, stick_to_velocity
-
-IDENTITY_QUAT = [1.0, 0.0, 0.0, 0.0]  # yaw = 0, nose along NED +x (north)
 ZERO_STICK = {'yaw': 0.0, 'throttle': 0.0, 'roll': 0.0, 'pitch': 0.0}
 
 
@@ -14,38 +12,53 @@ def stick(**axes):
     return dict(ZERO_STICK, **axes)
 
 
-# All-zero stick -> hover, no motion.
-vel, yawspeed = stick_to_velocity(ZERO_STICK, IDENTITY_QUAT, 1.0)
-assert vel == [0.0, 0.0, 0.0] and yawspeed == 0.0
+# Channel order is ArduPilot's RC1-4: roll, pitch, throttle, yaw.
+ROLL, PITCH, THROTTLE, YAW = range(4)
 
-# Full forward pitch at yaw=0 moves along NED +x (north), no sideways/vertical.
-vel, yawspeed = stick_to_velocity(stick(pitch=1.0), IDENTITY_QUAT, 1.0)
-assert vel[0] > 0 and abs(vel[1]) < 1e-9 and vel[2] == 0.0
+# All-zero stick -> every channel centred. In QHOVER that is "hold
+# attitude, hold altitude", which is also what a stale stick must produce.
+assert stick_to_rc(ZERO_STICK, 1.0) == (RC_CENTER,) * 4
 
-# Full right roll at yaw=0 moves along NED +y (east), no forward/vertical.
-vel, yawspeed = stick_to_velocity(stick(roll=1.0), IDENTITY_QUAT, 1.0)
-assert abs(vel[0]) < 1e-9 and vel[1] > 0 and vel[2] == 0.0
+# Full right roll -> above-centre RC1 (ArduPilot: high PWM = roll right),
+# nothing else moves.
+out = stick_to_rc(stick(roll=1.0), 1.0)
+assert out[ROLL] == RC_CENTER + RC_SPAN
+assert out[PITCH] == out[THROTTLE] == out[YAW] == RC_CENTER
 
-# Full up throttle is negative NED z (up), independent of yaw/attitude.
-vel, yawspeed = stick_to_velocity(stick(throttle=1.0), IDENTITY_QUAT, 1.0)
-assert vel[2] < 0
+# Stick pushed forward (index.html reports +1) must mean FLY FORWARD, which
+# on ArduPilot is nose down = BELOW centre on RC2. This is the one inverted
+# axis; getting it backwards flies the vehicle away from the stick.
+out = stick_to_rc(stick(pitch=1.0), 1.0)
+assert out[PITCH] == RC_CENTER - RC_SPAN
+assert out[ROLL] == out[THROTTLE] == out[YAW] == RC_CENTER
 
-# Yaw stick maps to yawspeed only, doesn't touch velocity.
-vel, yawspeed = stick_to_velocity(stick(yaw=1.0), IDENTITY_QUAT, 1.0)
-assert vel == [0.0, 0.0, 0.0] and yawspeed > 0
+# Throttle up -> above-centre RC3 (QHOVER: climb).
+out = stick_to_rc(stick(throttle=1.0), 1.0)
+assert out[THROTTLE] == RC_CENTER + RC_SPAN
+assert out[ROLL] == out[PITCH] == out[YAW] == RC_CENTER
 
-# Forward at yaw=90 deg (facing NED east) moves along +y, not +x -- proves
-# horizontal motion is genuinely body-relative, not a fixed world mapping.
-yaw90 = [np.cos(np.pi / 4), 0.0, 0.0, np.sin(np.pi / 4)]  # q = [cos(y/2),0,0,sin(y/2)]
-vel, _ = stick_to_velocity(stick(pitch=1.0), yaw90, 1.0)
-assert vel[0] < 1e-6 and vel[1] > 0
+# Yaw right -> above-centre RC4, and it must not touch the other axes.
+out = stick_to_rc(stick(yaw=1.0), 1.0)
+assert out[YAW] == RC_CENTER + RC_SPAN
+assert out[ROLL] == out[PITCH] == out[THROTTLE] == RC_CENTER
 
-# speed_scale scales velocity/yawspeed proportionally.
-vel_1x, yaw_1x = stick_to_velocity(stick(pitch=1.0, yaw=1.0), IDENTITY_QUAT, 1.0)
-vel_2x, yaw_2x = stick_to_velocity(stick(pitch=1.0, yaw=1.0), IDENTITY_QUAT, 2.0)
-assert abs(vel_2x[0] - 2 * vel_1x[0]) < 1e-9
-assert abs(yaw_2x - 2 * yaw_1x) < 1e-9
+# Negative sticks mirror around centre.
+assert stick_to_rc(stick(yaw=-1.0), 1.0)[YAW] == RC_CENTER - RC_SPAN
+assert stick_to_rc(stick(pitch=-1.0), 1.0)[PITCH] == RC_CENTER + RC_SPAN
 
+# speed_scale scales deflection about centre...
+assert stick_to_rc(stick(roll=1.0), 0.5)[ROLL] == RC_CENTER + RC_SPAN // 2
+# ...but can never push a channel outside the 1000-2000 us band, however
+# far speed_up is clicked. A PWM outside RCn_MIN/MAX is a real failsafe
+# trigger on ArduPilot, not just a saturated command.
+for scale in (1.0, 3.0, 100.0):
+    for axis in ZERO_STICK:
+        for value in (1.0, -1.0):
+            for pwm in stick_to_rc(stick(**{axis: value}), scale):
+                assert RC_CENTER - RC_SPAN <= pwm <= RC_CENTER + RC_SPAN, pwm
+
+# Phase 1 is hover-only: no VTOL transition commands are wired up, so
+# index.html's transition buttons fall through as unknown commands.
 assert COMMAND_COMMANDS == {'arm', 'disarm', 'land'}
 
 # resolve_stick: per-axis dead-man's-switch. Two sources (hardware bridge

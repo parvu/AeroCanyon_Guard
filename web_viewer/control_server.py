@@ -4,15 +4,51 @@
 Ported from CaveX-Explorer-Pro/web_viewer/control_server.py, adapted for
 the tricopter: that version relayed browser buttons into gz-transport
 StringMsg topics a ROS2 bridge node picked up. This project's manual
-control is PX4 offboard velocity setpoints, which are ROS2/px4_msgs
-topics directly -- so this server is an rclpy node with an embedded HTTP
-server, not a gz-transport client. It only targets the README's separate
-"fly it by hand" path (external Gazebo/PX4, no run_trial.py): a real
-trial's controller_node is the sole source of setpoints during a leg, and
-this server is not meant to run alongside one.
+control goes through ROS2 topics/services directly -- so this server is
+an rclpy node with an embedded HTTP server, not a gz-transport client. It
+only targets the README's separate "fly it by hand" path (external
+Gazebo/autopilot, no run_trial.py): a real trial's controller_node is the
+sole source of setpoints during a leg, and this server is not meant to
+run alongside one.
 
-Run from web_viewer/, with the ROS2 workspace + PX4 DDS bridge already up
-(see README "Watching a trial fly, or flying manually"):
+ArduPilot port (was PX4 offboard velocity setpoints on px4_msgs; this
+branch talks to ArduPlane through MAVROS). Three things about ArduPlane
+forced the shape of this file, all measured against a live SITL rather
+than assumed:
+
+1. **Sticks go out as RC override, not velocity setpoints.** ArduPlane's
+   GUIDED mode ignores velocity entirely: its
+   `GCS_MAVLINK_Plane::handle_set_position_target_local_ned`
+   (ArduPlane/GCS_MAVLink_Plane.cpp) drops anything that isn't
+   MAV_FRAME_LOCAL_OFFSET_NED and then uses only `packet.z` as an
+   altitude *offset* -- there is no velocity path at all, unlike PX4's
+   TrajectorySetpoint. Streaming TwistStamped to
+   /mavros/setpoint_velocity/cmd_vel at 50 Hz for 40 s in GUIDED moved
+   the airframe exactly 0.00 m. So manual flight is QHOVER +
+   RC_CHANNELS_OVERRIDE (/mavros/rc/override), which is also what the
+   autopilot was actually verified hovering on. Consequence: roll/pitch
+   are now body-relative lean commands, not world-frame velocities, and
+   the vehicle's attitude is no longer needed here (QHOVER resolves the
+   body frame itself) -- hence no /mavros/local_position/pose
+   subscription.
+
+2. **Mode changes go through /mavros/cmd/command, not /mavros/set_mode.**
+   This airframe heartbeats as MAV_TYPE_VTOL_TILTROTOR (21), which is
+   absent from MAVROS's ArduPilot mode tables -- MAVROS logs "MODE:
+   Unknown APM based FCU! Type: 21", reports every mode as "CMODE(n)",
+   and /mavros/set_mode returns mode_sent=False for 'GUIDED', 'QHOVER'
+   and the 'CMODE(18)' escape hatch alike. A raw COMMAND_LONG carrying
+   MAV_CMD_DO_SET_MODE bypasses that table and works.
+
+3. **MAVROS must run with system_id:=255.** ArduPilot gates RC override
+   on `gcs().sysid_is_gcs(msg.sysid)` (GCS_Common.cpp
+   handle_rc_channels_override) against MAV_GCS_SYSID, which defaults to
+   255. MAVROS defaults to system id 1, so its overrides are silently
+   dropped -- RC_CHANNELS keeps reading the SITL's own idle sticks and
+   nothing moves. See the README for the launch line.
+
+Run from web_viewer/, with Gazebo + SITL + MAVROS already up (see README
+"Watching a trial fly, or flying manually"):
     python3 control_server.py [port]
 """
 import sys
@@ -20,20 +56,26 @@ import threading
 import time
 import http.server
 
-import numpy as np
 import rclpy
-from px4_msgs.msg import (OffboardControlMode, TrajectorySetpoint,
-                          VehicleAttitude, VehicleCommand)
+from mavros_msgs.msg import OverrideRCIn
+from mavros_msgs.srv import CommandBool, CommandLong
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
 CONTROL_HZ = 50
-# Was 1.0; raised to put full-stick climb at the target 3 m/s -- matches
-# MPC_Z_VEL_MAX_UP=3.0, now set explicitly in 4022_gz_tricopter so PX4
-# doesn't cap the climb below what this asks for.
-MAX_VELOCITY_MPS = 3.0
-MAX_YAW_RATE_RAD_S = 0.5
+# RC override PWM: 1500 centre, +/-500 at full stick deflection, the
+# standard 1000-2000 us band ArduPilot's RCn_MIN/MAX default to.
+RC_CENTER = 1500
+RC_SPAN = 500
+# ArduPlane custom mode numbers (ArduPlane/mode.h). QHOVER is the
+# altitude-holding VTOL hover mode -- centred throttle stick holds
+# altitude, which is exactly what the browser's self-centering stick
+# gives when it is released or goes stale. QLAND replaces PX4's
+# VEHICLE_CMD_NAV_LAND.
+MODE_QHOVER = 18
+MODE_QLAND = 20
+MAV_CMD_DO_SET_MODE = 176
+MAV_MODE_FLAG_CUSTOM_MODE_ENABLED = 1.0
 # Mode 2 RC sticks are proportional and self-centering -- the browser
 # streams the live stick position continuously (see index.html) rather
 # than a click-and-decay nudge, so there's no HOLD_S here. This is instead
@@ -47,7 +89,11 @@ STICK_TIMEOUT_S = 0.3
 # disconnect, not a single dropped/delayed HTTP request.
 RC_PRESENT_TIMEOUT_S = 1.0
 
-COMMAND_COMMANDS = {'arm', 'disarm', 'land', 'transition_fw', 'transition_mc'}
+# transition_fw/transition_mc are deliberately absent: forward-flight
+# transition is out of scope for Phase 1, and ArduPilot's trigger is
+# nothing like PX4's VEHICLE_CMD_DO_VTOL_TRANSITION. index.html still has
+# the buttons; they now fall through as unknown commands.
+COMMAND_COMMANDS = {'arm', 'disarm', 'land'}
 
 
 def resolve_stick(stick, stick_time, now, timeout):
@@ -60,35 +106,36 @@ def resolve_stick(stick, stick_time, now, timeout):
     }
 
 
-def stick_to_velocity(stick, quat, scale):
-    """Mode 2 stick state + current attitude -> (NED velocity [vx,vy,vz],
-    yawspeed). Pure function, no ROS/rclpy needed -- see test_control_server.py.
+def stick_to_rc(stick, scale):
+    """Mode 2 stick state -> (roll, pitch, throttle, yaw) PWM for RC
+    channels 1-4. Pure function, no ROS/rclpy needed -- see
+    test_control_server.py.
+
+    Pitch is the one inverted axis: index.html reports "stick pushed
+    forward" as +1 (up on screen) and that has to mean "fly forward",
+    which on ArduPilot means nose DOWN, which is BELOW-centre PWM on
+    channel 2 -- ArduPilot's un-reversed pitch channel treats high PWM as
+    nose up. Roll, throttle and yaw all share ArduPilot's sign already
+    (high PWM = right / climb / yaw right).
     """
-    w, x, y, z = quat
-    yaw = np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
-    pitch_v = stick['pitch'] * scale * MAX_VELOCITY_MPS
-    roll_v = stick['roll'] * scale * MAX_VELOCITY_MPS
-    vx = np.cos(yaw) * pitch_v - np.sin(yaw) * roll_v
-    vy = np.sin(yaw) * pitch_v + np.cos(yaw) * roll_v
-    vz = -stick['throttle'] * scale * MAX_VELOCITY_MPS
-    yawspeed = stick['yaw'] * scale * MAX_YAW_RATE_RAD_S
-    return [vx, vy, vz], yawspeed
+    def pwm(value, invert=False):
+        v = max(-1.0, min(1.0, value * scale))
+        return int(round(RC_CENTER + (-v if invert else v) * RC_SPAN))
+
+    return (pwm(stick['roll']), pwm(stick['pitch'], invert=True),
+            pwm(stick['throttle']), pwm(stick['yaw']))
 
 
 class WebControlNode(Node):
 
     def __init__(self):
         super().__init__('web_control_server')
-        self.sp_pub = self.create_publisher(
-            TrajectorySetpoint, '/fmu/in/trajectory_setpoint', 10)
-        self.mode_pub = self.create_publisher(
-            OffboardControlMode, '/fmu/in/offboard_control_mode', 10)
-        self.cmd_pub = self.create_publisher(
-            VehicleCommand, '/fmu/in/vehicle_command', 10)
-
-        self.create_subscription(
-            VehicleAttitude, '/fmu/out/vehicle_attitude',
-            self._on_attitude, qos_profile_sensor_data)
+        self.rc_pub = self.create_publisher(
+            OverrideRCIn, '/mavros/rc/override', 10)
+        self.arm_client = self.create_client(CommandBool, '/mavros/cmd/arming')
+        # /mavros/set_mode can't be used here -- see the module docstring,
+        # point 2 (MAV_TYPE 21 is missing from MAVROS's mode tables).
+        self.cmd_client = self.create_client(CommandLong, '/mavros/cmd/command')
 
         self._lock = threading.Lock()
         # Mode 2: left stick = yaw (x) + throttle/climb (y), right stick =
@@ -106,12 +153,8 @@ class WebControlNode(Node):
         self._stick_time = {'yaw': 0.0, 'throttle': 0.0, 'roll': 0.0, 'pitch': 0.0}
         self._speed_scale = 1.0
         self._hw_last_seen = 0.0
-        self.quat = np.array([1.0, 0.0, 0.0, 0.0])
 
         self.create_timer(1.0 / CONTROL_HZ, self._tick)
-
-    def _on_attitude(self, msg):
-        self.quat = np.array([msg.q[0], msg.q[1], msg.q[2], msg.q[3]])
 
     def set_stick(self, hw=False, **axes):
         now = time.monotonic()
@@ -136,33 +179,26 @@ class WebControlNode(Node):
                 self._speed_scale = max(0.25, self._speed_scale - 0.25)
             return
         if cmd == 'arm':
-            self._send_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, 1.0, 6.0)
-            self._send_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0)
+            # Mode first, then arm -- the same ordering the PX4 version used,
+            # and the ordering the live SITL runs were verified with.
+            self._set_mode(MODE_QHOVER)
+            self._arm(True)
         elif cmd == 'disarm':
-            self._send_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 0.0)
+            self._arm(False)
         elif cmd == 'land':
-            self._send_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
-        elif cmd == 'transition_fw':
-            # MAV_VTOL_STATE_FW = 4. controller_node's own
-            # ENABLE_VTOL_TRANSITION=False only gates the AUTONOMOUS trial's
-            # own logic, not PX4 itself -- this command reaches PX4 directly.
-            self._send_command(VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION, 4.0)
-        elif cmd == 'transition_mc':
-            # MAV_VTOL_STATE_MC = 3.
-            self._send_command(VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION, 3.0)
+            self._set_mode(MODE_QLAND)
 
-    def _send_command(self, command, param1=0.0, param2=0.0):
-        msg = VehicleCommand()
-        msg.command = command
-        msg.param1 = param1
-        msg.param2 = param2
-        msg.target_system = 1
-        msg.target_component = 1
-        msg.source_system = 1
-        msg.source_component = 1
-        msg.from_external = True
-        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        self.cmd_pub.publish(msg)
+    def _arm(self, value):
+        req = CommandBool.Request()
+        req.value = value
+        self.arm_client.call_async(req)
+
+    def _set_mode(self, mode):
+        req = CommandLong.Request()
+        req.command = MAV_CMD_DO_SET_MODE
+        req.param1 = MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
+        req.param2 = float(mode)
+        self.cmd_client.call_async(req)
 
     def _tick(self):
         now = time.monotonic()
@@ -170,27 +206,27 @@ class WebControlNode(Node):
             stick = resolve_stick(self._stick, self._stick_time, now, STICK_TIMEOUT_S)
             scale = self._speed_scale
 
-        # Horizontal (pitch/roll) is body-relative -- rotated by the
-        # vehicle's CURRENT yaw every tick, not just when the stick moved,
-        # so "forward" keeps meaning "current nose direction" even while
-        # yawing. Vertical (throttle) is commanded directly in world/NED
-        # Z, same as a real multicopter's manual/velocity flight mode --
-        # roll/pitch shouldn't couple into commanded climb rate.
-        vel, yawspeed = stick_to_velocity(stick, self.quat, scale)
+        # QHOVER interprets these in the vehicle's own body frame and holds
+        # altitude at centred throttle, so there's no attitude maths to do
+        # here any more (the PX4 version rotated a world-frame velocity by
+        # the current yaw itself). A stale/centred stick lands on 1500 on
+        # every axis, i.e. hold attitude and hold altitude -- the correct
+        # RC-failsafe reading of the dead-man's switch.
+        roll, pitch, throttle, yaw = stick_to_rc(stick, scale)
 
-        mode = OffboardControlMode()
-        mode.velocity = True
-        mode.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        self.mode_pub.publish(mode)
+        msg = OverrideRCIn()
+        channels = [OverrideRCIn.CHAN_NOCHANGE] * 18
+        channels[0:4] = [roll, pitch, throttle, yaw]
+        # Channels 5-8 pinned to centre, matching the SITL runs this was
+        # verified on. Nothing in tricopter.parm assigns them an RCn_OPTION,
+        # so they are inert either way.
+        channels[4:8] = [RC_CENTER] * 4
+        msg.channels = channels
+        self.rc_pub.publish(msg)
 
-        sp = TrajectorySetpoint()
-        sp.position = [float('nan')] * 3
-        sp.velocity = [float(v) for v in vel]
-        sp.acceleration = [float('nan')] * 3
-        sp.yaw = float('nan')
-        sp.yawspeed = float(yawspeed)
-        sp.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        self.sp_pub.publish(sp)
+        # ArduPilot drops RC overrides RC_OVERRIDE_TIME (3 s) after the last
+        # one arrives, so this 50 Hz stream is what keeps manual control
+        # alive; stopping the server hands the vehicle back to its own RC.
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
