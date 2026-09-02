@@ -830,14 +830,29 @@
       // is present (see updateRcStatus). Vertical Y is "up on screen =
       // +1" (throttle/pitch stick convention), same as a real
       // transmitter, so DOM's down-is-positive pixel Y gets negated below.
+      // Every axis self-centers to 0 on release except the left stick's Y
+      // (throttle) -- see setupStick's noSpringY. These literal defaults
+      // get overwritten immediately by each setupStick() call below before
+      // any /api/stick request goes out.
       var sticks = { left: { x: 0, y: 0 }, right: { x: 0, y: 0 } };
 
-      function setupStick(padId, key) {
+      function setupStick(padId, key, opts) {
+        opts = opts || {};
         var pad = document.getElementById(padId);
         var knob = pad.querySelector('.stickKnob');
         var radius = pad.clientWidth / 2;
         var knobRadius = knob.clientWidth / 2;
         var activePointerId = null;
+        // Throttle (left stick's Y only): unlike every other axis, a real
+        // Mode 2 transmitter's throttle gimbal is ratcheted (friction-held),
+        // not spring-loaded -- it stays wherever it's left rather than
+        // snapping back to centre, and idle sits at the BOTTOM of its
+        // travel by default, not centre. Still the same internal [-1, 1]
+        // range every other axis uses (rc_bridge.py's real hardware sends
+        // that same range for its own throttle) -- only the release/default
+        // behaviour differs here; control_server.py's stick_to_rc handles
+        // the PWM side (throttle caps at 1900, not the other channels' 2000).
+        var noSpringY = !!opts.noSpringY;
 
         function setKnob(x, y) {
           sticks[key].x = x;
@@ -866,14 +881,18 @@
         function release(ev) {
           if (ev.pointerId !== activePointerId) return;
           activePointerId = null;
-          setKnob(0, 0);  // self-centering, like a real Mode 2 stick
+          if (noSpringY) {
+            setKnob(0, sticks[key].y);  // yaw (x) self-centers, throttle (y) stays put
+          } else {
+            setKnob(0, 0);  // self-centering, like a real Mode 2 stick
+          }
         }
         pad.addEventListener('pointerup', release);
         pad.addEventListener('pointercancel', release);
 
-        setKnob(0, 0);
+        setKnob(0, noSpringY ? -1 : 0);  // throttle defaults to idle/bottom, not centre
       }
-      setupStick('leftStick', 'left');
+      setupStick('leftStick', 'left', { noSpringY: true });
       setupStick('rightStick', 'right');
 
       // Continuous stream, matching a real transmitter's telemetry rate --

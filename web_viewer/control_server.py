@@ -67,6 +67,15 @@ CONTROL_HZ = 50
 # standard 1000-2000 us band ArduPilot's RCn_MIN/MAX default to.
 RC_CENTER = 1500
 RC_SPAN = 500
+# Throttle's own PWM range: unlike the other three channels' shared
+# 1000-2000 (RC_CENTER +/- RC_SPAN), throttle caps at 1900, not 2000, per
+# request -- its on-screen stick also stopped self-centering to match a
+# real Mode 2 transmitter's ratcheted throttle gimbal (see index.html).
+# Internal stick value stays the same [-1, 1] range every other axis uses
+# (rc_bridge.py's real hardware already sends that range for its own
+# throttle too) -- only this output mapping differs.
+THROTTLE_MID = 1450
+THROTTLE_SPAN = 450
 # ArduPlane custom mode numbers (ArduPlane/mode.h). QHOVER is the
 # altitude-holding VTOL hover mode -- centred throttle stick holds
 # altitude, which is exactly what the browser's self-centering stick
@@ -117,13 +126,21 @@ def stick_to_rc(stick, scale):
     channel 2 -- ArduPilot's un-reversed pitch channel treats high PWM as
     nose up. Roll, throttle and yaw all share ArduPilot's sign already
     (high PWM = right / climb / yaw right).
+
+    Throttle is also the one axis with its own PWM range (THROTTLE_MID +/-
+    THROTTLE_SPAN, capping at 1900 rather than the other channels' shared
+    2000) -- see those constants' own comment.
     """
     def pwm(value, invert=False):
         v = max(-1.0, min(1.0, value * scale))
         return int(round(RC_CENTER + (-v if invert else v) * RC_SPAN))
 
+    def pwm_throttle(value):
+        v = max(-1.0, min(1.0, value * scale))
+        return int(round(THROTTLE_MID + v * THROTTLE_SPAN))
+
     return (pwm(stick['roll']), pwm(stick['pitch'], invert=True),
-            pwm(stick['throttle']), pwm(stick['yaw']))
+            pwm_throttle(stick['throttle']), pwm(stick['yaw']))
 
 
 class WebControlNode(Node):
