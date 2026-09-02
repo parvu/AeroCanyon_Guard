@@ -34,7 +34,9 @@ def test_uploads_a_mission_before_requesting_auto_and_arm():
         'baseline', SETPOINTS_BEFORE_OFFBOARD + 1)
     assert len(pushes) == 1, 'must upload the mission exactly once'
     assert pushes[0].start_index == 0
-    assert len(pushes[0].waypoints) == 3
+    assert len(pushes[0].waypoints) == 4, (
+        'seq 0 is a home placeholder ArduPilot always overwrites -- '
+        'the real 3-item mission starts at seq 1')
     assert arm_calls == [] and mode_calls == [], (
         'must not request AUTO/arm on the same tick as the mission upload')
 

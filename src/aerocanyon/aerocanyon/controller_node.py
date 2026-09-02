@@ -142,15 +142,22 @@ class ControllerNode(Node):
         self.wind_truth = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
 
     def _build_mission(self):
-        """[NAV_VTOL_TAKEOFF @ entry, NAV_WAYPOINT @ landing-trigger
-        point, NAV_VTOL_LAND @ landing-trigger point] -- all at
-        CRUISE_ALT_M, all in Q-mode/VTOL navigation the whole way
+        """[home placeholder, NAV_VTOL_TAKEOFF @ entry, NAV_WAYPOINT @
+        landing-trigger point, NAV_VTOL_LAND @ landing-trigger point] --
+        all at CRUISE_ALT_M, all in Q-mode/VTOL navigation the whole way
         (QuadPlane::in_vtol_auto() latches true from the takeoff item and
         never auto-clears without an explicit transition command, which
         this project never issues). Landing targets the REAL landing-
         trigger point (last tower row's edge + LAND_CLEARANCE_M), not
         CANYON_EXIT -- see the design spec for why the old 45m margin
-        doesn't apply to ArduPilot's own navigation controller."""
+        doesn't apply to ArduPilot's own navigation controller.
+
+        Item 0 is a placeholder: ArduPilot always treats mission seq 0
+        as the home position and overwrites/ignores whatever is uploaded
+        there (confirmed live -- pushing [TAKEOFF, WAYPOINT, LAND]
+        starting at seq 0 came back from /mavros/mission/waypoints with
+        item 0 silently replaced by an all-zero home entry and the real
+        TAKEOFF item dropped). The real mission starts at seq 1."""
         entry_ned = frames.enu_to_ned(cg.CANYON_ENTRY)
         land_ned = np.array([entry_ned[0], LAND_TRIGGER_LOCAL_M, entry_ned[2]])
 
@@ -167,6 +174,7 @@ class ControllerNode(Node):
             return w
 
         return [
+            wp(16, entry_ned),                    # seq 0: home placeholder, overwritten by ArduPilot
             wp(84, entry_ned, is_current=True),   # MAV_CMD_NAV_VTOL_TAKEOFF
             wp(16, land_ned),                     # MAV_CMD_NAV_WAYPOINT
             wp(85, land_ned),                     # MAV_CMD_NAV_VTOL_LAND
@@ -222,7 +230,7 @@ class ControllerNode(Node):
             wp.z_alt = CRUISE_ALT_M
 
             req = WaypointPush.Request()
-            req.start_index = 1
+            req.start_index = 2  # seq 2 -- the cruise NAV_WAYPOINT item (see _build_mission's seq-0-is-home note)
             req.waypoints = [wp]
             self.mission_client.call_async(req)
             self._last_offset_push_tick = self.tick
