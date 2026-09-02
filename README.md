@@ -363,3 +363,173 @@ estimate correlates with wind truth before concluding the pipeline needs
 retuning.
 
 See [History.md](History.md) for known pitfalls and their fixes (arming, telemetry, spawning) from this project's debugging history.
+
+## ArduPilot port (`tricopter-ap` branch only)
+
+Everything above this section is the **PX4** stack, and lives on the
+`tricopter` branch -- none of it is affected by what follows. This section
+is for the **`tricopter-ap`** branch: the same tricopter airframe, ported
+to fly under **ArduPilot SITL** (`ArduPlane`, `Q_FRAME_CLASS=7`
+tricopter-VTOL) instead of PX4, bridged to ROS2 via **MAVROS** instead of
+Micro-XRCE-DDS. Phase 1 covers manual hover flight only -- see
+[What's not here yet](#whats-not-here-yet-phase-2) below.
+
+### ArduPilot prerequisites
+
+Cloned/built separately, outside this workspace (not part of this repo),
+in addition to the ROS2 Jazzy + Gazebo Harmonic install from the PX4
+Prerequisites section above (still required -- only the PX4-Autopilot and
+Micro-XRCE-DDS-Agent entries there are `tricopter`-branch-only):
+
+- **[ArduPilot](https://github.com/ArduPilot/ardupilot)** cloned
+  `--recursive` at `$HOME/ardupilot`, pinned to commit `b9439efde1`, built
+  for SITL: `./waf configure --board sitl && ./waf plane` (produces
+  `build/sitl/bin/arduplane`)
+- **[ardupilot_gazebo](https://github.com/ArduPilot/ardupilot_gazebo)**
+  cloned at `$HOME/ardupilot_gazebo`, pinned to commit `082a0fe`, built
+  against Gazebo Harmonic: `cmake .. -DCMAKE_BUILD_TYPE=RelWithDebInfo && make -j$(nproc)`
+  (produces `build/libArduPilotPlugin.so`)
+- **MAVROS:** `sudo apt install -y ros-jazzy-mavros ros-jazzy-mavros-extras`.
+  `ros-jazzy-mavros` is usually already present; `ros-jazzy-mavros-extras`
+  has needed a human to install it by hand in this environment (no
+  passwordless sudo) -- check with `ros2 pkg list | grep mavros` and run
+  the `apt install` above yourself if `mavros_extras` doesn't show up.
+- **GeographicLib geoid dataset.** `mavros_node` hard-aborts on startup
+  without it (`GeographicLib exception: File not readable
+  .../egm96-5.pgm`), and `geographiclib-get-geoids` needs root. Fetch it
+  into your home directory instead, once, machine-wide (not a repo file):
+  ```bash
+  curl -sSL -o /tmp/egm96-5.tar.bz2 \
+    https://sourceforge.net/projects/geographiclib/files/geoids-distrib/egm96-5.tar.bz2/download
+  mkdir -p $HOME/GeographicLib && cd $HOME && tar xjf /tmp/egm96-5.tar.bz2 && mv $HOME/geoids $HOME/GeographicLib/geoids
+  ```
+
+Note `mavproxy.py` is **not** assumed to be installed anywhere below --
+all SITL parameter/telemetry checks in this project were done with
+`pymavlink` directly, or standard `ros2`/MAVROS CLI tools.
+
+### The ArduPilot model (`tricopter_ap`)
+
+`src/aerocanyon/models/tricopter_ap/` shares its geometry/visual/sensor
+blocks with the PX4 model (`src/aerocanyon/models/tricopter/`, untouched
+by this branch) but is driven by ArduPilot's own `ArduPilotPlugin`
+instead of PX4's `gz_bridge`. Two things are worth knowing if you read the
+model file:
+
+- `ArduPilotPlugin`'s motor `VELOCITY` control alone spins the rotors but
+  generates **zero aerodynamic lift** -- Gazebo has no idea a spinning
+  joint should push air. A `gz-sim-lift-drag-system` "thrust rig" (two
+  `LiftDrag` blocks per rotor, opposite `cp` so their off-axis moments
+  cancel) is layered on top, sized to match the PX4 model's own live-tuned
+  per-rotor thrust.
+- The vehicle's centre of gravity sits at the **rotor centroid**
+  (`x=0.11666...`), not at the origin like the PX4 model. `AP_MotorsTri`'s
+  mixer gives all three motors equal thrust at zero roll/pitch demand with
+  no per-rotor moment-arm compensation, unlike PX4's allocator -- so with
+  the front pair and rear rotor at different distances from an
+  origin-CG, equal thrust alone leaves a standing pitch moment. This is a
+  deliberate, required divergence from the PX4 model, not a bug.
+
+### Fly the tricopter manually (ArduPilot)
+
+Same idea as [Fly the tricopter manually](#fly-the-tricopter-manually)
+above (start Gazebo + the autopilot by hand, fly it yourself), but for
+ArduPilot. **`system_id:=255` on the MAVROS launch line below is not
+optional** -- ArduPilot only accepts RC override (and other GCS commands)
+from the system id in its `MAV_GCS_SYSID` parameter, which defaults to
+**255**. MAVROS itself defaults to system id 1. Get this wrong and there
+is **no error anywhere** -- MAVROS connects fine, arming works fine,
+`/mavros/rc/override` publishes fine, and the sticks in the browser just
+silently do nothing. This is the single easiest thing to get wrong here.
+
+The world file used for hover testing is a **scratchpad copy** of
+`urban_canyon.sdf` with the ArduPilot model included -- the repo's own
+world file (used by the PX4 branch above) is never modified:
+
+```bash
+mkdir -p /tmp/aerocanyon_ap
+cp $HOME/AeroCanyon_Guard/src/aerocanyon/worlds/urban_canyon.sdf \
+   /tmp/aerocanyon_ap/urban_canyon_ap.sdf
+sed -i 's#</world>#  <include>\n      <uri>model://tricopter_ap</uri>\n      <pose>-100 0 0.5 0 0 0</pose>\n    </include>\n  </world>#' \
+   /tmp/aerocanyon_ap/urban_canyon_ap.sdf
+```
+
+```bash
+# Terminal 1: Gazebo (headless -- no native GUI needed for the browser viewer below)
+export GZ_SIM_RESOURCE_PATH=$HOME/AeroCanyon_Guard/src/aerocanyon/models:$HOME/PX4-Autopilot/Tools/simulation/gz/models:$HOME/PX4-Autopilot/Tools/simulation/gz/worlds
+export GZ_SIM_SYSTEM_PLUGIN_PATH=$HOME/ardupilot_gazebo/build
+source /opt/ros/jazzy/setup.bash
+gz sim -v 2 -s -r /tmp/aerocanyon_ap/urban_canyon_ap.sdf &
+sleep 12
+
+# Terminal 2: ArduPilot SITL. NOTE: --defaults, NOT --add-param-file
+# (that flag doesn't exist in this ArduPilot build -- arduplane --help
+# lists --defaults). mavproxy.py is not installed/required.
+mkdir -p /tmp/apstate && cd /tmp/apstate
+$HOME/ardupilot/build/sitl/bin/arduplane --model JSON \
+  --home 47.397742,8.545594,488,0 \
+  --wipe --defaults $HOME/AeroCanyon_Guard/src/aerocanyon/ardupilot/tricopter.parm &
+sleep 10
+
+# Terminal 3: MAVROS. system_id:=255 is REQUIRED -- see above.
+export GEOGRAPHICLIB_GEOID_PATH=$HOME/GeographicLib/geoids
+source /opt/ros/jazzy/setup.bash
+ros2 run mavros mavros_node --ros-args \
+  -p fcu_url:=tcp://127.0.0.1:5760 -p system_id:=255 &
+sleep 12
+
+# Terminal 4: browser viewer's Gazebo websocket bridge (scene stream)
+cd $HOME/AeroCanyon_Guard/web_viewer
+/usr/lib/x86_64-linux-gnu/gz/launch7/gz-launch websocket.gzlaunch &
+sleep 4
+
+# Terminal 5: control server (static files + RC-override manual control)
+cd $HOME/AeroCanyon_Guard/web_viewer
+source /opt/ros/jazzy/setup.bash && source ../install/setup.bash
+python3 control_server.py 8080
+```
+
+Wait ~30 s total after SITL starts for EKF alignment and a 3D GPS fix
+before arming. Then open `http://localhost:8080`. After hitting `arm`,
+give it another 5-10 s before touching a stick: ArduPilot's built-in
+flight-mode-select channel (`FLTMODE_CH=8`, unrelated to any per-channel
+`RCn_OPTION`) briefly reads the override's neutral 1500 on channel 8 as a
+real mode-switch position and can pull the vehicle back toward a
+fixed-wing mode for a few seconds immediately after arming, before
+settling into `QHOVER` on its own -- visible as the tilt servos briefly
+sitting at a non-hover angle right after arming, then swinging to the
+hover position (front/front/rear ~1181/1181/1818) once it settles. This
+was observed on a genuinely fresh stack during this task's own
+verification and is not a sign anything is broken; just don't judge
+"is manual control working" from the first couple of seconds after
+arming.
+
+**Manual flight here is not the PX4 branch's world-frame velocity
+offboard control.** Arming engages `QHOVER` and the sticks drive
+`/mavros/rc/override` (an `OverrideRCIn` message, i.e. the same four RC
+channels a real transmitter would send) -- roll/pitch are **body-frame
+lean commands**, exactly like a real transmitter's sticks, not
+yaw-rotated world-frame velocity setpoints. A centred/stale stick resolves
+to PWM 1500, which in `QHOVER` means *hold attitude, hold altitude* -- a
+real RC failsafe behaviour, and a difference worth knowing if you're
+used to the PX4 branch's zero-velocity failsafe. `land now` switches to
+`QLAND` and disarms automatically on touchdown. Fixed-wing transition and
+the `rc_bridge.py` physical-transmitter path are unaffected by any of
+this (same `/api/stick` HTTP surface both ways) but forward-flight is out
+of scope here -- see below.
+
+### What's not here yet (Phase 2)
+
+Phase 1 (this branch, as documented above) covers **manual hover flight
+only**. Two things are explicitly out of scope and not implemented:
+
+- The autonomous CBF/PINN mission stack (`controller_node.py`,
+  `run_trial.py`'s automated baseline/treatment trial) -- nothing on this
+  branch flies a mission by itself.
+- VTOL forward-flight transition -- `ArduPlane`'s `GUIDED` mode has no
+  velocity-setpoint path for this airframe (see `control_server.py`'s
+  module docstring), and the transition itself has not been tuned or
+  verified at all here.
+
+Both are tracked as Phase 2 in
+[`docs/superpowers/specs/2026-09-02-tricopter-ardupilot-phase1-design.md`](docs/superpowers/specs/2026-09-02-tricopter-ardupilot-phase1-design.md).
