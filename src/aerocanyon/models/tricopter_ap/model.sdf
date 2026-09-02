@@ -895,6 +895,139 @@
       <joint_name>rudder_joint</joint_name>
       <sub_topic>servo_5</sub_topic>
     </plugin> -->
+    <!-- Rotor thrust rig, ardupilot-phase1 Task 5 (Step 0).
+         ArduPilotPlugin's VELOCITY <control> blocks below only spin the
+         rotor JOINTS (ApplyMotorForces() writes JointForceCmd, never a
+         Wrench on base_link) -- they generate zero lift on their own.
+         These LiftDrag blocks are what turns that spin into thrust, the
+         same rig ~/ardupilot_gazebo/models/iris_with_ardupilot/model.sdf
+         uses. Two blocks per rotor at opposite cp (as iris does) so the
+         off-axis moments of the two half-forces cancel instead of shaking
+         the airframe at rotor frequency.
+
+         Coefficients (a0, cla, cda, alpha_stall, cl/cd_stall, area,
+         air_density) are iris_with_ardupilot's verified-working values
+         verbatim. ONLY the cp radius is sized for this vehicle, so that
+         thrust matches the PX4 model's own live-tuned sizing
+         (../tricopter/model.sdf: motorConstant=1.608e-05,
+         maxRotVelocity=1500 -> 1.608e-05 * 1500^2 = 36.2 N per rotor at
+         full command):
+
+           F_rotor = 2 * 0.5 * rho * (omega*r)^2 * area * (cla * a0)
+                   = 2 * 0.5 * 1.2041 * (1500 r)^2 * 0.002 * 1.275
+                   = 6908 * r^2   [N]
+           36.2 N  ->  r = 0.0724 m  (0.72 of the 0.1 m rotor radius --
+                                      a physically sensible effective
+                                      blade station, not a fudge)
+
+         Vehicle mass is 5.165 kg (50.7 N), so 3 x 36.2 N = 108.5 N gives
+         a ~2.1 thrust/weight ratio and a hover at ~47% thrust.
+
+         `forward` must point the way the cp actually travels for that
+         rotor's sign of rotation, or the block produces DOWNforce:
+         rotor_0/rotor_1 have multiplier +1500 (ccw), rotor_2 has -1500
+         (cw), so rotor_2's forward vectors are flipped -- exactly the
+         convention iris uses between its own rotor_0/1 and rotor_2/3. -->
+    <!-- rotor_0 -->
+    <plugin filename="gz-sim-lift-drag-system" name="gz::sim::systems::LiftDrag">
+      <a0>0.3</a0>
+      <alpha_stall>1.4</alpha_stall>
+      <cla>4.2500</cla>
+      <cda>0.10</cda>
+      <cma>0.0</cma>
+      <cla_stall>-0.025</cla_stall>
+      <cda_stall>0.0</cda_stall>
+      <cma_stall>0.0</cma_stall>
+      <area>0.002</area>
+      <air_density>1.2041</air_density>
+      <cp>0.0724 0 0</cp>
+      <forward>0 1 0</forward>
+      <upward>0 0 1</upward>
+      <link_name>rotor_0</link_name>
+    </plugin>
+    <plugin filename="gz-sim-lift-drag-system" name="gz::sim::systems::LiftDrag">
+      <a0>0.3</a0>
+      <alpha_stall>1.4</alpha_stall>
+      <cla>4.2500</cla>
+      <cda>0.10</cda>
+      <cma>0.0</cma>
+      <cla_stall>-0.025</cla_stall>
+      <cda_stall>0.0</cda_stall>
+      <cma_stall>0.0</cma_stall>
+      <area>0.002</area>
+      <air_density>1.2041</air_density>
+      <cp>-0.0724 0 0</cp>
+      <forward>0 -1 0</forward>
+      <upward>0 0 1</upward>
+      <link_name>rotor_0</link_name>
+    </plugin>
+    <!-- rotor_1 -->
+    <plugin filename="gz-sim-lift-drag-system" name="gz::sim::systems::LiftDrag">
+      <a0>0.3</a0>
+      <alpha_stall>1.4</alpha_stall>
+      <cla>4.2500</cla>
+      <cda>0.10</cda>
+      <cma>0.0</cma>
+      <cla_stall>-0.025</cla_stall>
+      <cda_stall>0.0</cda_stall>
+      <cma_stall>0.0</cma_stall>
+      <area>0.002</area>
+      <air_density>1.2041</air_density>
+      <cp>0.0724 0 0</cp>
+      <forward>0 1 0</forward>
+      <upward>0 0 1</upward>
+      <link_name>rotor_1</link_name>
+    </plugin>
+    <plugin filename="gz-sim-lift-drag-system" name="gz::sim::systems::LiftDrag">
+      <a0>0.3</a0>
+      <alpha_stall>1.4</alpha_stall>
+      <cla>4.2500</cla>
+      <cda>0.10</cda>
+      <cma>0.0</cma>
+      <cla_stall>-0.025</cla_stall>
+      <cda_stall>0.0</cda_stall>
+      <cma_stall>0.0</cma_stall>
+      <area>0.002</area>
+      <air_density>1.2041</air_density>
+      <cp>-0.0724 0 0</cp>
+      <forward>0 -1 0</forward>
+      <upward>0 0 1</upward>
+      <link_name>rotor_1</link_name>
+    </plugin>
+    <!-- rotor_2 -->
+    <plugin filename="gz-sim-lift-drag-system" name="gz::sim::systems::LiftDrag">
+      <a0>0.3</a0>
+      <alpha_stall>1.4</alpha_stall>
+      <cla>4.2500</cla>
+      <cda>0.10</cda>
+      <cma>0.0</cma>
+      <cla_stall>-0.025</cla_stall>
+      <cda_stall>0.0</cda_stall>
+      <cma_stall>0.0</cma_stall>
+      <area>0.002</area>
+      <air_density>1.2041</air_density>
+      <cp>0.0724 0 0</cp>
+      <forward>0 -1 0</forward>
+      <upward>0 0 1</upward>
+      <link_name>rotor_2</link_name>
+    </plugin>
+    <plugin filename="gz-sim-lift-drag-system" name="gz::sim::systems::LiftDrag">
+      <a0>0.3</a0>
+      <alpha_stall>1.4</alpha_stall>
+      <cla>4.2500</cla>
+      <cda>0.10</cda>
+      <cma>0.0</cma>
+      <cla_stall>-0.025</cla_stall>
+      <cda_stall>0.0</cda_stall>
+      <cma_stall>0.0</cma_stall>
+      <area>0.002</area>
+      <air_density>1.2041</air_density>
+      <cp>-0.0724 0 0</cp>
+      <forward>0 1 0</forward>
+      <upward>0 0 1</upward>
+      <link_name>rotor_2</link_name>
+    </plugin>
+
     <!-- ArduPilot integration, ardupilot-phase1 Task 3.
          Replaces all six PX4 plugins that used to drive the three rotor
          joints (rotor_0/1/2_joint, via gz-sim-multicopter-motor-model-
@@ -910,11 +1043,10 @@
          Rotor thrust: this plugin only spins/positions joints via a
          force-mode PID (useForce=1); it does not compute aerodynamic
          thrust from that spin the way the deleted MulticopterMotorModel
-         plugin did (motorConstant * velocity^2). Neither iris_with_
-         ardupilot's LiftDrag-per-blade rig nor an equivalent has been
-         added here -- out of scope per this task's brief (Task 5 boots
-         Gazebo+SITL together and is explicitly the one that confirms the
-         motors "produce lift"). Flagged for Task 5's attention.
+         plugin did (motorConstant * velocity^2). Task 5 added the six
+         LiftDrag blocks directly above to supply that missing force --
+         they are load-bearing, not decoration; delete them and the
+         vehicle cannot leave the ground.
 
          Link/joint names (rotor_0/1/2, motor_0/1/2_joint) and physical
          positions are unchanged from ../tricopter/model.sdf:
