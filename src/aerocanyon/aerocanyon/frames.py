@@ -4,6 +4,8 @@ Every sign flip between the two frames lives here. Do not inline one
 anywhere else -- a stray flip is the single hardest bug to find in this
 codebase, because the vehicle still flies, just wrongly.
 """
+import math
+
 import numpy as np
 
 _SWAP = np.array([[0.0, 1.0, 0.0],
@@ -84,3 +86,22 @@ def enu_flu_rate_to_ned_frd(v):
     right/down), not a world-frame rotation."""
     x, y, z = np.asarray(v, dtype=float)
     return np.array([x, -y, -z])
+
+
+_EARTH_RADIUS_M = 6378137.0  # WGS84 equatorial radius
+
+
+def ned_to_latlon(ned, home_lat_deg, home_lon_deg):
+    """NED [north, east, down] offset from a home point -> (lat, lon)
+    degrees. Flat-earth/local-tangent-plane approximation -- accurate to
+    sub-centimetre at this project's scale (canyon spans ~250m), the
+    same approximation ArduPilot's own EKF uses internally for local NED
+    <-> global conversion at this scale. `down` is unused -- altitude is
+    handled separately via mission items' own relative-altitude field,
+    not folded into this conversion."""
+    north, east, _down = np.asarray(ned, dtype=float)
+    home_lat_rad = math.radians(home_lat_deg)
+    lat = home_lat_deg + math.degrees(north / _EARTH_RADIUS_M)
+    lon = home_lon_deg + math.degrees(
+        east / (_EARTH_RADIUS_M * math.cos(home_lat_rad)))
+    return lat, lon

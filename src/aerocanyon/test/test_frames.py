@@ -2,9 +2,11 @@
 project's, and PX4's) convention conversion. No rclpy/ROS needed.
 """
 import numpy as np
+import pytest
 
 from aerocanyon.frames import (enu_flu_quat_to_ned_frd,
-                               enu_flu_rate_to_ned_frd, quat_mul)
+                               enu_flu_rate_to_ned_frd, ned_to_latlon,
+                               quat_mul)
 
 
 def test_quat_mul_identity():
@@ -44,3 +46,28 @@ def test_enu_flu_rate_to_ned_frd_flips_y_and_z_only():
     v = np.array([1.0, 2.0, 3.0])
     result = enu_flu_rate_to_ned_frd(v)
     np.testing.assert_allclose(result, [1.0, -2.0, -3.0])
+
+
+def test_ned_to_latlon_zero_offset_returns_home():
+    lat, lon = ned_to_latlon(np.array([0.0, 0.0, 0.0]), 44.0, 26.0)
+    assert lat == pytest.approx(44.0, abs=1e-9)
+    assert lon == pytest.approx(26.0, abs=1e-9)
+
+
+def test_ned_to_latlon_north_offset_increases_latitude():
+    lat, lon = ned_to_latlon(np.array([100.0, 0.0, 0.0]), 44.0, 26.0)
+    assert lat > 44.0
+    assert lon == pytest.approx(26.0, abs=1e-6)
+
+
+def test_ned_to_latlon_east_offset_increases_longitude():
+    lat, lon = ned_to_latlon(np.array([0.0, 100.0, 0.0]), 44.0, 26.0)
+    assert lon > 26.0
+    assert lat == pytest.approx(44.0, abs=1e-6)
+
+
+def test_ned_to_latlon_matches_known_scale():
+    # 1 degree of latitude is ~111,320 m -- a 111.32 m north offset should
+    # read back within a small fraction of a degree of 0.001 deg latitude.
+    lat, lon = ned_to_latlon(np.array([111.32, 0.0, 0.0]), 0.0, 0.0)
+    assert lat == pytest.approx(0.001, rel=1e-2)
