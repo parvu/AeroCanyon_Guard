@@ -39,15 +39,36 @@ GZ_WIND_TOPIC = f'/world/{WORLD_NAME}/wind'
 # Task 8 live-verified (2026-09-02): a 60s baseline leg armed, flew, and
 # logged real continuously-varying telemetry throughout (no NaNs, no
 # frozen/zero readings except a normal ~0.3s tail at teardown) -- the
-# pipeline itself works end to end. Flight quality is untuned: the
-# vehicle covered ~100m of horizontal distance in that window against
-# the mission's ~12 m/s cruise target (which would cover ~250m+ in the
-# post-hold portion alone) and never got close to LAND_TRIGGER_LOCAL_M,
-# consistent with a sluggish/wobbly response from these starting gains,
-# not a bug. Real gain tuning is follow-up work, not blocking for this
-# sub-project.
+# pipeline itself works end to end.
+#
+# Two real bugs found and fixed after Task 8's initial "just untuned"
+# read turned out to be wrong -- checked by plotting the resulting
+# trajectory and reading the logged data directly, not by assumption:
+#
+# 1. mission.target() returns ABSOLUTE canyon-frame NED coordinates
+#    (anchored at canyon_geometry.CANYON_ENTRY/EXIT's real positions),
+#    but MAVROS's local_position is relative to ArduPilot's own EKF
+#    origin -- which for the JSON SITL backend is wherever the vehicle
+#    physically spawned, reading (0,0,0) there, not CANYON_ENTRY's own
+#    absolute value. controller_node.py's pos_err was computed against
+#    the wrong frame entirely (a ~100 m constant phantom error at spawn)
+#    -- fixed there (see _POS_OFFSET_NED).
+# 2. HEADING_KP mapped angle error directly, at gain 1.0, into QHOVER's
+#    yaw-RATE channel with no damping -- a proportional-only controller
+#    driving a rate (not position) actuator, which saturates and
+#    overshoots on any real error. Confirmed live: logged yaw swung
+#    90 -> 98 -> 110 -> -171 -> 122 -> 25 -> -169 degrees within a few
+#    seconds, an actual spin, not gentle imprecision -- and since the
+#    position loop's lean commands are rotated into the body frame using
+#    that same (garbage) yaw reading every tick, the whole trajectory
+#    went nowhere useful regardless of how correct the position math
+#    itself was. Dropped by more than 3x below as a first mitigation,
+#    not a proper tuning pass (a real fix likely needs a rate-damping
+#    term, not just a lower gain on the same P-only law) -- re-verify
+#    live before trusting a longer flight, and before sub-project 3's
+#    49-trial sweep runs on top of this.
 POSITION_KP = 0.5   # m/s^2 per metre of position error
 POSITION_KD = 0.8   # m/s^2 per m/s of velocity (damping)
 ALTITUDE_KP = 0.6   # climb-rate command [-1,1] per metre of altitude error
-HEADING_KP = 1.0    # yaw-rate command [-1,1] per radian of heading error
+HEADING_KP = 0.3    # yaw-rate command [-1,1] per radian of heading error -- was 1.0, oscillated
 MAX_LEAN_RAD = math.radians(20.0)  # lean angle that saturates the RC stick
