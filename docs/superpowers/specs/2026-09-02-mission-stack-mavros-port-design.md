@@ -135,10 +135,24 @@ sub-project 4 owns that.
   reset/teleport logic (`_reset_gazebo_model` etc., used only by the
   manual "watch a trial fly" flow) is untouched — it's gz-transport
   code, autopilot-agnostic.
-- **`canyon_geometry.py`, `constants.py`, `mission.py`, `cbf_filter.py`,
-  `frames.py`** — untouched. All pure math/geometry with no PX4
-  dependency; `mission.py`'s NED convention is exactly what the new
-  outer loop needs after the MAVROS ENU→NED conversion.
+- **`canyon_geometry.py`, `constants.py`, `mission.py`, `cbf_filter.py`**
+  — untouched. All pure math/geometry with no PX4 dependency;
+  `mission.py`'s NED convention is exactly what the new outer loop needs
+  after the MAVROS ENU→NED conversion. (`constants.py` gains new outer-
+  loop gain constants during implementation — additive, not a change to
+  anything existing.)
+- **`frames.py`** — gains new quaternion/rate conversion functions
+  (additive, existing `ned_to_enu`/`enu_to_ned`/`quat_to_rotmat`/
+  `body_z_in_ned` untouched). Position/velocity vectors convert via the
+  existing ENU↔NED functions, but MAVROS's orientation
+  (`/mavros/imu/data`) and body rates are in **ENU-world/FLU-body**
+  (ROS's convention), not PX4's NED-world/FRD-body that `cbf_filter.py`
+  and the trained PINN's state vector both assume — a second, distinct
+  conversion this design initially missed while focused on position.
+  `frames.py` needs `enu_flu_quat_to_ned_frd`/`enu_flu_rate_to_ned_frd`
+  before `controller_node.py`, `trial_logger.py`, and `fo_pinn_node.py`
+  can hand MAVROS's attitude/rate data to any of the unchanged NED/FRD
+  math.
 
 ## Data flow (baseline mode, per tick)
 
