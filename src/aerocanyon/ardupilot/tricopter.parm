@@ -1,0 +1,89 @@
+# src/aerocanyon/ardupilot/tricopter.parm
+# QuadPlane tilt-tricopter -- see docs/superpowers/specs/2026-09-02-tricopter-ardupilot-phase1-design.md
+# for the geometry this encodes (front -20..90deg incl. hover-yaw-trim
+# sub-range + stop/fold in cruise, rear 90..180deg always-on pusher).
+#
+# Every param name below was confirmed against the ~/ardupilot source tree
+# for this checkout (ArduPlane/quadplane.cpp, ArduPlane/tiltrotor.cpp,
+# libraries/AC_AttitudeControl/AC_AttitudeControl_Multi.cpp,
+# libraries/AP_Arming/AP_Arming.cpp, libraries/SITL/SITL.cpp,
+# libraries/AP_SerialManager/AP_SerialManager.cpp) -- none are guessed.
+
+# --- Frame / tilt geometry -- exact values from Task 2's live SITL spike ---
+Q_ENABLE          1
+Q_FRAME_CLASS     7        # tricopter
+Q_FRAME_TYPE      1
+Q_TILT_ENABLE     1
+Q_TILT_MASK       3        # front pair (motors 1+2) ONLY -- rear stays out, see Task 2 section 5
+Q_TILT_TYPE       2        # VectoredYaw -- required for the rear tilt servo (k_tiltMotorRear) to move at all
+Q_TILT_YAW_ANGLE  20       # front pair's -20..0 deg hover yaw-trim sub-range
+Q_TILT_FIX_ANGLE  0        # must stay 0, or it eats into the range maths
+Q_TILT_MAX        45
+Q_TILT_RATE_UP    40
+Q_TILT_RATE_DN    0
+
+# Motor thrust channels -- must match Task 3's Gazebo ArduPilotPlugin channels
+# 4/5/7 (0-indexed) = SERVO5/6/8 (1-indexed). Tri motor order per
+# AP_MotorsTri.cpp: motor1=front right, motor2=front left, motor4=rear.
+SERVO5_FUNCTION   33       # motor 1 = front right
+SERVO6_FUNCTION   34       # motor 2 = front left
+SERVO8_FUNCTION   36       # motor 4 = rear (never stops)
+SERVO7_FUNCTION   0
+SERVO3_FUNCTION   0        # no separate fixed fwd throttle in Phase 1 (see Task 2 section 5 cruise-thrust concern)
+
+# Tilt servo channels -- must match Task 3's Gazebo ArduPilotPlugin channels
+# 11/12/13 (0-indexed) = SERVO12/13/14 (1-indexed).
+# PWM->angle mapping verified live in Task 2 (SITL, cold-reboot persistence checked):
+#   front (SERVO12/13): PWM 1000..2000 -> -20deg..+90deg
+#   rear  (SERVO14):    PWM 1000..2000 -> +90deg..+200deg (REVERSED=1 required;
+#                        SERVOn_MIN>MAX does NOT invert, per SRV_Channel::pwm_from_range's guard)
+SERVO12_FUNCTION  76       # k_tiltMotorRight -> front right tilt
+SERVO12_MIN       1000
+SERVO12_MAX       2000
+SERVO12_REVERSED  0
+
+SERVO13_FUNCTION  75       # k_tiltMotorLeft -> front left tilt
+SERVO13_MIN       1000
+SERVO13_MAX       2000
+SERVO13_REVERSED  0
+
+SERVO14_FUNCTION  45       # k_tiltMotorRear -> rear tilt
+SERVO14_MIN       1000
+SERVO14_MAX       2000
+SERVO14_REVERSED  1        # REQUIRED -- the only way to invert; MIN>MAX does NOT work
+
+# --- Rate gains: starting point ONLY, reasoned from this session's PX4 ---
+# empirical tuning (MC_ROLL_P=5.0, MC_ROLLRATE_P/I/D=0.2/0.2/0.004,
+# MC_YAWRATE_P/I/D=0.16/0.027/0.004, hover thrust fraction ~0.7).
+# ArduPilot's rate controller scales gains differently than PX4's
+# allocator-mediated ones (different units, different filtering, different
+# feedforward structure) -- these are a REASONED GUESS to start iterating
+# from in Task 5, NOT a port. Pitch mirrors roll (symmetric airframe in
+# pitch); PX4's MC_ROLLRATE_* had no direct pitch equivalent recorded this
+# session, so pitch is set equal to roll rather than invented separately.
+Q_A_RAT_RLL_P     0.20
+Q_A_RAT_RLL_I     0.20
+Q_A_RAT_RLL_D     0.004
+Q_A_RAT_PIT_P     0.20
+Q_A_RAT_PIT_I     0.20
+Q_A_RAT_PIT_D     0.004
+Q_A_RAT_YAW_P     0.16
+Q_A_RAT_YAW_I     0.027
+Q_A_RAT_YAW_D     0.004
+
+# --- Arming / simulation ---
+# NOTE: this ArduPilot checkout has already migrated ARMING_CHECK (old
+# AP_Int16 "checks to perform" bitmask) to ARMING_SKIPCHK (new AP_Int32
+# "checks to SKIP" bitmask, inverted sense) -- see
+# libraries/AP_Arming/AP_Arming.cpp:230-260. The brief's plan-era
+# `ARMING_CHECK 0` name/value no longer exists in this tree and would be
+# silently dropped as an unknown param. -1 (all bits set) is the current
+# equivalent of the old "disable all checks" behaviour: check_enabled()
+# returns (checks_to_skip & check) == 0, so -1 skips everything.
+ARMING_SKIPCHK    -1
+SIM_SPEEDUP       1
+SERIAL0_PROTOCOL  2
+# (The brief also listed a bare `FRAME_CLASS 1` here. No such top-level
+# param exists for ArduPlane -- confirmed absent from ArduPlane/Parameters.cpp
+# and Parameters.h. Q_FRAME_CLASS above is the real, already-set equivalent.
+# Omitted rather than writing an unknown param.)
