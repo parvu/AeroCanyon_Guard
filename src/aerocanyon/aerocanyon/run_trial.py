@@ -375,7 +375,14 @@ def run_one(mode, trial, duration, clean_respawn=False, seed=0, turbulence=2.5, 
     mavros_env = dict(os.environ, GEOGRAPHICLIB_DATA=str(GEOGRAPHICLIB_DATA))
     mavros = _spawn(
         'ros2 run mavros mavros_node --ros-args '
-        '-p fcu_url:=tcp://127.0.0.1:5760 -p system_id:=255',
+        '-p fcu_url:=tcp://127.0.0.1:5760 -p system_id:=255 '
+        # tcp-l: MAVROS opens this as a TCP SERVER (listens), not a
+        # client -- so a GCS (QGroundControl, "Comm Link" -> TCP,
+        # localhost:5761) can connect independently of MAVROS/this
+        # trial, getting the same MAVLink stream (telemetry, RC,
+        # mission) without contending with MAVROS for ArduPilot's
+        # single SERIAL0 connection on 5760.
+        '-p gcs_url:=tcp-l://0.0.0.0:5761@',
         env=mavros_env)
     time.sleep(5)  # MAVROS connect margin
 

@@ -135,10 +135,16 @@ $HOME/ardupilot/build/sitl/bin/arduplane --model JSON \
 sleep 10
 
 # Terminal 3: MAVROS. system_id:=255 is REQUIRED -- see above.
+# gcs_url opens a second TCP port MAVROS listens on for a ground
+# control station (QGroundControl: "Comm Link" -> TCP, localhost:5761)
+# to connect independently and see the same MAVLink stream, without
+# contending with MAVROS for ArduPilot's single SERIAL0 connection on
+# 5760.
 export GEOGRAPHICLIB_DATA=$HOME/.local/share/GeographicLib
 source /opt/ros/jazzy/setup.bash
 ros2 run mavros mavros_node --ros-args \
-  -p fcu_url:=tcp://127.0.0.1:5760 -p system_id:=255 &
+  -p fcu_url:=tcp://127.0.0.1:5760 -p system_id:=255 \
+  -p gcs_url:=tcp-l://0.0.0.0:5761@ &
 sleep 12
 
 # Terminal 4: browser viewer's Gazebo websocket bridge (scene stream)
