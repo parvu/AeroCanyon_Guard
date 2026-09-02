@@ -183,7 +183,14 @@
       // easy to mistake for "not there at all". Close-up framing instead;
       // the orbit/pan controls (Interactive view control plugin) still let
       // the user zoom out to see the whole canyon themselves.
-      const tricopter = scene.getByName('tricopter_0');
+      // Real bug found live on tricopter-ap (ArduPilot): this only ever
+      // looked for 'tricopter_0' (the PX4 branch's model name), so on this
+      // branch -- whose model is 'tricopter_ap' -- the camera silently
+      // never found it and stayed pointed at empty space, same failure
+      // mode as the -100 hardcode above, just from a different cause. Try
+      // both names rather than hardcoding one, since which autopilot is
+      // running determines which model actually spawns.
+      const tricopter = scene.getByName('tricopter_0') || scene.getByName('tricopter_ap');
       if (!tricopter) {
         if (tries === undefined) tries = 20;
         if (tries > 0) { setTimeout(function () { resetCameraPose(tries - 1); }, 500); }

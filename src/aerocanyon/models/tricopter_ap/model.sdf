@@ -511,7 +511,23 @@
         </surface>
       </collision>
       <visual name='rotor_1_visual'>
-        <pose>0 0 0 0 0 0</pose>
+        <!-- Real request: rotor_1 (rear) is a pusher prop, not a puller --
+             the blade mesh should sit on the trailing side of the motor
+             housing (motor_1, whose collision cylinder centers at
+             z=0.045 in the model's rest frame) rather than the leading
+             side. Inherited unchanged from the stock tiltrotor mesh
+             before this session's rear-tilt rework, the prop rendered at
+             the SAME +0.025 offset above the housing centre as the front
+             (puller) rotors -- correct for them, backwards for a pusher.
+             Mirrored here (+0.025 -> -0.025 relative to the link's own
+             z=0.07 origin, i.e. a -0.05 local offset) so the blade disk
+             renders below the housing once the tilt joint is vertical
+             for hover, matching the front rotors' visual convention
+             flipped fore-aft rather than top-bottom. Purely cosmetic --
+             does not touch the collision/inertial placement above, the
+             joint definition, or the ArduPilotPlugin/LiftDrag thrust
+             mechanism, all of which stay keyed to the link's own origin. -->
+        <pose>0 0 -0.05 0 0 0</pose>
         <geometry>
           <mesh>
             <scale>1 1 1</scale>
