@@ -25,6 +25,27 @@ from . import frames
 from .canyon_field import DrydenGust, WindGrid
 
 
+def cap_speed(vec, max_speed):
+    """Clamp a vector's magnitude to max_speed, direction unchanged.
+    Pure function so it's testable without the rclpy node -- see
+    MC_MAX_WIND_SPEED_MS's own comment for why this exists."""
+    mag = np.linalg.norm(vec)
+    if mag <= max_speed or mag < 1e-9:
+        return vec
+    return vec * (max_speed / mag)
+
+
+# MC (hover/VTOL) flight target wind speed, m/s -- caps the STEADY
+# mean-flow component only (gusts stay at their own turbulence_sigma,
+# same as wind_speed_scale above). Deliberately does NOT touch
+# self.grid itself, whose own data averages ~8.8 m/s across the canyon
+# (see wind_field_node's module docstring/History.md) -- that full-
+# strength field is left intact for a future fixed-wing flight phase
+# (not yet implemented -- ENABLE_VTOL_TRANSITION stays False in
+# controller_node.py) to read directly, uncapped, once it exists.
+MC_MAX_WIND_SPEED_MS = 2.0
+
+
 class WindFieldNode(Node):
 
     def __init__(self):
@@ -41,6 +62,7 @@ class WindFieldNode(Node):
         # so they are what needs to be representative of a real urban canyon.
         self.declare_parameter('turbulence_sigma', 2.5)
         self.declare_parameter('seed', 0)
+        self.declare_parameter('mc_max_wind_speed_ms', MC_MAX_WIND_SPEED_MS)
 
         data_dir = self.get_parameter('data_dir').value
         if not data_dir:
@@ -67,6 +89,8 @@ class WindFieldNode(Node):
         # autonomous run_trial.py leg (the normal RC-publishing mode
         # would fight controller_node for /mavros/rc/override).
         self.wind_speed_scale = 1.0
+        self.mc_max_wind_speed_ms = float(
+            self.get_parameter('mc_max_wind_speed_ms').value)
         self.create_subscription(
             Float64, C.TOPIC_WIND_SPEED_SCALE, self._on_speed_scale, 10)
 
@@ -101,8 +125,9 @@ class WindFieldNode(Node):
         self.wind_speed_scale = float(msg.data)
 
     def _tick(self):
-        wind_enu = (self.grid.at(self.pos_enu) * self.wind_speed_scale
-                   + self.gust.step(self.airspeed))
+        steady = cap_speed(self.grid.at(self.pos_enu) * self.wind_speed_scale,
+                           self.mc_max_wind_speed_ms)
+        wind_enu = steady + self.gust.step(self.airspeed)
 
         msg = Wind()
         msg.linear_velocity.x = float(wind_enu[0])

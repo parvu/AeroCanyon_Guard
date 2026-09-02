@@ -19,8 +19,17 @@ Q_TILT_TYPE       2        # VectoredYaw -- required for the rear tilt servo (k_
 Q_TILT_YAW_ANGLE  20       # front pair's -20..0 deg hover yaw-trim sub-range
 Q_TILT_FIX_ANGLE  0        # must stay 0, or it eats into the range maths
 Q_TILT_MAX        8         # degrees, down from 45 -- see the AUTO-mission note further down
-Q_TILT_RATE_UP    40
-Q_TILT_RATE_DN    0
+# RATE_UP/RATE_DN are named for forward-to-hover / hover-to-forward
+# respectively (ArduPlane/tiltrotor.cpp's own @Description, opposite of
+# what the names suggest). At the old 40 deg/s, the full Q_TILT_MAX=8deg
+# sweep completed in ~0.2s -- effectively an instant step at arm time,
+# not a settle. Slowed to 15 deg/s (still well inside the documented
+# 10-300 range) for a smoother ~0.5s tilt-servo transition instead of a
+# snap; explicitly set both rather than leaving RATE_DN at its
+# fall-back-to-RATE_UP default of 0, so the two directions can be tuned
+# independently later if needed.
+Q_TILT_RATE_UP    15
+Q_TILT_RATE_DN    15
 
 # Motor thrust channels -- must match Task 3's Gazebo ArduPilotPlugin channels
 # 4/5/7 (0-indexed) = SERVO5/6/8 (1-indexed). Tri motor order per
@@ -115,11 +124,12 @@ Q_M_THST_HOVER    0.47
 
 # --- Q-mode waypoint-navigation speed (AUTO-mission redesign) ---
 # AC_WPNav's Q_WP_SPD defaults to 10 m/s (WP_SPD_DEFAULT, AC_WPNav.cpp).
-# Lowered as a first attempt at the climb-then-crash symptom below;
-# kept at this more conservative value even after finding the real
-# cause (Q_TILT_MAX, above) since 10 m/s is still an aggressive cruise
-# target for this frame's thrust margin.
-Q_WP_SPD          3.0        # m/s, down from the 10 m/s default
+# Lowered to 5.0 as a first attempt at the climb-then-crash symptom
+# below, kept there even after finding the real cause (Q_TILT_MAX,
+# above) since 10 m/s is an aggressive cruise target for this frame's
+# thrust margin -- raised again at the user's request back to the
+# ArduPilot default.
+Q_WP_SPD          10.0       # m/s, ArduPilot's own default
 
 # --- Root cause of the above: Tiltrotor::continuous_update's AUTO-mode
 # forward-tilt fallback (Q_TILT_MAX, moved up next to the other tilt

@@ -177,23 +177,24 @@
       */
     }
 
-    // Sparse wind vector field, downsampled server-side (see
-    // aerocanyon.export_wind_viz -- the full grid is 57,600 cells, far
-    // too many to render individually) into wind_field_viz.json: a flat
-    // list of {p: [ENU x,y,z], v: [ENU wind vx,vy,vz]} points, already in
-    // the same ENU world frame this scene renders everything else in, no
-    // conversion needed. Arrow lengths rescale live with the spd+/spd-
-    // buttons (see changeSpeed) -- windSpeedScale mirrors the SAME
-    // /aerocanyon/wind_speed_scale value control_server.py publishes
-    // server-side (into wind_field_node.py, which actually drives the
-    // simulated wind), so what's drawn tracks what's simulated.
+    // Arrow ORIGINS only come from wind_field_viz.json (downsampled
+    // server-side, see aerocanyon.export_wind_viz -- the full grid is
+    // 57,600 cells, far too many to render individually): a flat list of
+    // {p: [ENU x,y,z], v: [...]} points, already in the same ENU world
+    // frame this scene renders everything else in. The per-point `v`
+    // vectors are NOT used for direction/length any more -- wind_field_node
+    // publishes only ONE live sample (at the vehicle's own position, see
+    // that node's docstring), so there is no live per-point field to draw;
+    // every arrow is set to that same live vector by updateWind() below,
+    // polled from /api/wind. Drawing the static per-point values here
+    // used to make the arrows look like real wind even with no wind
+    // simulated at all -- this way they correctly read as zero-length
+    // when nothing is publishing.
     var windArrows = [];
-    // speedScale (declared with the spd+/spd- buttons, below) is reused
-    // here rather than duplicated -- same value, same meaning.
     // Arrows are drawn short relative to their raw m/s magnitude (a
     // ~10 m/s mean flow as a 10-unit-long arrow would dwarf the ~150 m
-    // wide canyon scene) -- this is a display scale only, independent of
-    // windSpeedScale, which is the actual simulated-speed multiplier.
+    // wide canyon scene) -- a display scale only, independent of the
+    // spd+/spd- wind_speed_scale multiplier.
     var WIND_ARROW_DISPLAY_SCALE = 0.6;
 
     function loadWindField() {
@@ -201,12 +202,8 @@
         .then(function (data) {
           data.points.forEach(function (pt) {
             var origin = new THREE.Vector3(pt.p[0], pt.p[1], pt.p[2]);
-            var vec = new THREE.Vector3(pt.v[0], pt.v[1], pt.v[2]);
-            var mag = vec.length();
-            var dir = mag > 1e-6 ? vec.clone().normalize() : new THREE.Vector3(1, 0, 0);
-            var length = Math.max(mag, 0.01) * WIND_ARROW_DISPLAY_SCALE;
-            var arrow = new THREE.ArrowHelper(dir, origin, length, 0x3399ff);
-            arrow.userData.baseLength = length;
+            var arrow = new THREE.ArrowHelper(
+              new THREE.Vector3(1, 0, 0), origin, 0.01, 0x3399ff);
             scene.scene.add(arrow);
             windArrows.push(arrow);
           });
@@ -214,12 +211,6 @@
         .catch(function (err) {
           console.log('wind field viz load failed (non-fatal):', err);
         });
-    }
-
-    function rescaleWindArrows() {
-      windArrows.forEach(function (arrow) {
-        arrow.setLength(arrow.userData.baseLength * speedScale);
-      });
     }
 
     function resetCameraPose(tries) {
@@ -867,8 +858,11 @@
       <button onclick="changeSpeed('speed_up')">spd +</button>
       <span id="spdVal" style="text-align: center; background: rgba(0,0,0,0.5);
           color: #fff; padding: 2px 4px; border-radius: 3px;
-          font-family: monospace;">wind x1.00</span>
+          font-family: monospace;">scale x1.00</span>
       <button onclick="changeSpeed('speed_down')">spd -</button>
+      <span id="windVal" style="text-align: center; background: rgba(0,0,0,0.5);
+          color: #fff; padding: 2px 4px; border-radius: 3px;
+          font-family: monospace; white-space: pre;">wind: no data</span>
     </div>
 
     <script>
@@ -889,8 +883,42 @@
         speedScale += (cmd === 'speed_up') ? 0.25 : -0.25;
         speedScale = Math.min(3.0, Math.max(0.25, speedScale));
         document.getElementById('spdVal').textContent =
-          'wind x' + speedScale.toFixed(2);
-        rescaleWindArrows();
+          'scale x' + speedScale.toFixed(2);
+      }
+
+      // Live wind readout + arrow orientation/length, both driven by the
+      // SAME /api/wind poll (control_server.py's wind_field_node
+      // subscription) -- not the static wind_field_viz.json points or the
+      // speedScale button multiplier above, which is why those used to
+      // show a misleadingly nonzero "wind x1.00" even with no wind
+      // simulated at all. wind_field_node publishes one wind sample (at
+      // the vehicle's own position, see that node's docstring), so every
+      // arrow is set to the SAME live vector -- there's no live per-point
+      // field to draw, only the static model snapshot's arrow ORIGINS are
+      // spatial. present=false (that node isn't running) reads as an
+      // honest "wind: no data" and zero-length arrows, not a stale value.
+      function updateWind() {
+        fetch('/api/wind')
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            var el = document.getElementById('windVal');
+            if (!data.present) {
+              el.textContent = 'wind: no data';
+              windArrows.forEach(function (arrow) { arrow.setLength(0.01, 0.01, 0.01); });
+              return;
+            }
+            el.textContent = 'wind (m/s)\nx=' + data.x.toFixed(2) +
+              ' y=' + data.y.toFixed(2) + ' z=' + data.z.toFixed(2);
+            var vec = new THREE.Vector3(data.x, data.y, data.z);
+            var mag = vec.length();
+            var dir = mag > 1e-6 ? vec.clone().normalize() : new THREE.Vector3(1, 0, 0);
+            var length = Math.max(mag, 0.01) * WIND_ARROW_DISPLAY_SCALE;
+            windArrows.forEach(function (arrow) {
+              arrow.setDirection(dir);
+              arrow.setLength(length);
+            });
+          })
+          .catch(function () { /* server not up yet -- try again next poll */ });
       }
 
       // Mode 2 dual-stick input: each pad reports a normalized (x, y) in
@@ -1001,6 +1029,8 @@
       }
       updateRcStatus();
       setInterval(updateRcStatus, 500);
+      updateWind();
+      setInterval(updateWind, 500);
     </script>
   </body>
 </html>

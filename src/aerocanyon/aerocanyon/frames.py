@@ -45,6 +45,13 @@ def body_z_in_ned(q):
     return quat_to_rotmat(q) @ np.array([0.0, 0.0, 1.0])
 
 
+def yaw_from_quat(q):
+    """Heading (rad, world-NED z-axis Euler angle) from a body-to-world
+    quaternion [w, x, y, z] in this project's NED/FRD convention."""
+    w, x, y, z = np.asarray(q, dtype=float)
+    return math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+
+
 # ENU/FLU (MAVROS/ROS convention: world East-North-Up, body
 # Forward-Left-Up) <-> NED/FRD (this project's convention throughout --
 # PX4's, unchanged since this port only touches where telemetry comes

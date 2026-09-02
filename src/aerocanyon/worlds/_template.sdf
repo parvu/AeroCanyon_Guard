@@ -87,7 +87,7 @@
          is gone from this repo entirely now, so there is no reason to
          keep a second PX4-only copy of this world -- baked in directly.
          run_trial.py's SPAWN_XYZ (canyon_geometry.CANYON_ENTRY horizontal
-         position, GROUND_Z + 0.246 ground clearance) sets this pose to
+         position, GROUND_Z + 0.2 ground clearance) sets this pose to
          match. This block was previously missing from this template --
          urban_canyon.sdf had it hand-added directly, which the "never
          edit worlds/urban_canyon.sdf by hand: regenerate it" docstring in
@@ -95,7 +95,7 @@
          have silently dropped the vehicle spawn. -->
     <include>
       <uri>model://tricopter_ap</uri>
-      <pose>-100 0 74.246 0 0 0</pose>
+      <pose>-100 0 74.2 0 0 0</pose>
     </include>
   </world>
 </sdf>

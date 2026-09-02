@@ -58,6 +58,7 @@ import time
 import http.server
 
 import rclpy
+from geometry_msgs.msg import Vector3Stamped
 from mavros_msgs.msg import OverrideRCIn
 from mavros_msgs.srv import CommandBool, CommandLong
 from rclpy.node import Node
@@ -70,7 +71,7 @@ from std_msgs.msg import Float64
 # wart rather than solved properly here.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]
                        / 'src' / 'aerocanyon'))
-from aerocanyon.constants import TOPIC_WIND_SPEED_SCALE
+from aerocanyon.constants import TOPIC_WIND_SPEED_SCALE, TOPIC_WIND_TRUTH
 from aerocanyon.rc_pwm import (MODE_QHOVER, MODE_QLAND, RC_CENTER, RC_SPAN,
                                THROTTLE_MID, THROTTLE_SPAN, arm, pwm,
                                pwm_throttle, resolve_stick, set_mode)
@@ -100,6 +101,11 @@ STICK_TIMEOUT_S = 0.3
 # STICK_TIMEOUT_S on purpose -- flip to virtual sticks only on a real
 # disconnect, not a single dropped/delayed HTTP request.
 RC_PRESENT_TIMEOUT_S = 1.0
+# How long wind_field_node's last /aerocanyon/wind_truth post has to go
+# quiet before /api/wind reports "no data" instead of a stale vector --
+# that node isn't part of the manual-flight demo stack, so most sessions
+# never see this topic published at all.
+WIND_PRESENT_TIMEOUT_S = 2.0
 
 # transition_fw/transition_mc are deliberately absent: forward-flight
 # transition is out of scope for Phase 1, and ArduPilot's trigger is
@@ -138,6 +144,10 @@ class WebControlNode(Node):
         # spd+/spd- clamp, matching the browser's own mirrored copy
         # (index.html's speedScale) -- see apply_command.
         self._wind_speed_scale = 1.0
+        self._wind = (0.0, 0.0, 0.0)
+        self._wind_time = 0.0
+        self.create_subscription(
+            Vector3Stamped, TOPIC_WIND_TRUTH, self._on_wind_truth, 10)
 
         if not self.no_rc:
             self.rc_pub = self.create_publisher(
@@ -178,6 +188,21 @@ class WebControlNode(Node):
     def rc_present(self):
         with self._lock:
             return time.monotonic() - self._hw_last_seen <= RC_PRESENT_TIMEOUT_S
+
+    def _on_wind_truth(self, msg):
+        with self._lock:
+            self._wind = (msg.vector.x, msg.vector.y, msg.vector.z)
+            self._wind_time = time.monotonic()
+
+    def get_wind(self):
+        """(x, y, z) m/s ENU wind at the vehicle's position, and whether
+        wind_field_node is actually publishing it right now -- see
+        WIND_PRESENT_TIMEOUT_S. Absent that node (most manual-flight
+        sessions), this correctly reports present=False rather than a
+        stale or default value."""
+        with self._lock:
+            present = time.monotonic() - self._wind_time <= WIND_PRESENT_TIMEOUT_S
+            return self._wind, present
 
     def apply_command(self, cmd):
         if cmd == 'speed_up':
@@ -248,6 +273,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._handle_command()
         elif self.path.startswith('/api/rc_status'):
             self._handle_rc_status()
+        elif self.path.startswith('/api/wind'):
+            self._handle_wind()
         else:
             super().do_GET()
 
@@ -285,6 +312,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def _handle_rc_status(self):
         import json
         body = json.dumps({'present': self.node.rc_present()}).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_wind(self):
+        import json
+        (x, y, z), present = self.node.get_wind()
+        body = json.dumps({'x': x, 'y': y, 'z': z, 'present': present}).encode()
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Access-Control-Allow-Origin', '*')

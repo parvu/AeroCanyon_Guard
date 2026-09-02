@@ -19,7 +19,7 @@ Q-mode/VTOL navigation the whole way, never transitioning to fixed-wing.
 import numpy as np
 import rclpy
 from geometry_msgs.msg import PoseStamped, TwistStamped, Vector3Stamped
-from mavros_msgs.msg import State, Waypoint
+from mavros_msgs.msg import OverrideRCIn, State, Waypoint
 from mavros_msgs.srv import CommandBool, CommandLong, WaypointPush
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -30,9 +30,21 @@ from . import constants as C
 from . import frames
 from .cbf_filter import CBFFilter
 from .constants import MASS_KG
-from .rc_pwm import arm, set_mode
+from .rc_pwm import MODE_QSTABILIZE, arm, pwm, pwm_throttle, set_mode
 
-SETPOINTS_BEFORE_OFFBOARD = 20  # give MAVROS/ArduPilot a beat to settle before requesting anything
+# Raised from 20 -- belt-and-suspenders alongside _mission_confirmed
+# (below) for the mission-complete-instantly bug documented near
+# ENABLE_VTOL_TRANSITION. _mission_confirmed fixes the CONFIRMED
+# mechanism (AUTO engaging before the mission upload actually landed on
+# the FCU). This wider pre-arm wait guards a second, less-confirmed
+# suspect: a failed FIRST arm+AUTO attempt (generic pre-arm checks not
+# yet ready) forcing a retry ~1s later, during which AUTO mode may have
+# already taken effect from the failed attempt even though arming
+# hadn't -- the same "gap between mode-AUTO and actually armed" shape,
+# by a different route. A longer pre-arm wait makes the first attempt
+# more likely to land on an already-ready FCU, reducing (not
+# eliminating) how often that retry -- and the gap -- happens at all.
+SETPOINTS_BEFORE_OFFBOARD = 100
 ENGAGE_RETRY_TICKS = 50  # retry the mission-upload/arm+AUTO request once a second until it sticks
 MODE_AUTO = 10  # ArduPlane custom mode number, confirmed against ArduPlane/mode.h
 
@@ -61,11 +73,53 @@ CRUISE_ALT_M = 25.0
 # old position-triggered landing logic is gone; ArduPilot's own mission
 # sequencer owns arrival/landing/disarm entirely once the mission
 # reaches its NAV_VTOL_LAND item).
-LAND_CLEARANCE_M = 2.0
+LAND_CLEARANCE_M = 5.0
 _LAST_TOWER_EDGE_ENU_X = max(b.cx + b.sx / 2.0 for b in cg.BUILDINGS if b.cx > 0)
 LAND_TRIGGER_LOCAL_M = _LAST_TOWER_EDGE_ENU_X + LAND_CLEARANCE_M
 
 ENABLE_VTOL_TRANSITION = False  # unchanged -- see cbf_filter.py's own use of this flag
+
+# Four engage-sequence variants were tried live, and every one, at least
+# once, reproduced the same bug: ArduPilot marking the whole mission
+# "complete" almost instantly (confirmed via STATUSTEXT -- "Throttle
+# armed" straight to "Mission complete, changing mode to RTL", no
+# waypoint navigation in between), then RTL tries a fixed-wing transition
+# this VTOL-only airframe can never finish: (1) arm into QHOVER, climb to
+# a target altitude, then AUTO; (2) arm into QHOVER, flat hold for a
+# fixed delay, then AUTO; (3) arm into QSTABILIZE, climb, then AUTO; (4)
+# arm and set_mode(AUTO) requested together, in the same instant --
+# worked twice, failed once when a retry was needed (see
+# SETPOINTS_BEFORE_OFFBOARD above).
+#
+# The CONFIRMED root cause, found by reading _tick()'s own mission-upload
+# code: it was optimistic -- mission_uploaded was set True the instant
+# the async WaypointPush request was FIRED, not when the FCU actually
+# confirmed receiving it. If AUTO engaged before the mission had actually
+# landed, ArduPilot sees zero/partial items and instantly reports
+# "complete" -- independent of which pre-arm hold mode was used, which is
+# exactly the pattern observed across all four variants. _mission_confirmed
+# (see _tick()) now gates BOTH the QSTABILIZE-climb engage sequence below
+# and the later AUTO switch on the FCU's own WaypointPush response, not
+# just the request having been sent -- variant (3) (QSTABILIZE, climb,
+# then AUTO) is back in use at the user's request, now that the actual
+# root cause has a real fix rather than relying on engage-sequence timing
+# alone.
+QSTAB_CLIMB_ALT_M = 20.0
+QSTAB_CLIMB_THROTTLE = 0.5  # fixed climb-stick fraction, [-1, 1]
+
+# QuadPlane's own AUTO-mode navigation never turns the nose to face the
+# next waypoint outside the final landing approach -- confirmed against
+# ArduPlane/quadplane.cpp: no WP_YAW_BEHAVIOR equivalent exists for this
+# airframe type (that parameter is ArduCopter/ArduSub-only). It DOES read
+# RC yaw (rudder) input during in_vtol_auto() as long as STICK_MIXING !=
+# NONE (the SITL default, unset in tricopter.parm) -- see
+# QuadPlane::get_pilot_input_yaw_rate_cds(). So _yaw_to_target() below
+# drives a yaw-only /mavros/rc/override stream, a P controller on heading
+# error toward the mission's cruise/landing target, leaving
+# roll/pitch/throttle at CHAN_NOCHANGE so AUTO's own position/altitude
+# control is untouched.
+YAW_RATE_MAX_DEG_S = 60.0  # conservative cap, well under ACRO_YAW_RATE's 90 deg/s default
+YAW_KP = 2.0  # rad/s commanded per rad heading error -- saturates above ~30 deg error
 
 
 class ControllerNode(Node):
@@ -87,6 +141,8 @@ class ControllerNode(Node):
 
         self.tick = 0
         self.mission_uploaded = False
+        self._mission_push_future = None
+        self._mission_confirmed = False
         self.wind_est = np.zeros(3)
         self.pos = np.zeros(3)
         self.vel = np.zeros(3)
@@ -94,6 +150,11 @@ class ControllerNode(Node):
         self.wind_truth = np.zeros(3)
         self._waypoint_offset = np.zeros(2)
         self._last_offset_push_tick = 0
+        self.fcu_mode = ''
+        self._was_armed = False
+        self._mission_complete = False
+        self._engage_phase = 'preflight'  # preflight -> climbing -> auto
+        self._climb_start_down = 0.0
 
         # The CBF's stall barrier is a fixed-wing (loss-of-lift) concept
         # -- see cbf_filter.py's module docstring.
@@ -104,6 +165,7 @@ class ControllerNode(Node):
         self.arm_client = self.create_client(CommandBool, '/mavros/cmd/arming')
         self.cmd_client = self.create_client(CommandLong, '/mavros/cmd/command')
         self.mission_client = self.create_client(WaypointPush, '/mavros/mission/push')
+        self.rc_pub = self.create_publisher(OverrideRCIn, '/mavros/rc/override', 10)
 
         self.mavros_connected = False
         self.mavros_armed = False
@@ -128,6 +190,7 @@ class ControllerNode(Node):
     def _on_state(self, msg):
         self.mavros_connected = msg.connected
         self.mavros_armed = msg.armed
+        self.fcu_mode = msg.mode
 
     def _on_pose(self, msg):
         p = msg.pose.position
@@ -241,31 +304,107 @@ class ControllerNode(Node):
             self.mission_client.call_async(req)
             self._last_offset_push_tick = self.tick
 
+    def _yaw_to_target(self):
+        """Stream a yaw-only RC override toward the mission's active
+        cruise/landing target -- see the YAW_RATE_MAX_DEG_S/YAW_KP
+        comment above for why this is needed at all. Gated to
+        in_vtol_auto() (mode CMODE(MODE_AUTO)) only, matching where
+        QuadPlane actually reads pilot yaw input during a mission."""
+        if self.fcu_mode != f'CMODE({MODE_AUTO})':
+            return
+
+        entry_ned = frames.enu_to_ned(cg.CANYON_ENTRY)
+        land_ned = np.array([entry_ned[0], LAND_TRIGGER_LOCAL_M, entry_ned[2]])
+        target_ned = land_ned + np.array(
+            [self._waypoint_offset[0], self._waypoint_offset[1], 0.0])
+
+        d_north = target_ned[0] - self.pos[0]
+        d_east = target_ned[1] - self.pos[1]
+        if np.hypot(d_north, d_east) < 1.0:
+            return  # at the target -- bearing is undefined/noisy this close, hold current yaw
+
+        desired_yaw = float(np.arctan2(d_east, d_north))
+        current_yaw = frames.yaw_from_quat(self.quat)
+        yaw_err = float(np.arctan2(np.sin(desired_yaw - current_yaw),
+                                    np.cos(desired_yaw - current_yaw)))
+
+        yaw_rate_max_rad = np.radians(YAW_RATE_MAX_DEG_S)
+        yaw_rate_cmd = float(np.clip(YAW_KP * yaw_err, -yaw_rate_max_rad, yaw_rate_max_rad))
+
+        msg = OverrideRCIn()
+        channels = [OverrideRCIn.CHAN_NOCHANGE] * 18
+        channels[3] = pwm(yaw_rate_cmd / yaw_rate_max_rad, 1.0)
+        msg.channels = channels
+        self.rc_pub.publish(msg)
+
     def _tick(self):
+        # Confirm the PREVIOUS push actually landed before allowing arm+AUTO
+        # -- this used to be optimistic (mission_uploaded set the instant the
+        # async request was FIRED, not when it was confirmed). If AUTO
+        # engaged before the FCU had actually finished receiving the
+        # mission, ArduPilot sees zero/partial items and instantly reports
+        # "Mission complete, changing mode to RTL" -- confirmed as the real
+        # mechanism behind every engage-sequence variant's failure tonight,
+        # independent of which pre-arm hold mode was used.
+        if self._mission_push_future is not None and self._mission_push_future.done():
+            result = self._mission_push_future.result()
+            self._mission_push_future = None
+            if result is not None and result.success:
+                self._mission_confirmed = True
+                self.get_logger().info(f'mission confirmed ({result.wp_transfered} items)')
+            else:
+                self.mission_uploaded = False  # retry the push
+                self.get_logger().warning('mission push failed or rejected, retrying')
+
         if not self.mission_uploaded:
             since_start = self.tick - SETPOINTS_BEFORE_OFFBOARD
             if since_start >= 0 and since_start % ENGAGE_RETRY_TICKS == 0:
                 req = WaypointPush.Request()
                 req.start_index = 0
                 req.waypoints = self._build_mission()
-                self.mission_client.call_async(req)
+                self._mission_push_future = self.mission_client.call_async(req)
                 self.get_logger().info('requested mission upload')
-                # Optimistic -- the arm/engage retry below already
-                # tolerates a request landing on a not-yet-ready FCU by
-                # simply asking again, so a real ack-based state machine
-                # isn't needed here.
                 self.mission_uploaded = True
 
-        engaged = self.mavros_armed
-        since_stream_started = self.tick - SETPOINTS_BEFORE_OFFBOARD - ENGAGE_RETRY_TICKS
-        if (not engaged and since_stream_started >= 0
-                and since_stream_started % ENGAGE_RETRY_TICKS == 0):
-            set_mode(self.cmd_client, MODE_AUTO)
-            arm(self.arm_client, True)
-            self.get_logger().info('requested AUTO mode and arm')
+        was_armed = self._was_armed
+        self._was_armed = self.mavros_armed
+
+        if self._mission_complete:
+            pass  # landed and disarmed once already -- hold, don't re-arm and refly
+        elif not self.mavros_armed:
+            if was_armed:
+                # was armed last tick, not now -- that's a landing, not a
+                # dropout (nothing else disarms this vehicle mid-mission).
+                self._mission_complete = True
+                self.get_logger().info('mission complete (landed and disarmed) -- holding')
+                self._engage_phase = 'preflight'
+            elif self._mission_confirmed and self._engage_phase == 'preflight':
+                since_stream_started = self.tick - SETPOINTS_BEFORE_OFFBOARD - ENGAGE_RETRY_TICKS
+                if (since_stream_started >= 0
+                        and since_stream_started % ENGAGE_RETRY_TICKS == 0):
+                    set_mode(self.cmd_client, MODE_QSTABILIZE)
+                    arm(self.arm_client, True)
+                    self.get_logger().info('requested QSTABILIZE mode and arm')
+        elif self._engage_phase == 'preflight':
+            self._engage_phase = 'climbing'
+            self._climb_start_down = self.pos[2]
+        elif self._engage_phase == 'climbing':
+            climbed_m = self._climb_start_down - self.pos[2]  # NED down decreases while climbing
+            if climbed_m >= QSTAB_CLIMB_ALT_M:
+                set_mode(self.cmd_client, MODE_AUTO)
+                self._engage_phase = 'auto'
+                self.get_logger().info(f'climbed {climbed_m:.1f}m, switching to AUTO')
+            else:
+                msg = OverrideRCIn()
+                channels = [OverrideRCIn.CHAN_NOCHANGE] * 18
+                channels[2] = pwm_throttle(QSTAB_CLIMB_THROTTLE, 1.0)
+                msg.channels = channels
+                self.rc_pub.publish(msg)
 
         if self.mode == 'treatment':
             self._treatment_tick()
+
+        self._yaw_to_target()
 
         self.tick += 1
 

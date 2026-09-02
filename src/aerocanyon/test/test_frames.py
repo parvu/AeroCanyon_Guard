@@ -6,7 +6,7 @@ import pytest
 
 from aerocanyon.frames import (enu_flu_quat_to_ned_frd,
                                enu_flu_rate_to_ned_frd, ned_to_latlon,
-                               quat_mul)
+                               quat_mul, yaw_from_quat)
 
 
 def test_quat_mul_identity():
@@ -64,6 +64,15 @@ def test_ned_to_latlon_east_offset_increases_longitude():
     lat, lon = ned_to_latlon(np.array([0.0, 100.0, 0.0]), 44.0, 26.0)
     assert lon > 26.0
     assert lat == pytest.approx(44.0, abs=1e-6)
+
+
+def test_yaw_from_quat_identity_is_zero():
+    assert yaw_from_quat([1.0, 0.0, 0.0, 0.0]) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_yaw_from_quat_90_degrees():
+    q90 = [np.cos(np.pi / 4), 0.0, 0.0, np.sin(np.pi / 4)]
+    assert yaw_from_quat(q90) == pytest.approx(np.pi / 2, abs=1e-6)
 
 
 def test_ned_to_latlon_matches_known_scale():

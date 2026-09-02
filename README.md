@@ -111,7 +111,8 @@ wrong here.
 The default manual-flight world is `src/aerocanyon/worlds/map_zone_ap.sdf`:
 a real-world OSM-derived 3D terrain model of the Politehnica/AFI area of
 Bucharest (`src/aerocanyon/map_zone/`), matching this project's `--home`
-coordinates below, with the tricopter spawned 75 m above it.
+coordinates below, with the tricopter spawned at z=74.2m, 0.2m above the
+terrain's z=74 ground level.
 
 ```bash
 # Terminal 1: Gazebo (headless -- no native GUI needed for the browser viewer below)
@@ -130,7 +131,7 @@ sleep 5
 # lists --defaults). mavproxy.py is not installed/required.
 mkdir -p /tmp/apstate && cd /tmp/apstate
 $HOME/ardupilot/build/sitl/bin/arduplane --model JSON \
-  --home 44.434424990487216,26.04781615647584,76,0 \
+  --home 44.434424990487216,26.04781615647584,74,0 \
   --wipe --defaults $HOME/AeroCanyon_Guard/src/aerocanyon/ardupilot/tricopter.parm &
 sleep 10
 
