@@ -6,21 +6,25 @@ px4_teleop/teleop_keyboard.py: stream setpoints for a beat BEFORE
 requesting offboard mode, because PX4 rejects the mode switch if no
 setpoint stream is already present.
 """
+import math
+
 import numpy as np
 import rclpy
-from geometry_msgs.msg import Vector3Stamped
-from px4_msgs.msg import (OffboardControlMode, TrajectorySetpoint,
-                          VehicleAttitude, VehicleCommand,
-                          VehicleLocalPosition, VehicleStatus,
-                          VtolVehicleStatus)
+from geometry_msgs.msg import PoseStamped, TwistStamped, Vector3Stamped
+from mavros_msgs.msg import OverrideRCIn, State
+from mavros_msgs.srv import CommandBool, CommandLong
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Imu
 
 from . import canyon_geometry as cg
 from . import constants as C
+from . import frames
 from .cbf_filter import CBFFilter
 from .constants import MASS_KG
 from .mission import Mission
+from .rc_pwm import (MODE_QHOVER, MODE_QLAND, arm, pwm, pwm_throttle,
+                     resolve_stick, set_mode)
 
 SETPOINTS_BEFORE_OFFBOARD = 20  # PX4 needs an existing stream to accept the mode
 ENGAGE_RETRY_TICKS = 50  # retry the arm+offboard request once a second until it sticks
@@ -171,8 +175,6 @@ class ControllerNode(Node):
             self.mission.direction[1], self.mission.direction[0]))
         self.tick = 0
         self.start_time = None
-        self.armed = False
-        self.offboard_engaged = False
         self.vtol_transitioned = False
         self.land_requested = False
         self.done_logged = False
@@ -192,70 +194,53 @@ class ControllerNode(Node):
         self.cbf_pub = self.create_publisher(
             Vector3Stamped, C.TOPIC_CBF_DIAG, 10)
 
-        self.sp_pub = self.create_publisher(
-            TrajectorySetpoint, '/fmu/in/trajectory_setpoint', 10)
-        self.mode_pub = self.create_publisher(
-            OffboardControlMode, '/fmu/in/offboard_control_mode', 10)
-        self.cmd_pub = self.create_publisher(
-            VehicleCommand, '/fmu/in/vehicle_command', 10)
+        self.rc_pub = self.create_publisher(OverrideRCIn, '/mavros/rc/override', 10)
+        self.arm_client = self.create_client(CommandBool, '/mavros/cmd/arming')
+        self.cmd_client = self.create_client(CommandLong, '/mavros/cmd/command')
         self.desired_pub = self.create_publisher(
             Vector3Stamped, C.TOPIC_SETPOINT_DESIRED, 10)
 
+        self.mavros_connected = False
+        self.mavros_armed = False
+
         self.create_subscription(
-            VehicleLocalPosition, '/fmu/out/vehicle_local_position_v1',
-            self._on_position, qos_profile_sensor_data)
+            State, '/mavros/state', self._on_state, 10)
         self.create_subscription(
-            VehicleStatus, '/fmu/out/vehicle_status_v4',
-            self._on_status, qos_profile_sensor_data)
+            PoseStamped, '/mavros/local_position/pose',
+            self._on_pose, qos_profile_sensor_data)
+        self.create_subscription(
+            TwistStamped, '/mavros/local_position/velocity_local',
+            self._on_velocity, qos_profile_sensor_data)
+        self.create_subscription(
+            Imu, '/mavros/imu/data', self._on_imu, qos_profile_sensor_data)
         self.create_subscription(
             Vector3Stamped, C.TOPIC_WIND_EST, self._on_wind_est, 10)
-        self.create_subscription(
-            VehicleAttitude, '/fmu/out/vehicle_attitude',
-            self._on_attitude, qos_profile_sensor_data)
         self.create_subscription(
             Vector3Stamped, C.TOPIC_WIND_TRUTH, self._on_wind_truth, 10)
 
         self.create_timer(1.0 / C.CONTROL_HZ, self._tick)
 
-    def _on_position(self, msg):
-        self.pos = np.array([msg.x, msg.y, msg.z])
-        self.vel = np.array([msg.vx, msg.vy, msg.vz])
+    def _on_state(self, msg):
+        self.mavros_connected = msg.connected
+        self.mavros_armed = msg.armed
 
-    def _on_status(self, msg):
-        self.armed = msg.arming_state == VehicleStatus.ARMING_STATE_ARMED
-        self.offboard_engaged = msg.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD
+    def _on_pose(self, msg):
+        p = msg.pose.position
+        self.pos = frames.enu_to_ned([p.x, p.y, p.z])
+
+    def _on_velocity(self, msg):
+        v = msg.twist.linear
+        self.vel = frames.enu_to_ned([v.x, v.y, v.z])
+
+    def _on_imu(self, msg):
+        q = msg.orientation
+        self.quat = frames.enu_flu_quat_to_ned_frd([q.w, q.x, q.y, q.z])
 
     def _on_wind_est(self, msg):
         self.wind_est = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
 
-    def _on_attitude(self, msg):
-        self.quat = np.array([msg.q[0], msg.q[1], msg.q[2], msg.q[3]])
-
     def _on_wind_truth(self, msg):
         self.wind_truth = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
-
-    def _send_command(self, command, param1=0.0, param2=0.0):
-        msg = VehicleCommand()
-        msg.command = command
-        msg.param1 = param1
-        msg.param2 = param2
-        msg.target_system = 1
-        msg.target_component = 1
-        msg.source_system = 1
-        msg.source_component = 1
-        msg.from_external = True
-        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        self.cmd_pub.publish(msg)
-
-    def _publish_offboard_mode(self):
-        msg = OffboardControlMode()
-        msg.position = True
-        msg.velocity = False
-        msg.acceleration = True
-        msg.attitude = False
-        msg.body_rate = False
-        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        self.mode_pub.publish(msg)
 
     def _tick(self):
         if self.land_requested:
