@@ -13,10 +13,9 @@ parameter_bridge; the node publishes to Gazebo directly via gz.transport13.
 """
 import numpy as np
 import rclpy
-from geometry_msgs.msg import Vector3Stamped
+from geometry_msgs.msg import PoseStamped, TwistStamped, Vector3Stamped
 from gz.msgs10.wind_pb2 import Wind
 from gz.transport13 import Node as GzNode
-from px4_msgs.msg import VehicleLocalPosition
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 
@@ -60,8 +59,11 @@ class WindFieldNode(Node):
         self.airspeed = 1.0
 
         self.create_subscription(
-            VehicleLocalPosition, '/fmu/out/vehicle_local_position_v1',
-            self._on_position, qos_profile_sensor_data)
+            PoseStamped, '/mavros/local_position/pose',
+            self._on_pose, qos_profile_sensor_data)
+        self.create_subscription(
+            TwistStamped, '/mavros/local_position/velocity_local',
+            self._on_velocity, qos_profile_sensor_data)
 
         self.truth_pub = self.create_publisher(
             Vector3Stamped, C.TOPIC_WIND_TRUTH, 10)
@@ -71,10 +73,17 @@ class WindFieldNode(Node):
 
         self.create_timer(dt, self._tick)
 
-    def _on_position(self, msg):
-        # PX4 local position is NED; the grid is ENU.
-        self.pos_enu = frames.ned_to_enu(np.array([msg.x, msg.y, msg.z]))
-        self.airspeed = float(np.linalg.norm([msg.vx, msg.vy, msg.vz]))
+    def _on_pose(self, msg):
+        # MAVROS publishes local_position in ENU directly (ROS convention)
+        # -- the grid is also ENU, so no frame conversion needed here at
+        # all (unlike controller_node.py, which converts to NED for its
+        # own NED-frame math).
+        p = msg.pose.position
+        self.pos_enu = np.array([p.x, p.y, p.z])
+
+    def _on_velocity(self, msg):
+        v = msg.twist.linear
+        self.airspeed = float(np.linalg.norm([v.x, v.y, v.z]))
 
     def _tick(self):
         wind_enu = self.grid.at(self.pos_enu) + self.gust.step(self.airspeed)
