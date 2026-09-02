@@ -41,3 +41,46 @@ def body_z_in_ned(q):
     Thrust acts along body -z, so thrust in NED is -T * body_z_in_ned(q).
     """
     return quat_to_rotmat(q) @ np.array([0.0, 0.0, 1.0])
+
+
+# ENU/FLU (MAVROS/ROS convention: world East-North-Up, body
+# Forward-Left-Up) <-> NED/FRD (this project's convention throughout --
+# PX4's, unchanged since this port only touches where telemetry comes
+# from, not how mission.py/cbf_filter.py/fo_pinn.py interpret it).
+#
+# Sourced from MAVROS's own internal conversion (mavros/src/lib/
+# ftf_frame_conversions.cpp: NED_ENU_Q, AIRCRAFT_BASELINK_Q) rather than
+# derived from scratch -- this exact sandwich transform is already
+# proven correct in MAVROS's own NED-convention topics, and a
+# from-scratch derivation is exactly the kind of stray-sign-flip risk
+# this file's own docstring warns about.
+_NED_ENU_Q = np.array([0.0, 0.70710678, 0.70710678, 0.0])       # world: 180 deg about (1,1,0)/sqrt(2)
+_AIRCRAFT_BASELINK_Q = np.array([0.0, 1.0, 0.0, 0.0])            # body: 180 deg about x
+
+
+def quat_mul(q1, q2):
+    """Hamilton product of two [w, x, y, z] quaternions."""
+    w1, x1, y1, z1 = np.asarray(q1, dtype=float)
+    w2, x2, y2, z2 = np.asarray(q2, dtype=float)
+    return np.array([
+        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+    ])
+
+
+def enu_flu_quat_to_ned_frd(q):
+    """MAVROS's world-ENU/body-FLU orientation quaternion [w,x,y,z] ->
+    this project's world-NED/body-FRD convention."""
+    return quat_mul(quat_mul(_NED_ENU_Q, np.asarray(q, dtype=float)),
+                    _AIRCRAFT_BASELINK_Q)
+
+
+def enu_flu_rate_to_ned_frd(v):
+    """Body-frame FLU rate (angular velocity or linear acceleration,
+    [x,y,z]) -> body-frame FRD. No rotation matrix needed -- this is a
+    body-axis relabelling (forward stays forward; left/up flip to
+    right/down), not a world-frame rotation."""
+    x, y, z = np.asarray(v, dtype=float)
+    return np.array([x, -y, -z])
