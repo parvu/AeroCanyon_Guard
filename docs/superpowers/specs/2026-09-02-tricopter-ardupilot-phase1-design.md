@@ -55,28 +55,41 @@ started only after Phase 1 lands and is verified.
 ## earlier guess in this doc or in PX4-side comments about "all three tilt
 ## the same way")
 
-- **Front motors** (the pair): tilt **-20 deg to +90 deg**, where 90 deg
-  is the horizontal axis (thrust pointing forward) and 0 deg is vertical
-  (hover). The **-20..0 deg range is dedicated to yaw trim** (differential
-  tilt past vertical, same purpose as the PX4 branch's negative-range
-  extension) -- it is not used in the hover-to-cruise transition itself.
-  **In forward/cruise flight the front motors fully stop and fold their
-  propeller blades** -- they contribute zero thrust in cruise.
-- **Rear motor**: a pusher with a **high-pitch propeller** (sized for
-  cruise efficiency, not hover). Tilts in the vertical plane from
-  **-90 deg (vertical/hover) to 0 deg (horizontal/cruise)** -- note this
-  is the opposite sign convention from the front pair's range, and covers
-  a different span (90 deg total, no yaw-trim-only sub-range). **It is
-  the only thruster active in forward/cruise flight.**
+Both motors' tilt sits on **one shared, continuous angle axis** (not two
+independent conventions as an earlier version of this doc described) --
+90 deg is the single common reference point, horizontal, where the two
+ranges meet:
 
-This means the tricopter has **two structurally different tilt roles**,
-not one uniform "all rotors tilt together" mechanism:
-- Front pair: classic tiltrotor-with-fold -- vertical for hover (plus a
-  small negative range purely for yaw trim, never reached during an
-  actual hover-to-cruise transition), full stop+fold at the forward end.
-- Rear: an always-active tilting pusher, tilts through its own separate
-  range, contributes hover thrust throughout and is the sole cruise
-  thruster -- never stops.
+- **Front motors** (the pair): **-20 deg to 90 deg**. 0 deg is vertical
+  (hover); 90 deg is horizontal, pointing forward. The **-20..0 deg
+  range is dedicated to yaw trim** (differential tilt past vertical) --
+  it is not used in the hover-to-cruise transition itself, only in
+  hover. **In forward/cruise flight the front motors fully stop and fold
+  their propeller blades** -- they contribute zero thrust in cruise, so
+  they never actually operate AT the 90 deg end of their own range.
+- **Rear motor**: a pusher with a **high-pitch propeller** (sized for
+  cruise efficiency, not hover). **90 deg to 180 deg**, continuing the
+  SAME axis past the shared horizontal reference: 90 deg is horizontal
+  (pointing aft, pusher/cruise orientation -- opposite direction from the
+  front pair's 90 deg, since the rear nacelle faces backward), 180 deg is
+  vertical/hover -- the mirror of the front pair's own 0 deg, 90 deg away
+  from the shared horizontal reference on the other side. **It is the
+  only thruster active in forward/cruise flight, and never stops.**
+
+So the full physical range is a single -20..180 deg sweep: front owns
+the low end (-20..90), rear owns the high end (90..180), and both
+motors' "vertical/hover" position sits exactly 90 deg from the shared
+"horizontal" reference point they touch at -- just on opposite sides,
+matching each nacelle's opposite mounted-facing direction (front faces
+forward, rear faces backward).
+
+This is still **two structurally different tilt roles sharing one axis**,
+not one uniform "all rotors move identically" mechanism -- front stops
++ folds at its end of the range and has an extra yaw-trim sub-range the
+rear doesn't; rear never stops and is the sole forward-flight thruster.
+But a single shared axis/reference point is a much more promising fit
+for ArduPilot's tiltrotor mixer than two unrelated conventions would be
+-- see the spike below.
 
 ## Open risk, resolved first
 
@@ -92,13 +105,22 @@ needs its own independent tilt range/schedule.
 **First implementation step, before any other Phase 1 work:** a bounded
 spike investigating how ArduPilot actually models this, in order of
 preference:
-1. Whether `Q_TILT_MASK` supports per-motor tilt angle limits/roles (so
-   front and rear can have different ranges/behavior within one masked
-   group), via SITL param inspection and ArduPilot's own tiltrotor
-   source (`AP_MotorsTiltrotor`), not just the docs page.
-2. Whether the rear pusher should instead be modeled OUTSIDE
-   `Q_TILT_MASK` entirely -- e.g. a plain always-on motor with its own
-   tilt servo driven independently (`SERVOn_FUNCTION`), decoupled from
+1. **Concrete hypothesis worth testing first**, suggested by the shared
+   axis above: ArduPilot's tiltrotor mixer likely outputs one normalized
+   hover-to-cruise transition value to every `Q_TILT_MASK` motor, and
+   each physical tilt servo's own `SERVOn_MIN`/`SERVOn_MAX` (and
+   `SERVOn_REVERSED` if needed) calibration maps that shared value to
+   real degrees independently per channel. If so, front and rear CAN
+   both be in `Q_TILT_MASK` together: front's servo calibrated so the
+   transition sweeps its 0->90 deg, rear's calibrated (reversed) so the
+   same transition value sweeps its 180->90 deg. Verify this against
+   ArduPilot's own tiltrotor source (`AP_MotorsTiltrotor`), not just the
+   docs page, before relying on it -- this is a plausible read of how
+   the params fit together, not a confirmed fact.
+2. If (1) doesn't hold, whether the rear pusher should instead be
+   modeled OUTSIDE `Q_TILT_MASK` entirely -- e.g. a plain always-on motor
+   with its own tilt servo driven independently (`SERVOn_FUNCTION`) or
+   custom scripting, decoupled from
    ArduPilot's tiltrotor transition state machine, while only the front
    pair is a `Q_TILT_MASK` tiltrotor group.
 3. If neither cleanly represents the real geometry, document the closest
