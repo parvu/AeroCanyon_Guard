@@ -61,6 +61,7 @@ import rclpy
 from mavros_msgs.msg import OverrideRCIn
 from mavros_msgs.srv import CommandBool, CommandLong
 from rclpy.node import Node
+from std_msgs.msg import Float64
 
 # rc_pwm.py lives in the aerocanyon ROS2 package, not on web_viewer's own
 # path -- web_viewer/ is a standalone script directory (Phase 1), not a
@@ -69,6 +70,7 @@ from rclpy.node import Node
 # wart rather than solved properly here.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]
                        / 'src' / 'aerocanyon'))
+from aerocanyon.constants import TOPIC_WIND_SPEED_SCALE
 from aerocanyon.rc_pwm import (MODE_QHOVER, MODE_QLAND, RC_CENTER, RC_SPAN,
                                THROTTLE_MID, THROTTLE_SPAN, arm, pwm,
                                pwm_throttle, resolve_stick, set_mode)
@@ -76,7 +78,15 @@ from aerocanyon.rc_pwm import (MODE_QHOVER, MODE_QLAND, RC_CENTER, RC_SPAN,
 # anymore (rc_pwm.pwm/pwm_throttle own that math now) but stay imported
 # here -- test_control_server.py imports them from this module by name.
 
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
+# --no-rc: skip the RC-override publishing entirely (arm/mode/land too --
+# they'd fight controller_node's own MAVROS calls just as much as RC would).
+# run_trial.py spawns this mode alongside an autonomous leg so the browser's
+# spd+/spd- buttons (now wind medium-speed, not stick sensitivity -- see
+# apply_command) still work to watch a demo live; the normal (RC-publishing)
+# mode remains "fly it by hand" only, per the module docstring above.
+NO_RC = '--no-rc' in sys.argv
+_port_args = [a for a in sys.argv[1:] if not a.startswith('--')]
+PORT = int(_port_args[0]) if _port_args else 8080
 CONTROL_HZ = 50
 # Mode 2 RC sticks are proportional and self-centering -- the browser
 # streams the live stick position continuously (see index.html) rather
@@ -120,14 +130,22 @@ def stick_to_rc(stick, scale):
 
 class WebControlNode(Node):
 
-    def __init__(self):
+    def __init__(self, no_rc=False):
         super().__init__('web_control_server')
-        self.rc_pub = self.create_publisher(
-            OverrideRCIn, '/mavros/rc/override', 10)
-        self.arm_client = self.create_client(CommandBool, '/mavros/cmd/arming')
-        # /mavros/set_mode can't be used here -- see the module docstring,
-        # point 2 (MAV_TYPE 21 is missing from MAVROS's mode tables).
-        self.cmd_client = self.create_client(CommandLong, '/mavros/cmd/command')
+        self.no_rc = no_rc
+        self.wind_speed_pub = self.create_publisher(
+            Float64, TOPIC_WIND_SPEED_SCALE, 10)
+        # spd+/spd- clamp, matching the browser's own mirrored copy
+        # (index.html's speedScale) -- see apply_command.
+        self._wind_speed_scale = 1.0
+
+        if not self.no_rc:
+            self.rc_pub = self.create_publisher(
+                OverrideRCIn, '/mavros/rc/override', 10)
+            self.arm_client = self.create_client(CommandBool, '/mavros/cmd/arming')
+            # /mavros/set_mode can't be used here -- see the module docstring,
+            # point 2 (MAV_TYPE 21 is missing from MAVROS's mode tables).
+            self.cmd_client = self.create_client(CommandLong, '/mavros/cmd/command')
 
         self._lock = threading.Lock()
         # Mode 2: left stick = yaw (x) + throttle/climb (y), right stick =
@@ -143,10 +161,10 @@ class WebControlNode(Node):
         # fighting/resetting the other source's still-live ones.
         self._stick = {'yaw': 0.0, 'throttle': 0.0, 'roll': 0.0, 'pitch': 0.0}
         self._stick_time = {'yaw': 0.0, 'throttle': 0.0, 'roll': 0.0, 'pitch': 0.0}
-        self._speed_scale = 1.0
         self._hw_last_seen = 0.0
 
-        self.create_timer(1.0 / CONTROL_HZ, self._tick)
+        if not self.no_rc:
+            self.create_timer(1.0 / CONTROL_HZ, self._tick)
 
     def set_stick(self, hw=False, **axes):
         now = time.monotonic()
@@ -164,11 +182,20 @@ class WebControlNode(Node):
     def apply_command(self, cmd):
         if cmd == 'speed_up':
             with self._lock:
-                self._speed_scale = min(3.0, self._speed_scale + 0.25)
+                self._wind_speed_scale = min(3.0, self._wind_speed_scale + 0.25)
+                scale = self._wind_speed_scale
+            self.wind_speed_pub.publish(Float64(data=scale))
             return
         if cmd == 'speed_down':
             with self._lock:
-                self._speed_scale = max(0.25, self._speed_scale - 0.25)
+                self._wind_speed_scale = max(0.25, self._wind_speed_scale - 0.25)
+                scale = self._wind_speed_scale
+            self.wind_speed_pub.publish(Float64(data=scale))
+            return
+        if self.no_rc:
+            # arm/disarm/land go through controller_node's own MAVROS
+            # calls during an autonomous leg -- this server (--no-rc) only
+            # owns wind-speed control then, see the module docstring.
             return
         if cmd == 'arm':
             # Mode first, then arm -- the same ordering the PX4 version used,
@@ -184,15 +211,16 @@ class WebControlNode(Node):
         now = time.monotonic()
         with self._lock:
             stick = resolve_stick(self._stick, self._stick_time, now, STICK_TIMEOUT_S)
-            scale = self._speed_scale
 
         # QHOVER interprets these in the vehicle's own body frame and holds
         # altitude at centred throttle, so there's no attitude maths to do
         # here any more (the PX4 version rotated a world-frame velocity by
         # the current yaw itself). A stale/centred stick lands on 1500 on
         # every axis, i.e. hold attitude and hold altitude -- the correct
-        # RC-failsafe reading of the dead-man's switch.
-        roll, pitch, throttle, yaw = stick_to_rc(stick, scale)
+        # RC-failsafe reading of the dead-man's switch. Fixed scale=1.0 --
+        # spd+/spd- now mean wind medium speed (apply_command), not stick
+        # sensitivity.
+        roll, pitch, throttle, yaw = stick_to_rc(stick, 1.0)
 
         msg = OverrideRCIn()
         channels = [OverrideRCIn.CHAN_NOCHANGE] * 18
@@ -288,13 +316,13 @@ def main(args=None):
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
     rclpy.init(args=args)
-    node = WebControlNode()
+    node = WebControlNode(no_rc=NO_RC)
     Handler.node = node
 
     server = http.server.ThreadingHTTPServer(('0.0.0.0', PORT), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    print(f"control_server ready on 0.0.0.0:{PORT} "
-          f"(static files + /api/manual)")
+    mode_desc = 'wind-speed-only, no RC' if NO_RC else 'static files + /api/manual'
+    print(f"control_server ready on 0.0.0.0:{PORT} ({mode_desc})")
 
     try:
         rclpy.spin(node)

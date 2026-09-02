@@ -184,24 +184,28 @@ def _spawn_web_bridge():
 
 
 def _spawn_static_server():
-    """Plain static file server for web_viewer/ -- deliberately NOT
-    control_server.py: that one also runs an rclpy node continuously
-    publishing OffboardControlMode/TrajectorySetpoint, which would fight
-    controller_node's own real offboard stream for control authority
+    """Static file server for web_viewer/, plus the wind-speed-only
+    control endpoint (control_server.py --no-rc, see that module's own
+    docstring) so the browser's spd+/spd- buttons ("wind medium speed")
+    work live while watching an autonomous leg. Not full control_server.py
+    -- that publishes RC overrides continuously, which would fight
+    controller_node's own /mavros/rc/override calls for control authority
     during an actual trial (see README's warning against running it
-    alongside one). This has zero ROS2 involvement, just serves
-    index.html/gz3d.js/results.html, so it's safe to run for the whole
-    trial's lifetime -- started once here, not per leg like the web
-    bridge above, and deliberately never killed by this script: it needs
-    to keep serving results.html after main() itself has returned, and
-    os.setsid (see _spawn) already detaches it from this process's own
-    lifetime. Kills any previous instance on the same port first so
-    re-running this script doesn't pile up orphaned servers fighting
-    over WEBVIEW_PORT."""
+    alongside one); --no-rc skips exactly that part while keeping the
+    static files and the (now RC-free) speed_up/speed_down handling.
+    Safe to run for the whole trial's lifetime -- started once here, not
+    per leg like the web bridge above, and deliberately never killed by
+    this script: it needs to keep serving results.html after main()
+    itself has returned, and os.setsid (see _spawn) already detaches it
+    from this process's own lifetime. Kills any previous instance on the
+    same port first so re-running this script doesn't pile up orphaned
+    servers fighting over WEBVIEW_PORT."""
     subprocess.run(['pkill', '-f', f'http.server {WEBVIEW_PORT}'],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(['pkill', '-f', f'control_server.py {WEBVIEW_PORT} --no-rc'],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(1)
-    return _spawn(f'{sys.executable} -m http.server {WEBVIEW_PORT}',
+    return _spawn(f'{sys.executable} control_server.py {WEBVIEW_PORT} --no-rc',
                   cwd=WEB_VIEWER)
 
 

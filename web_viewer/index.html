@@ -146,6 +146,7 @@
       })(20);
 
       resetCameraPose();
+      loadWindField();
 
       // And sun orientation
       /*const sunLight = scene.scene.getObjectByName('sun').children[0];
@@ -165,6 +166,51 @@
       obj.updateMatrix();
       scene.add(obj);
       */
+    }
+
+    // Sparse wind vector field, downsampled server-side (see
+    // aerocanyon.export_wind_viz -- the full grid is 57,600 cells, far
+    // too many to render individually) into wind_field_viz.json: a flat
+    // list of {p: [ENU x,y,z], v: [ENU wind vx,vy,vz]} points, already in
+    // the same ENU world frame this scene renders everything else in, no
+    // conversion needed. Arrow lengths rescale live with the spd+/spd-
+    // buttons (see changeSpeed) -- windSpeedScale mirrors the SAME
+    // /aerocanyon/wind_speed_scale value control_server.py publishes
+    // server-side (into wind_field_node.py, which actually drives the
+    // simulated wind), so what's drawn tracks what's simulated.
+    var windArrows = [];
+    // speedScale (declared with the spd+/spd- buttons, below) is reused
+    // here rather than duplicated -- same value, same meaning.
+    // Arrows are drawn short relative to their raw m/s magnitude (a
+    // ~10 m/s mean flow as a 10-unit-long arrow would dwarf the ~150 m
+    // wide canyon scene) -- this is a display scale only, independent of
+    // windSpeedScale, which is the actual simulated-speed multiplier.
+    var WIND_ARROW_DISPLAY_SCALE = 0.6;
+
+    function loadWindField() {
+      fetch('wind_field_viz.json').then(function (r) { return r.json(); })
+        .then(function (data) {
+          data.points.forEach(function (pt) {
+            var origin = new THREE.Vector3(pt.p[0], pt.p[1], pt.p[2]);
+            var vec = new THREE.Vector3(pt.v[0], pt.v[1], pt.v[2]);
+            var mag = vec.length();
+            var dir = mag > 1e-6 ? vec.clone().normalize() : new THREE.Vector3(1, 0, 0);
+            var length = Math.max(mag, 0.01) * WIND_ARROW_DISPLAY_SCALE;
+            var arrow = new THREE.ArrowHelper(dir, origin, length, 0x3399ff);
+            arrow.userData.baseLength = length;
+            scene.scene.add(arrow);
+            windArrows.push(arrow);
+          });
+        })
+        .catch(function (err) {
+          console.log('wind field viz load failed (non-fatal):', err);
+        });
+    }
+
+    function rescaleWindArrows() {
+      windArrows.forEach(function (arrow) {
+        arrow.setLength(arrow.userData.baseLength * speedScale);
+      });
     }
 
     function resetCameraPose(tries) {
@@ -812,7 +858,7 @@
       <button onclick="changeSpeed('speed_up')">spd +</button>
       <span id="spdVal" style="text-align: center; background: rgba(0,0,0,0.5);
           color: #fff; padding: 2px 4px; border-radius: 3px;
-          font-family: monospace;">1.00 m/s</span>
+          font-family: monospace;">wind x1.00</span>
       <button onclick="changeSpeed('speed_down')">spd -</button>
     </div>
 
@@ -820,15 +866,22 @@
       function manualCmd(cmd) {
         fetch('/api/manual?cmd=' + cmd);
       }
-      // Client-side mirror of control_server.py's speed_scale
-      // (MAX_VELOCITY_MPS 1.0, step 0.25, clamp [0.25, 3.0]).
+      // spd+/spd- now mean wind medium (mean-flow) speed, not manual-stick
+      // sensitivity -- server-side, apply_command publishes this same
+      // scale to /aerocanyon/wind_speed_scale, which wind_field_node.py
+      // multiplies its steady grid lookup by (gusts are unaffected, see
+      // that node). This is a client-side mirror of the same clamp/step
+      // (step 0.25, clamp [0.25, 3.0]) purely for the label and the wind
+      // arrows' rescaling (rescaleWindArrows) -- the actual simulated
+      // wind is whatever the server-side value lands on.
       var speedScale = 1.0;
       function changeSpeed(cmd) {
         manualCmd(cmd);
         speedScale += (cmd === 'speed_up') ? 0.25 : -0.25;
         speedScale = Math.min(3.0, Math.max(0.25, speedScale));
         document.getElementById('spdVal').textContent =
-          speedScale.toFixed(2) + ' m/s';
+          'wind x' + speedScale.toFixed(2);
+        rescaleWindArrows();
       }
 
       // Mode 2 dual-stick input: each pad reports a normalized (x, y) in

@@ -18,6 +18,7 @@ from gz.msgs10.wind_pb2 import Wind
 from gz.transport13 import Node as GzNode
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from std_msgs.msg import Float64
 
 from . import constants as C
 from . import frames
@@ -57,6 +58,17 @@ class WindFieldNode(Node):
 
         self.pos_enu = np.zeros(3)
         self.airspeed = 1.0
+        # Live-adjustable multiplier on the STEADY mean-flow grid lookup
+        # only -- gusts (self.gust, above) stay at their own configured
+        # turbulence_sigma regardless. Real request: the browser's
+        # spd+/spd- buttons ("wind medium speed") drive this, via
+        # /aerocanyon/wind_speed_scale -- see control_server.py's
+        # --no-rc mode, which is what actually runs alongside an
+        # autonomous run_trial.py leg (the normal RC-publishing mode
+        # would fight controller_node for /mavros/rc/override).
+        self.wind_speed_scale = 1.0
+        self.create_subscription(
+            Float64, C.TOPIC_WIND_SPEED_SCALE, self._on_speed_scale, 10)
 
         self.create_subscription(
             PoseStamped, '/mavros/local_position/pose',
@@ -85,8 +97,12 @@ class WindFieldNode(Node):
         v = msg.twist.linear
         self.airspeed = float(np.linalg.norm([v.x, v.y, v.z]))
 
+    def _on_speed_scale(self, msg):
+        self.wind_speed_scale = float(msg.data)
+
     def _tick(self):
-        wind_enu = self.grid.at(self.pos_enu) + self.gust.step(self.airspeed)
+        wind_enu = (self.grid.at(self.pos_enu) * self.wind_speed_scale
+                   + self.gust.step(self.airspeed))
 
         msg = Wind()
         msg.linear_velocity.x = float(wind_enu[0])

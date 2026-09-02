@@ -25,6 +25,7 @@ TOPIC_WIND_TRUTH = '/aerocanyon/wind_truth'
 TOPIC_WIND_EST = '/aerocanyon/wind_estimate'
 TOPIC_CBF_DIAG = '/aerocanyon/cbf_diagnostics'
 TOPIC_SETPOINT_DESIRED = '/aerocanyon/setpoint_desired'
+TOPIC_WIND_SPEED_SCALE = '/aerocanyon/wind_speed_scale'
 
 GZ_WIND_TOPIC = f'/world/{WORLD_NAME}/wind'
 
