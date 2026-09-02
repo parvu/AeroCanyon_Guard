@@ -71,6 +71,23 @@ Q_A_RAT_YAW_P     0.16
 Q_A_RAT_YAW_I     0.027
 Q_A_RAT_YAW_D     0.004
 
+# --- Q-mode attitude limit (Phase 2 gain-tuning pass) ---
+# Q_A_ANGLE_MAX (AC_AttitudeControl's ANGLE_MAX, exposed here under the
+# Q_ group; stored in plain DEGREES -- confirmed against
+# AC_AttitudeControl.cpp's own @Units: deg and the _angle_max_deg field
+# name, not centidegrees) defaults to 30 degrees -- the actual
+# lean-angle ceiling full RC stick deflection commands in QHOVER.
+# controller_node.py's own lean commands were found (live) to already
+# saturate full stick well before this limit even mattered (the desired
+# lean from a large position error is tens of degrees, clipped to +-1
+# regardless of the Python-side MAX_LEAN_RAD normalization constant) --
+# so the achievable cruise speed (~5 m/s observed, against the mission's
+# 12 m/s target) is bounded by THIS parameter, not by anything on the
+# Python side. Raised modestly, not aggressively -- see
+# docs/superpowers/plans/2026-09-02-mission-stack-mavros-port.md for the
+# gain-tuning trail.
+Q_A_ANGLE_MAX     35       # degrees, up from the 30 deg default
+
 # --- Hover thrust (Task 5, measured in flight) ---
 # The Gazebo model's LiftDrag rig gives ~36.2 N per rotor at full command
 # vs 50.7 N of vehicle weight, so hover sits near 47% thrust, not the 35%
