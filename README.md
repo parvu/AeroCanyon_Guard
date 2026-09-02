@@ -467,7 +467,7 @@ sleep 12
 # lists --defaults). mavproxy.py is not installed/required.
 mkdir -p /tmp/apstate && cd /tmp/apstate
 $HOME/ardupilot/build/sitl/bin/arduplane --model JSON \
-  --home 47.397742,8.545594,488,0 \
+  --home 44.434424990487216,26.04781615647584,76,0 \
   --wipe --defaults $HOME/AeroCanyon_Guard/src/aerocanyon/ardupilot/tricopter.parm &
 sleep 10
 
