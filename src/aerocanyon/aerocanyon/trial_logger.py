@@ -10,12 +10,13 @@ import pathlib
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import Vector3Stamped
-from px4_msgs.msg import (SensorCombined, VehicleAttitude, VehicleLocalPosition)
+from geometry_msgs.msg import PoseStamped, TwistStamped, Vector3Stamped
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Imu
 
 from . import constants as C
+from . import frames
 
 COLUMNS = [
     't',
@@ -51,14 +52,13 @@ class TrialLogger(Node):
         self.t0 = self.get_clock().now()
 
         self.create_subscription(
-            VehicleLocalPosition, '/fmu/out/vehicle_local_position_v1',
-            self._on_position, qos_profile_sensor_data)
+            PoseStamped, '/mavros/local_position/pose',
+            self._on_pose, qos_profile_sensor_data)
         self.create_subscription(
-            VehicleAttitude, '/fmu/out/vehicle_attitude',
-            self._on_attitude, qos_profile_sensor_data)
+            TwistStamped, '/mavros/local_position/velocity_local',
+            self._on_velocity, qos_profile_sensor_data)
         self.create_subscription(
-            SensorCombined, '/fmu/out/sensor_combined',
-            self._on_imu, qos_profile_sensor_data)
+            Imu, '/mavros/imu/data', self._on_imu, qos_profile_sensor_data)
         self.create_subscription(
             Vector3Stamped, C.TOPIC_WIND_TRUTH, self._on_truth, 10)
         self.create_subscription(
@@ -70,16 +70,25 @@ class TrialLogger(Node):
 
         self.create_timer(1.0 / C.CONTROL_HZ, self._write)
 
-    def _on_position(self, m):
-        self.row.update(x=m.x, y=m.y, z=m.z, vx=m.vx, vy=m.vy, vz=m.vz)
+    def _on_pose(self, m):
+        p = m.pose.position
+        x, y, z = frames.enu_to_ned([p.x, p.y, p.z])
+        self.row.update(x=x, y=y, z=z)
 
-    def _on_attitude(self, m):
-        self.row.update(qw=m.q[0], qx=m.q[1], qy=m.q[2], qz=m.q[3])
+    def _on_velocity(self, m):
+        v = m.twist.linear
+        vx, vy, vz = frames.enu_to_ned([v.x, v.y, v.z])
+        self.row.update(vx=vx, vy=vy, vz=vz)
 
     def _on_imu(self, m):
-        self.row.update(ax=m.accelerometer_m_s2[0], ay=m.accelerometer_m_s2[1],
-                        az=m.accelerometer_m_s2[2],
-                        p=m.gyro_rad[0], q=m.gyro_rad[1], r=m.gyro_rad[2])
+        q = m.orientation
+        qw, qx, qy, qz = frames.enu_flu_quat_to_ned_frd([q.w, q.x, q.y, q.z])
+        a = m.linear_acceleration
+        ax, ay, az = frames.enu_flu_rate_to_ned_frd([a.x, a.y, a.z])
+        g = m.angular_velocity
+        p, q_, r = frames.enu_flu_rate_to_ned_frd([g.x, g.y, g.z])
+        self.row.update(qw=qw, qx=qx, qy=qy, qz=qz,
+                        ax=ax, ay=ay, az=az, p=p, q=q_, r=r)
 
     def _on_truth(self, m):
         self.row.update(wind_true_n=m.vector.x, wind_true_e=m.vector.y,

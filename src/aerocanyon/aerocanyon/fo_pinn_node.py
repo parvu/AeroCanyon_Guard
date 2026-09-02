@@ -8,12 +8,13 @@ import pathlib
 import numpy as np
 import rclpy
 import torch
-from geometry_msgs.msg import Vector3Stamped
-from px4_msgs.msg import SensorCombined, VehicleAttitude, VehicleLocalPosition
+from geometry_msgs.msg import TwistStamped, Vector3Stamped
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Imu
 
 from . import constants as C
+from . import frames
 from .fo_pinn import STATE_DIM, FractionalMemory, WindEstimator
 
 
@@ -50,27 +51,25 @@ class FoPinnNode(Node):
         self.accel = np.zeros(3)
 
         self.create_subscription(
-            VehicleLocalPosition, '/fmu/out/vehicle_local_position_v1',
-            self._on_position, qos_profile_sensor_data)
+            TwistStamped, '/mavros/local_position/velocity_local',
+            self._on_velocity, qos_profile_sensor_data)
         self.create_subscription(
-            VehicleAttitude, '/fmu/out/vehicle_attitude',
-            self._on_attitude, qos_profile_sensor_data)
-        self.create_subscription(
-            SensorCombined, '/fmu/out/sensor_combined',
-            self._on_imu, qos_profile_sensor_data)
+            Imu, '/mavros/imu/data', self._on_imu, qos_profile_sensor_data)
 
         self.pub = self.create_publisher(Vector3Stamped, C.TOPIC_WIND_EST, 10)
         self.create_timer(1.0 / C.CONTROL_HZ, self._tick)
 
-    def _on_position(self, m):
-        self.vel = np.array([m.vx, m.vy, m.vz])
-
-    def _on_attitude(self, m):
-        self.quat = np.array([m.q[0], m.q[1], m.q[2], m.q[3]])
+    def _on_velocity(self, m):
+        v = m.twist.linear
+        self.vel = frames.enu_to_ned([v.x, v.y, v.z])
 
     def _on_imu(self, m):
-        self.gyro = np.array(m.gyro_rad[:3])
-        self.accel = np.array(m.accelerometer_m_s2[:3])
+        q = m.orientation
+        self.quat = frames.enu_flu_quat_to_ned_frd([q.w, q.x, q.y, q.z])
+        g = m.angular_velocity
+        self.gyro = frames.enu_flu_rate_to_ned_frd([g.x, g.y, g.z])
+        a = m.linear_acceleration
+        self.accel = frames.enu_flu_rate_to_ned_frd([a.x, a.y, a.z])
 
     def _tick(self):
         if not self.enabled:
