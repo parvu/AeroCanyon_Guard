@@ -108,16 +108,25 @@ MAP_ZONE_SPAWN_XYZ = (0.0, 0.0, cg.GROUND_Z + 0.2)
 
 def _spawn_xyz(world, mission_file):
     """Spawn point for a trial leg. urban_canyon is unaffected (always
-    SPAWN_XYZ). map_zone spawns at the mission file's first waypoint if
-    one is given (so the vehicle starts where the captured mission
-    actually begins), else the documented default spawn above."""
+    SPAWN_XYZ). map_zone spawns at the mission file's first waypoint with
+    real coordinates, else the documented default spawn above.
+
+    Not just items[0]: live-verified a Mission Planner-authored mission's
+    own NAV_VTOL_TAKEOFF item (command 84) carries x_lat=y_long=0.0 --
+    that command takes off in place and never reads its own lat/lon, so
+    Mission Planner leaves them zeroed. Spawning at literal (0, 0) would
+    put the vehicle off the coast of Africa instead of anywhere near the
+    mission -- skip items with no real position and use the first one
+    that has one (any single real mission always has one; command 84 is
+    the only command in this project's captured missions that doesn't)."""
     if world != 'map_zone':
         return SPAWN_XYZ
     if not mission_file:
         return MAP_ZONE_SPAWN_XYZ
     items = json.loads(pathlib.Path(mission_file).read_text())
-    north, east = frames.latlon_to_ned(items[0]['x_lat'], items[0]['y_long'],
-                                       HOME_LAT, HOME_LON)
+    wp = next((it for it in items if (it['x_lat'], it['y_long']) != (0.0, 0.0)),
+              items[0])
+    north, east = frames.latlon_to_ned(wp['x_lat'], wp['y_long'], HOME_LAT, HOME_LON)
     return (east, north, cg.GROUND_Z + 0.2)
 
 

@@ -80,6 +80,25 @@ def test_spawn_xyz_uses_the_mission_files_first_waypoint(tmp_path):
     assert z == pytest.approx(cg.GROUND_Z + 0.2)
 
 
+def test_spawn_xyz_skips_a_takeoff_items_zeroed_coordinates(tmp_path):
+    """Live-caught: Mission Planner's own NAV_VTOL_TAKEOFF item (command
+    84) carries x_lat=y_long=0.0 -- that command takes off in place and
+    never reads its own lat/lon. Spawning at literal (0, 0) would put the
+    vehicle off the coast of Africa instead of near the mission."""
+    mission_file = tmp_path / 'mission.json'
+    mission_file.write_text(json.dumps([
+        {'command': 84, 'frame': 3, 'x_lat': 0.0, 'y_long': 0.0,
+         'z_alt': 20.0, 'autocontinue': True},
+        {'command': 16, 'frame': 3, 'x_lat': 44.434464, 'y_long': 26.0505104,
+         'z_alt': 20.0, 'autocontinue': True},
+    ]))
+    x, y, z = _spawn_xyz('map_zone', str(mission_file))
+    expected_north, expected_east = rt.frames.latlon_to_ned(
+        44.434464, 26.0505104, rt.HOME_LAT, rt.HOME_LON)
+    assert x == pytest.approx(expected_east)
+    assert y == pytest.approx(expected_north)
+
+
 def test_reset_gazebo_model_uses_the_given_world_and_spawn_point(monkeypatch):
     calls = []
 
