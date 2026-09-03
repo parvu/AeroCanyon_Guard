@@ -22,7 +22,7 @@ import pathlib
 import numpy as np
 import rclpy
 from geometry_msgs.msg import PoseStamped, TwistStamped, Vector3Stamped
-from mavros_msgs.msg import OverrideRCIn, State, Waypoint
+from mavros_msgs.msg import OverrideRCIn, State, Waypoint, WaypointList
 from mavros_msgs.srv import (CommandBool, CommandLong, WaypointPush,
                              WaypointSetCurrent)
 from rclpy.node import Node
@@ -166,6 +166,8 @@ class ControllerNode(Node):
         self.wind_truth = np.zeros(3)
         self._waypoint_offset = np.zeros(2)
         self._last_offset_push_tick = 0
+        self._mission_current_seq = CRUISE_WP_SEQ
+        self._mission_waypoints = []
         self.fcu_mode = ''
         self._was_armed = False
         self._mission_complete = False
@@ -202,6 +204,8 @@ class ControllerNode(Node):
             Vector3Stamped, C.TOPIC_WIND_EST, self._on_wind_est, 10)
         self.create_subscription(
             Vector3Stamped, C.TOPIC_WIND_TRUTH, self._on_wind_truth, 10)
+        self.create_subscription(
+            WaypointList, '/mavros/mission/waypoints', self._on_mission_waypoints, 10)
 
         self.create_timer(1.0 / C.CONTROL_HZ, self._tick)
 
@@ -301,6 +305,28 @@ class ControllerNode(Node):
             wp(item, is_current=(i == 0)) for i, item in enumerate(items)
         ]
 
+    def _on_mission_waypoints(self, msg):
+        self._mission_current_seq = msg.current_seq
+        self._mission_waypoints = msg.waypoints
+
+    def _active_target(self):
+        """(north, east) NED metres and altitude (relative-alt, metres)
+        of the mission's currently active nav waypoint -- read from the
+        FCU's own reported mission (/mavros/mission/waypoints) once
+        available. Before the first WaypointList arrives, falls back to
+        the fixed urban_canyon land-trigger point at CRUISE_ALT_M -- the
+        same point/seq (CRUISE_WP_SEQ, this class's own default
+        _mission_current_seq) _treatment_tick has always corrected, so
+        every world behaves exactly as before until MAVROS actually
+        reports a mission."""
+        if (self._mission_waypoints
+                and self._mission_current_seq < len(self._mission_waypoints)):
+            wp = self._mission_waypoints[self._mission_current_seq]
+            north, east = frames.latlon_to_ned(wp.x_lat, wp.y_long, HOME_LAT, HOME_LON)
+            return np.array([north, east]), float(wp.z_alt)
+        entry_ned = frames.enu_to_ned(cg.CANYON_ENTRY)
+        return np.array([entry_ned[0], LAND_TRIGGER_LOCAL_M]), CRUISE_ALT_M
+
     @staticmethod
     def _accumulate_offset(u_safe, dt, current_offset, max_offset_m):
         """Kinematic displacement over one update interval (0.5*a*dt^2),
@@ -342,7 +368,7 @@ class ControllerNode(Node):
             self._correction_push_future = None
             if result is not None and result.success:
                 set_current_req = WaypointSetCurrent.Request()
-                set_current_req.wp_seq = CRUISE_WP_SEQ
+                set_current_req.wp_seq = self._mission_current_seq
                 self.set_current_client.call_async(set_current_req)
 
         u_des = -self.ff_gain * self.wind_est / MASS_KG
@@ -379,11 +405,10 @@ class ControllerNode(Node):
         if (self._mission_confirmed
                 and since_last_push >= C.CONTROL_HZ / C.CORRECTION_UPDATE_HZ
                 and self._correction_push_future is None):
-            entry_ned = frames.enu_to_ned(cg.CANYON_ENTRY)
-            land_ned = np.array([entry_ned[0], LAND_TRIGGER_LOCAL_M, entry_ned[2]])
-            corrected_ned = land_ned + np.array(
-                [self._waypoint_offset[0], self._waypoint_offset[1], 0.0])
-            lat, lon = frames.ned_to_latlon(corrected_ned, HOME_LAT, HOME_LON)
+            target_ned, target_alt = self._active_target()
+            corrected_ned = target_ned + self._waypoint_offset
+            lat, lon = frames.ned_to_latlon(
+                np.array([corrected_ned[0], corrected_ned[1], 0.0]), HOME_LAT, HOME_LON)
 
             wp = Waypoint()
             wp.frame = Waypoint.FRAME_GLOBAL_REL_ALT
@@ -392,10 +417,10 @@ class ControllerNode(Node):
             wp.autocontinue = True
             wp.x_lat = lat
             wp.y_long = lon
-            wp.z_alt = CRUISE_ALT_M
+            wp.z_alt = target_alt
 
             req = WaypointPush.Request()
-            req.start_index = CRUISE_WP_SEQ
+            req.start_index = self._mission_current_seq
             req.waypoints = [wp]
             self._correction_push_future = self.mission_client.call_async(req)
             self._last_offset_push_tick = self.tick
@@ -409,10 +434,8 @@ class ControllerNode(Node):
         if self.fcu_mode != f'CMODE({MODE_AUTO})':
             return
 
-        entry_ned = frames.enu_to_ned(cg.CANYON_ENTRY)
-        land_ned = np.array([entry_ned[0], LAND_TRIGGER_LOCAL_M, entry_ned[2]])
-        target_ned = land_ned + np.array(
-            [self._waypoint_offset[0], self._waypoint_offset[1], 0.0])
+        target_ned, _ = self._active_target()
+        target_ned = target_ned + self._waypoint_offset
 
         d_north = target_ned[0] - self.pos[0]
         d_east = target_ned[1] - self.pos[1]

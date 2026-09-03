@@ -254,6 +254,90 @@ def test_treatment_mode_publishes_cbf_diagnostics_and_survives_the_tick_loop():
         rclpy.shutdown()
 
 
+def _waypoint_list(current_seq, items):
+    """items: list of (lat, lon, alt) -- builds a WaypointList the way
+    MAVROS would report it, home placeholder at seq 0 included (that's
+    how the real topic looks -- see WaypointList.msg)."""
+    msg = WaypointList()
+    msg.current_seq = current_seq
+    msg.waypoints = []
+    for lat, lon, alt in items:
+        w = MavWaypoint()
+        w.x_lat = lat
+        w.y_long = lon
+        w.z_alt = alt
+        msg.waypoints.append(w)
+    return msg
+
+
+def test_active_target_defaults_to_the_fixed_urban_canyon_land_point():
+    """Before any WaypointList has arrived, _active_target must match
+    what _treatment_tick has always corrected -- CRUISE_WP_SEQ's own
+    land-trigger point at CRUISE_ALT_M -- so every existing treatment
+    test (which never publishes a WaypointList) keeps passing."""
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        target_ned, alt = node._active_target()
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+    entry_ned = frames.enu_to_ned(cg.CANYON_ENTRY)
+    assert target_ned[0] == pytest.approx(entry_ned[0])
+    assert target_ned[1] == pytest.approx(LAND_TRIGGER_LOCAL_M)
+    assert alt == pytest.approx(CRUISE_ALT_M)
+
+
+def test_active_target_tracks_the_fcu_reported_current_waypoint():
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        node._on_mission_waypoints(_waypoint_list(
+            current_seq=2,
+            items=[(44.4344, 26.0478, 25.0),   # seq 0: home placeholder
+                   (44.4345, 26.0480, 25.0),   # seq 1: takeoff
+                   (44.4350, 26.0490, 42.0)]))  # seq 2: active cruise wp
+        target_ned, alt = node._active_target()
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+    expected_north, expected_east = frames.latlon_to_ned(
+        44.4350, 26.0490, HOME_LAT, HOME_LON)
+    assert target_ned[0] == pytest.approx(expected_north)
+    assert target_ned[1] == pytest.approx(expected_east)
+    assert alt == pytest.approx(42.0)
+
+
+def test_treatment_corrects_the_fcu_reported_current_seq_not_a_hardcoded_one():
+    """Generalization for map_zone's N-waypoint missions: the correction
+    push/restart must target whichever seq MAVROS reports as current,
+    not the urban_canyon-only CRUISE_WP_SEQ constant."""
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        node.mode = 'treatment'
+        node.mavros_armed = True
+        node._mission_confirmed = True
+        node.wind_est = np.array([2.0, 0.0, 0.0])
+        node._on_mission_waypoints(_waypoint_list(
+            current_seq=5,
+            items=[(44.4344, 26.0478, 25.0)] * 6))
+        pushes = []
+        restarts = []
+        node.mission_client.call_async = _confirmed_push(pushes)
+        node.set_current_client.call_async = lambda req: restarts.append(req)
+
+        for _ in range(60):
+            node._tick()
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+    assert len(pushes) == 1
+    assert pushes[0].start_index == 5
+    assert len(restarts) == 1
+    assert restarts[0].wp_seq == 5
+
+
 def test_treatment_restarts_cruise_waypoint_once_correction_push_confirms():
     """The correction push alone doesn't move the vehicle -- ArduPilot
     caches the active nav command's target in RAM and only re-reads
