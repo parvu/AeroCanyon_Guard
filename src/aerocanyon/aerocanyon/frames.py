@@ -112,3 +112,14 @@ def ned_to_latlon(ned, home_lat_deg, home_lon_deg):
     lon = home_lon_deg + math.degrees(
         east / (_EARTH_RADIUS_M * math.cos(home_lat_rad)))
     return lat, lon
+
+
+def latlon_to_ned(lat_deg, lon_deg, home_lat_deg, home_lon_deg):
+    """(lat, lon) degrees -> NED (north, east) metre offset from a home
+    point -- the exact inverse of ned_to_latlon above (same flat-earth
+    approximation, solved backward)."""
+    home_lat_rad = math.radians(home_lat_deg)
+    north = math.radians(lat_deg - home_lat_deg) * _EARTH_RADIUS_M
+    east = (math.radians(lon_deg - home_lon_deg) * _EARTH_RADIUS_M
+            * math.cos(home_lat_rad))
+    return north, east

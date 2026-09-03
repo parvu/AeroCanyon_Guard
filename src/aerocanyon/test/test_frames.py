@@ -5,8 +5,8 @@ import numpy as np
 import pytest
 
 from aerocanyon.frames import (enu_flu_quat_to_ned_frd,
-                               enu_flu_rate_to_ned_frd, ned_to_latlon,
-                               quat_mul, yaw_from_quat)
+                               enu_flu_rate_to_ned_frd, latlon_to_ned,
+                               ned_to_latlon, quat_mul, yaw_from_quat)
 
 
 def test_quat_mul_identity():
@@ -80,3 +80,19 @@ def test_ned_to_latlon_matches_known_scale():
     # read back within a small fraction of a degree of 0.001 deg latitude.
     lat, lon = ned_to_latlon(np.array([111.32, 0.0, 0.0]), 0.0, 0.0)
     assert lat == pytest.approx(0.001, rel=1e-2)
+
+
+def test_latlon_to_ned_is_the_exact_inverse_of_ned_to_latlon():
+    home_lat, home_lon = 44.434424990487216, 26.04781615647584
+    north_in, east_in = 123.4, -67.8
+    lat, lon = ned_to_latlon([north_in, east_in, 0.0], home_lat, home_lon)
+    north_out, east_out = latlon_to_ned(lat, lon, home_lat, home_lon)
+    assert north_out == pytest.approx(north_in, abs=1e-6)
+    assert east_out == pytest.approx(east_in, abs=1e-6)
+
+
+def test_latlon_to_ned_is_zero_at_home():
+    home_lat, home_lon = 44.434424990487216, 26.04781615647584
+    north, east = latlon_to_ned(home_lat, home_lon, home_lat, home_lon)
+    assert north == pytest.approx(0.0, abs=1e-9)
+    assert east == pytest.approx(0.0, abs=1e-9)
