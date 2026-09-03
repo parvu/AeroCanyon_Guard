@@ -101,9 +101,14 @@ SPAWN_XYZ = (float(cg.CANYON_ENTRY[0]), float(cg.CANYON_ENTRY[1]),
 # in sync by hand if either changes.
 
 # map_zone's documented default spawn (README's manual-flight setup):
-# local ENU (0, 0), 0.2m above the terrain's z=74 ground level, same
-# convention SPAWN_XYZ above uses for urban_canyon.
-MAP_ZONE_SPAWN_XYZ = (0.0, 0.0, cg.GROUND_Z + 0.2)
+# local ENU (0, 0), 1.2m above the terrain's z=74 ground level -- raised
+# from 0.2m (SPAWN_XYZ's own urban_canyon convention) after live-verifying
+# in the native Gazebo GUI that the real OSM terrain mesh has actual
+# geometry right at the home point/local origin (a small structure, not
+# visible in map_zone_geometry.BUILDINGS -- that parse only covers ways
+# explicitly tagged building=*, and this clearly isn't one), close enough
+# to the ground that 0.2m clearance spawned the vehicle inside it.
+MAP_ZONE_SPAWN_XYZ = (0.0, 0.0, cg.GROUND_Z + 1.2)
 
 
 def _spawn_xyz(world, mission_file):
@@ -127,7 +132,7 @@ def _spawn_xyz(world, mission_file):
     wp = next((it for it in items if (it['x_lat'], it['y_long']) != (0.0, 0.0)),
               items[0])
     north, east = frames.latlon_to_ned(wp['x_lat'], wp['y_long'], HOME_LAT, HOME_LON)
-    return (east, north, cg.GROUND_Z + 0.2)
+    return (east, north, cg.GROUND_Z + 1.2)  # see MAP_ZONE_SPAWN_XYZ's own comment
 
 
 # map_zone's world file is map_zone_ap.sdf, not map_zone.sdf -- its

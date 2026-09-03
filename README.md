@@ -111,8 +111,10 @@ wrong here.
 The default manual-flight world is `src/aerocanyon/worlds/map_zone_ap.sdf`:
 a real-world OSM-derived 3D terrain model of the Politehnica/AFI area of
 Bucharest (`src/aerocanyon/map_zone/`), matching this project's `--home`
-coordinates below, with the tricopter spawned at z=74.2m, 0.2m above the
-terrain's z=74 ground level.
+coordinates below, with the tricopter spawned at z=75.2m, 1.2m above the
+terrain's z=74 ground level (raised from 0.2m -- the real OSM mesh has
+actual geometry right at the home point, close enough to the ground
+that 0.2m clearance spawned the vehicle inside it).
 
 ```bash
 # Terminal 1: Gazebo (headless -- no native GUI needed for the browser viewer below)
