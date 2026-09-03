@@ -337,6 +337,37 @@ see [View the figures](#view-the-figures) below for what's in them.
 it's the single source of truth for the airframe parameters; don't
 duplicate them here, they've drifted out of sync with reality before.
 
+### Run a trial against map_zone instead
+
+`run_trial.py` can fly baseline/treatment against the real Bucharest
+terrain (`map_zone_ap.sdf`) instead of the synthetic canyon, using a
+mission you draw yourself:
+
+1. Fly manually against `map_zone` (the ["Fly the tricopter
+   manually"](#fly-the-tricopter-manually) setup above, unchanged).
+2. Connect Mission Planner to the same GCS MAVLink port MAVROS already
+   opens (`tcp://127.0.0.1:5761`), draw a mission, and upload it.
+3. Capture it to a file (from a new terminal, same workspace sourced):
+   ```bash
+   python3 -m aerocanyon.dump_mission my_mission
+   ```
+   writes `data/missions/my_mission.json`.
+4. Stop the manual-flight terminals (Gazebo/SITL/MAVROS) -- `run_trial.py`
+   owns its own instances of all three, same as it always has for
+   `urban_canyon`.
+5. Run the trial:
+   ```bash
+   python3 -m aerocanyon.run_trial --trial map_zone_run \
+       --world map_zone --mission-file data/missions/my_mission.json
+   ```
+
+The wind field for `map_zone` (`src/aerocanyon/data/wind_grid_map_zone.npy`)
+is generated from real building footprints in
+`map_zone/meshes/map_zone.osm` -- regenerate it with `python3 -m
+aerocanyon.canyon_field --world map_zone` if that source file ever
+changes. Unlike `urban_canyon`, the CBF obstacle barrier does not see
+these real buildings yet (only wind does).
+
 ## View the figures
 
 `plot_results.py` writes two figures to `figures/`:
@@ -366,9 +397,6 @@ of scope, not yet implemented:
   `train_pinn.py`) -- these still import the removed `px4_msgs` package
   and need porting to `mavros_msgs`/MAVROS topics before anything flies a
   mission by itself.
-- A wind field regenerated for the `map_zone` terrain (the existing
-  `canyon_field.py`/wind-grid pipeline targets the synthetic
-  `urban_canyon.sdf` box-canyon geometry).
 - VTOL forward-flight transition -- `ArduPlane`'s `GUIDED` mode has no
   velocity-setpoint path for this airframe (see `control_server.py`'s
   module docstring), and ArduPilot's own `tiltrotor.cpp` cruise logic
