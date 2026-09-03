@@ -18,6 +18,7 @@ import time
 
 import rclpy
 from mavros_msgs.msg import WaypointList
+from mavros_msgs.srv import WaypointPull
 from rclpy.node import Node
 
 MISSIONS_DIR = pathlib.Path(__file__).resolve().parents[3] / 'data' / 'missions'
@@ -43,9 +44,19 @@ class _MissionDumper(Node):
         self.waypoints = None
         self.create_subscription(
             WaypointList, '/mavros/mission/waypoints', self._on_waypoints, 10)
+        self.pull_client = self.create_client(WaypointPull, '/mavros/mission/pull')
 
     def _on_waypoints(self, msg):
         self.waypoints = msg.waypoints
+
+    def request_pull(self):
+        """MAVROS only republishes /mavros/mission/waypoints when
+        something asks it to pull -- live-verified it does NOT do this
+        on its own just because a mission was uploaded while this node
+        wasn't running yet. Fire-and-forget: _on_waypoints picks up
+        whatever comes back."""
+        if self.pull_client.service_is_ready():
+            self.pull_client.call_async(WaypointPull.Request())
 
 
 def main(argv=None):
@@ -60,8 +71,10 @@ def main(argv=None):
     try:
         node = _MissionDumper()
         deadline = time.monotonic() + args.timeout
+        node.request_pull()
         while node.waypoints is None and time.monotonic() < deadline:
             rclpy.spin_once(node, timeout_sec=0.5)
+            node.request_pull()  # retry -- the first call may fire before the service is ready
         waypoints = node.waypoints
         node.destroy_node()
     finally:
