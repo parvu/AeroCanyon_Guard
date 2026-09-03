@@ -26,7 +26,9 @@ TOPIC_CBF_DIAG = '/aerocanyon/cbf_diagnostics'
 TOPIC_SETPOINT_DESIRED = '/aerocanyon/setpoint_desired'
 TOPIC_WIND_SPEED_SCALE = '/aerocanyon/wind_speed_scale'
 
-GZ_WIND_TOPIC = f'/world/{WORLD_NAME}/wind'
+def gz_wind_topic(world):
+    """Gazebo wind-plugin topic for a given world name."""
+    return f'/world/{world}/wind'
 
 # controller_node's earlier outer-loop gains (POSITION_KP/KD,
 # ALTITUDE_KP, HEADING_KP, MAX_LEAN_RAD -- an RC-override-based P/D

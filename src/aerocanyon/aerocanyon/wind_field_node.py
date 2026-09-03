@@ -50,6 +50,8 @@ class WindFieldNode(Node):
 
     def __init__(self):
         super().__init__('wind_field_node')
+        self.declare_parameter('world', C.WORLD_NAME)
+        self.world = self.get_parameter('world').value
         self.declare_parameter('data_dir', '')
         # Dryden gust intensity. Raised from the original 1.5 to 4.0 after
         # measuring what the vehicle actually experienced: the disturbance was
@@ -68,8 +70,8 @@ class WindFieldNode(Node):
         if not data_dir:
             from ament_index_python.packages import get_package_share_directory
             data_dir = get_package_share_directory('aerocanyon') + '/data'
-        self.grid = WindGrid.load(data_dir)
-        self.get_logger().info(f'loaded wind grid from {data_dir}')
+        self.grid = WindGrid.load(data_dir, world=self.world)
+        self.get_logger().info(f'loaded {self.world} wind grid from {data_dir}')
 
         dt = 1.0 / C.CONTROL_HZ
         self.gust = DrydenGust(
@@ -105,7 +107,7 @@ class WindFieldNode(Node):
             Vector3Stamped, C.TOPIC_WIND_TRUTH, 10)
 
         self.gz = GzNode()
-        self.gz_pub = self.gz.advertise(C.GZ_WIND_TOPIC, Wind)
+        self.gz_pub = self.gz.advertise(C.gz_wind_topic(self.world), Wind)
 
         self.create_timer(dt, self._tick)
 

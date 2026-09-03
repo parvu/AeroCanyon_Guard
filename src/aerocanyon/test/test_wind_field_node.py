@@ -4,6 +4,7 @@ factored out.
 """
 import numpy as np
 
+from aerocanyon import constants as C
 from aerocanyon.wind_field_node import MC_MAX_WIND_SPEED_MS, cap_speed
 
 
@@ -26,3 +27,8 @@ def test_cap_speed_default_matches_the_2ms_mc_target():
 def test_cap_speed_zero_vector_stays_zero():
     v = np.zeros(3)
     np.testing.assert_array_equal(cap_speed(v, 2.0), v)
+
+
+def test_gz_wind_topic_is_world_specific():
+    assert C.gz_wind_topic('urban_canyon') == '/world/urban_canyon/wind'
+    assert C.gz_wind_topic('map_zone') == '/world/map_zone/wind'
