@@ -1,13 +1,35 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- DO NOT EDIT: Generated from standard_vtol.sdf.jinja -->
+<!-- Forked from ../tricopter/model.sdf (PX4 model) for the ArduPilot port,
+     ardupilot-phase1 Task 3. Only the motor/tilt-servo PLUGIN blocks and
+     the two tilting joints' <limit> ranges differ -- every visual,
+     collision, inertial and sensor block below is copied unchanged. -->
 <sdf version='1.5'>
-  <model name='tricopter'>
+  <model name='tricopter_ap'>
     <pose>0 0 0.246 0 0 0</pose>
     <link name='base_link'>
         <enable_wind>true</enable_wind>
       <pose>0 0 0 0 0 0</pose>
       <inertial>
-        <pose>0 0 0 0 0 0</pose>
+        <!-- Task 5: CG moved forward from x=0 to x=0.11667 m. This is the
+             ONLY inertial change from the PX4 model, and it is required by
+             ArduPilot, not cosmetic.
+
+             AP_MotorsTri::output_armed_stabilizing() (lines 202-204,
+             266-268) gives all three motors the SAME thrust at zero
+             roll/pitch demand -- it has no per-rotor moment arms, unlike
+             PX4's control allocator, which is why the PX4 model could keep
+             its CG at the origin. With the rotors at x=+0.35 (front pair)
+             and x=-0.35 (rear), equal thrust about a CG at x=0 leaves a
+             standing pitch moment of 0.35*F ~ 5.9 N.m at hover -- about
+             40 rad/s^2 on Iyy=0.1459, which pitched the airframe over
+             within ~1 s of leaving the ground (observed live before this
+             fix).
+
+             The balance point for equal thrust is the rotor centroid,
+             (0.35 + 0.35 - 0.35)/3 = 0.11667 m. The motor/rotor link
+             masses share that same centroid, so putting base_link's CG
+             there puts the whole vehicle's CG there too. -->
+        <pose>0.11666666666666667 0 0 0 0 0</pose>
         <mass>5</mass>
         <inertia>
           <ixx>0.197563</ixx>
@@ -99,6 +121,26 @@
 
       <sensor name="imu_sensor" type="imu">
         <gz_frame_id>base_link</gz_frame_id>
+        <!-- Task 5: roll the IMU 180 deg so it reports in FRD (x fwd,
+             y right, z down), the frame ArduPilot expects. Copied from
+             ~/ardupilot_gazebo/models/iris_with_standoffs/model.sdf's own
+             imu_sensor, which carries exactly this pose.
+
+             A Gazebo IMU reports in the SENSOR frame. Without this pose
+             that frame is base_link, i.e. FLU, and ArduPilotPlugin does
+             NOT rotate the IMU itself -- only the pose/velocity path goes
+             through <modelXYZToAirplaneXForwardZDown>. PX4's plugin did
+             its own conversion, which is why the model it was forked from
+             needed no pose here.
+
+             The result was gyro pitch/yaw rates with inverted sign
+             relative to the attitude ArduPilot computed: caught live on
+             PID_TUNING telemetry, where the pitch rate controller read
+             achieved=-0.52 rad/s at the same instant ATTITUDE's own pitch
+             angle was climbing at +0.52 rad/s. Positive feedback in the
+             rate loop -- the airframe pitched up, the controller pushed it
+             further up, and it flipped every time. -->
+        <pose degrees="true">0 0 0 180 0 0</pose>
         <always_on>1</always_on>
         <update_rate>250</update_rate>
         <imu>
@@ -266,9 +308,15 @@
       <parent>base_link</parent>
       <axis>
         <xyz>0 1 0</xyz>
+        <!-- Widened from the PX4 model's -0.2618..1.57 (-15..90 deg) to
+             -0.3491..1.5708 rad (-20..+90 deg): motor_0 is the FRONT RIGHT
+             tilt, driven by ArduPilotPlugin's front tilt <control> block
+             below, which needs the full -20..+90 deg physical range
+             (Q_TILT_YAW_ANGLE=20's hover yaw-trim sub-range plus the
+             0..90 deg hover-to-cruise sweep), per Task 2's report. -->
         <limit>
-          <lower>-0.2618</lower>
-          <upper>1.57</upper>
+          <lower>-0.3490658503988659</lower>
+          <upper>1.5707963267948966</upper>
         </limit>
         <dynamics>
           <friction>1.0</friction>
@@ -398,9 +446,29 @@
       <parent>base_link</parent>
       <axis>
         <xyz>0 1 0</xyz>
+        <!-- motor_1 is the REAR tilt, driven by ArduPilotPlugin's rear
+             tilt <control> block below.
+
+             Task 5 correction: Task 3 put this joint's range at
+             +90..+200 deg, taking Task 2's rear angles as SDF joint
+             angles. They are not. Task 2's rear datum is the SPEC's
+             vehicle-description convention, in which the rear reads
+             180 deg when pointing UP and 90 deg when pointing forward
+             -- i.e. offset 180 deg from this SDF's, because rotor_1's
+             link pose here has NO 180 deg mounting rotation baked in
+             (see <link name='rotor_1'><pose>-0.35 0 0.07 0 0 0</pose>:
+             identity rotation, +z up, exactly like the front rotors).
+             With the old range the rear rotor sat inverted at hover and
+             pushed DOWN, flipping the airframe within ~2 s of arming --
+             observed live before this fix.
+
+             So the rear uses the SAME SDF range as the front: 0 rad =
+             upright/hover, +pi/2 = tilted forward for cruise. The
+             ArduPilot-side 180 deg offset lives entirely in the
+             <control> block's multiplier/offset below. -->
         <limit>
-          <lower>-0.2618</lower>
-          <upper>1.57</upper>
+          <lower>-0.3490658503988659</lower>
+          <upper>1.5707963267948966</upper>
         </limit>
         <dynamics>
           <friction>1.0</friction>
@@ -443,7 +511,32 @@
         </surface>
       </collision>
       <visual name='rotor_1_visual'>
-        <pose>0 0 0 0 0 0</pose>
+        <!-- Real request: rotor_1 (rear) is a pusher prop, not a puller --
+             the blade mesh should sit on the trailing side of the motor
+             housing (motor_1, whose collision cylinder centers at
+             z=0.045 in the model's rest frame) rather than the leading
+             side. Inherited unchanged from the stock tiltrotor mesh
+             before this session's rear-tilt rework, the prop rendered at
+             the SAME +0.025 offset above the housing centre as the front
+             (puller) rotors -- correct for them, backwards for a pusher.
+
+             A -0.05 local offset (mirroring the front's +0.025 around the
+             link's z=0.07 origin) put the blade disk's own centre below
+             the housing centre, but its ~0.1 m sweep radius still crossed
+             above the housing's TOP edge and the mount boom's top surface
+             (rear_motor_boom, whose visual bbox tops out level with where
+             the blade landed) in a live screenshot -- confirmed by
+             comparing scene-graph world-space bounding boxes for
+             rotor_1_visual/motor_1_visual/rear_motor_boom, not guessed.
+             Real request 2026-09-02: still visibly above its support.
+             Deepened to -0.09 so the whole disk clears the boom's bottom
+             surface (not just the motor's centre-line) with margin,
+             instead of only nudging past the housing centre. Purely
+             cosmetic -- does not touch the collision/inertial placement
+             above, the joint definition, or the ArduPilotPlugin/LiftDrag
+             thrust mechanism, all of which stay keyed to the link's own
+             origin. -->
+        <pose>0 0 -0.09 0 0 0</pose>
         <geometry>
           <mesh>
             <scale>1 1 1</scale>
@@ -530,9 +623,11 @@
       <parent>base_link</parent>
       <axis>
         <xyz>0 1 0</xyz>
+        <!-- motor_2 is the FRONT LEFT tilt -- same -20..+90 deg range as
+             motor_0_joint (front right) above, see that joint's comment. -->
         <limit>
-          <lower>-0.2618</lower>
-          <upper>1.57</upper>
+          <lower>-0.3490658503988659</lower>
+          <upper>1.5707963267948966</upper>
         </limit>
         <dynamics>
           <friction>1.0</friction>
@@ -875,106 +970,385 @@
       <joint_name>rudder_joint</joint_name>
       <sub_topic>servo_5</sub_topic>
     </plugin> -->
-    <plugin filename="gz-sim-multicopter-motor-model-system"
-      name="gz::sim::systems::MulticopterMotorModel">
-      <jointName>rotor_0_joint</jointName>
-      <linkName>rotor_0</linkName>
-      <turningDirection>ccw</turningDirection>
-      <timeConstantUp>0.0125</timeConstantUp>
-      <timeConstantDown>0.025</timeConstantDown>
-      <maxRotVelocity>1500</maxRotVelocity>
-      <motorConstant>2e-05</motorConstant>
-      <momentConstant>0.06</momentConstant>
-      <commandSubTopic>command/motor_speed</commandSubTopic>
-      <motorNumber>0</motorNumber>
-      <rotorDragCoefficient>0.0000806428</rotorDragCoefficient>
-      <rollingMomentCoefficient>1e-06</rollingMomentCoefficient>
-      <rotorVelocitySlowdownSim>20</rotorVelocitySlowdownSim>
-      <motorType>velocity</motorType>
-    </plugin>
-    <plugin
-      filename="gz-sim-joint-position-controller-system"
-      name="gz::sim::systems::JointPositionController">
+    <!-- Task 5: this plugin is what makes the three tilt servos work at
+         all. ArduPilotPlugin's POSITION + useForce=1 path reads the
+         joint's gz::sim::components::JointPosition component
+         (ArduPilotPlugin.cc:1368-1379) and does NOTHING AT ALL if that
+         component is absent -- and the plugin only ever creates
+         JointForceCmd / JointVelocityCmd for its controls (same file,
+         :413-438), never JointPosition. Nothing else in this model
+         touches the three tilt joints, so the component never existed and
+         all three <control type="POSITION"> blocks were silent no-ops:
+         ArduPilot swung its vectored-yaw command across a third of its
+         range while the joints sat at exactly 0.0 deg and the airframe
+         wound up to 2.1 rad/s of yaw -- measured live off
+         /world/urban_canyon/dynamic_pose/info.
+
+         JointStatePublisher creates JointPosition for every joint it is
+         given, which is all this needs; the published joint_state topic
+         itself is a harmless side effect. Listing only the three tilt
+         joints -- the rotor joints use VELOCITY, which reads JointVelocity
+         (already populated by the physics system) and works as-is. -->
+    <plugin filename="gz-sim-joint-state-publisher-system"
+            name="gz::sim::systems::JointStatePublisher">
       <joint_name>motor_0_joint</joint_name>
-      <sub_topic>servo_3</sub_topic>
-      <p_gain>100</p_gain>
-      <i_gain>0</i_gain>
-      <d_gain>0</d_gain>
-      <i_max>0.0</i_max>
-      <i_min>0.0</i_min>
-      <cmd_max>2</cmd_max>
-      <cmd_min>-2</cmd_min>
-      <err_max>0.2</err_max>
-    </plugin>
-    <!-- Rear/tail rotor: now tiltable (motor_1_joint) rather than fixed,
-         and resized as an active cruise pusher rather than a rotor that
-         just stops in forward flight. motorConstant is sized so max
-         thrust (motorConstant * maxRotVelocity^2) is half the vehicle's
-         weight: mass 5.165 kg (base_link 5.0 + 3x0.05 motor housings +
-         3x0.005 rotor blades) * 9.80665 = 50.65 N weight; target thrust
-         25.33 N / 1500^2 = 1.126e-05. See CA_ROTOR2_CT in the airframe
-         file for the matching PX4-side allocation coefficient. -->
-    <plugin filename="gz-sim-multicopter-motor-model-system"
-      name="gz::sim::systems::MulticopterMotorModel">
-      <jointName>rotor_1_joint</jointName>
-      <linkName>rotor_1</linkName>
-      <turningDirection>ccw</turningDirection>
-      <timeConstantUp>0.0125</timeConstantUp>
-      <timeConstantDown>0.025</timeConstantDown>
-      <maxRotVelocity>1500</maxRotVelocity>
-      <motorConstant>1.126e-05</motorConstant>
-      <momentConstant>0.06</momentConstant>
-      <commandSubTopic>command/motor_speed</commandSubTopic>
-      <motorNumber>2</motorNumber>
-      <rotorDragCoefficient>0.0000806428</rotorDragCoefficient>
-      <rollingMomentCoefficient>1e-06</rollingMomentCoefficient>
-      <rotorVelocitySlowdownSim>20</rotorVelocitySlowdownSim>
-      <motorType>velocity</motorType>
-    </plugin>
-    <plugin
-      filename="gz-sim-joint-position-controller-system"
-      name="gz::sim::systems::JointPositionController">
       <joint_name>motor_1_joint</joint_name>
-      <sub_topic>servo_5</sub_topic>
-      <p_gain>100</p_gain>
-      <i_gain>0</i_gain>
-      <d_gain>0</d_gain>
-      <i_max>0.0</i_max>
-      <i_min>0.0</i_min>
-      <cmd_max>2</cmd_max>
-      <cmd_min>-2</cmd_min>
-      <err_max>0.2</err_max>
-    </plugin>
-    <plugin filename="gz-sim-multicopter-motor-model-system"
-      name="gz::sim::systems::MulticopterMotorModel">
-      <jointName>rotor_2_joint</jointName>
-      <linkName>rotor_2</linkName>
-      <turningDirection>cw</turningDirection>
-      <timeConstantUp>0.0125</timeConstantUp>
-      <timeConstantDown>0.025</timeConstantDown>
-      <maxRotVelocity>1500</maxRotVelocity>
-      <motorConstant>2e-05</motorConstant>
-      <momentConstant>0.06</momentConstant>
-      <commandSubTopic>command/motor_speed</commandSubTopic>
-      <motorNumber>1</motorNumber>
-      <rotorDragCoefficient>0.0000806428</rotorDragCoefficient>
-      <rollingMomentCoefficient>1e-06</rollingMomentCoefficient>
-      <rotorVelocitySlowdownSim>20</rotorVelocitySlowdownSim>
-      <motorType>velocity</motorType>
-    </plugin>
-    <plugin
-      filename="gz-sim-joint-position-controller-system"
-      name="gz::sim::systems::JointPositionController">
       <joint_name>motor_2_joint</joint_name>
-      <sub_topic>servo_4</sub_topic>
-      <p_gain>100</p_gain>
-      <i_gain>0</i_gain>
-      <d_gain>0</d_gain>
-      <i_max>0.0</i_max>
-      <i_min>0.0</i_min>
-      <cmd_max>2</cmd_max>
-      <cmd_min>-2</cmd_min>
-      <err_max>0.2</err_max>
+    </plugin>
+
+    <!-- Rotor thrust rig, ardupilot-phase1 Task 5 (Step 0).
+         ArduPilotPlugin's VELOCITY <control> blocks below only spin the
+         rotor JOINTS (ApplyMotorForces() writes JointForceCmd, never a
+         Wrench on base_link) -- they generate zero lift on their own.
+         These LiftDrag blocks are what turns that spin into thrust, the
+         same rig ~/ardupilot_gazebo/models/iris_with_ardupilot/model.sdf
+         uses. Two blocks per rotor at opposite cp (as iris does) so the
+         off-axis moments of the two half-forces cancel instead of shaking
+         the airframe at rotor frequency.
+
+         Coefficients (a0, cla, cda, alpha_stall, cl/cd_stall, area,
+         air_density) are iris_with_ardupilot's verified-working values
+         verbatim. ONLY the cp radius is sized for this vehicle, so that
+         thrust matches the PX4 model's own live-tuned sizing
+         (../tricopter/model.sdf: motorConstant=1.608e-05,
+         maxRotVelocity=1500 -> 1.608e-05 * 1500^2 = 36.2 N per rotor at
+         full command):
+
+           F_rotor = 2 * 0.5 * rho * (omega*r)^2 * area * (cla * a0)
+                   = 2 * 0.5 * 1.2041 * (1500 r)^2 * 0.002 * 1.275
+                   = 6908 * r^2   [N]
+           36.2 N  ->  r = 0.0724 m  (0.72 of the 0.1 m rotor radius --
+                                      a physically sensible effective
+                                      blade station, not a fudge)
+
+         Vehicle mass is 5.165 kg (50.7 N), so 3 x 36.2 N = 108.5 N gives
+         a ~2.1 thrust/weight ratio and a hover at ~47% thrust.
+
+         `forward` must point the way the cp actually travels for that
+         rotor's sign of rotation, or the block produces DOWNforce:
+         rotor_0/rotor_1 have multiplier +1500 (ccw), rotor_2 has -1500
+         (cw), so rotor_2's forward vectors are flipped -- exactly the
+         convention iris uses between its own rotor_0/1 and rotor_2/3. -->
+    <!-- rotor_0 -->
+    <plugin filename="gz-sim-lift-drag-system" name="gz::sim::systems::LiftDrag">
+      <a0>0.3</a0>
+      <alpha_stall>1.4</alpha_stall>
+      <cla>4.2500</cla>
+      <cda>0.10</cda>
+      <cma>0.0</cma>
+      <cla_stall>-0.025</cla_stall>
+      <cda_stall>0.0</cda_stall>
+      <cma_stall>0.0</cma_stall>
+      <area>0.002</area>
+      <air_density>1.2041</air_density>
+      <cp>0.0724 0 0</cp>
+      <forward>0 1 0</forward>
+      <upward>0 0 1</upward>
+      <link_name>rotor_0</link_name>
+    </plugin>
+    <plugin filename="gz-sim-lift-drag-system" name="gz::sim::systems::LiftDrag">
+      <a0>0.3</a0>
+      <alpha_stall>1.4</alpha_stall>
+      <cla>4.2500</cla>
+      <cda>0.10</cda>
+      <cma>0.0</cma>
+      <cla_stall>-0.025</cla_stall>
+      <cda_stall>0.0</cda_stall>
+      <cma_stall>0.0</cma_stall>
+      <area>0.002</area>
+      <air_density>1.2041</air_density>
+      <cp>-0.0724 0 0</cp>
+      <forward>0 -1 0</forward>
+      <upward>0 0 1</upward>
+      <link_name>rotor_0</link_name>
+    </plugin>
+    <!-- rotor_1 -->
+    <plugin filename="gz-sim-lift-drag-system" name="gz::sim::systems::LiftDrag">
+      <a0>0.3</a0>
+      <alpha_stall>1.4</alpha_stall>
+      <cla>4.2500</cla>
+      <cda>0.10</cda>
+      <cma>0.0</cma>
+      <cla_stall>-0.025</cla_stall>
+      <cda_stall>0.0</cda_stall>
+      <cma_stall>0.0</cma_stall>
+      <area>0.002</area>
+      <air_density>1.2041</air_density>
+      <cp>0.0724 0 0</cp>
+      <forward>0 1 0</forward>
+      <upward>0 0 1</upward>
+      <link_name>rotor_1</link_name>
+    </plugin>
+    <plugin filename="gz-sim-lift-drag-system" name="gz::sim::systems::LiftDrag">
+      <a0>0.3</a0>
+      <alpha_stall>1.4</alpha_stall>
+      <cla>4.2500</cla>
+      <cda>0.10</cda>
+      <cma>0.0</cma>
+      <cla_stall>-0.025</cla_stall>
+      <cda_stall>0.0</cda_stall>
+      <cma_stall>0.0</cma_stall>
+      <area>0.002</area>
+      <air_density>1.2041</air_density>
+      <cp>-0.0724 0 0</cp>
+      <forward>0 -1 0</forward>
+      <upward>0 0 1</upward>
+      <link_name>rotor_1</link_name>
+    </plugin>
+    <!-- rotor_2 -->
+    <plugin filename="gz-sim-lift-drag-system" name="gz::sim::systems::LiftDrag">
+      <a0>0.3</a0>
+      <alpha_stall>1.4</alpha_stall>
+      <cla>4.2500</cla>
+      <cda>0.10</cda>
+      <cma>0.0</cma>
+      <cla_stall>-0.025</cla_stall>
+      <cda_stall>0.0</cda_stall>
+      <cma_stall>0.0</cma_stall>
+      <area>0.002</area>
+      <air_density>1.2041</air_density>
+      <cp>0.0724 0 0</cp>
+      <forward>0 -1 0</forward>
+      <upward>0 0 1</upward>
+      <link_name>rotor_2</link_name>
+    </plugin>
+    <plugin filename="gz-sim-lift-drag-system" name="gz::sim::systems::LiftDrag">
+      <a0>0.3</a0>
+      <alpha_stall>1.4</alpha_stall>
+      <cla>4.2500</cla>
+      <cda>0.10</cda>
+      <cma>0.0</cma>
+      <cla_stall>-0.025</cla_stall>
+      <cda_stall>0.0</cda_stall>
+      <cma_stall>0.0</cma_stall>
+      <area>0.002</area>
+      <air_density>1.2041</air_density>
+      <cp>-0.0724 0 0</cp>
+      <forward>0 1 0</forward>
+      <upward>0 0 1</upward>
+      <link_name>rotor_2</link_name>
+    </plugin>
+
+    <!-- ArduPilot integration, ardupilot-phase1 Task 3.
+         Replaces all six PX4 plugins that used to drive the three rotor
+         joints (rotor_0/1/2_joint, via gz-sim-multicopter-motor-model-
+         system) and the three tilt joints (motor_0/1/2_joint, via
+         gz-sim-joint-position-controller-system) with ONE ArduPilotPlugin
+         block, matching the working pattern in
+         ~/ardupilot_gazebo/models/iris_with_ardupilot/model.sdf (motor
+         VELOCITY controls) and .../zephyr_with_ardupilot/model.sdf
+         (POSITION controls for control surfaces, same PID shape used
+         below for the tilt servos) -- both installed, buildable
+         references, read directly rather than guessed at.
+
+         Rotor thrust: this plugin only spins/positions joints via a
+         force-mode PID (useForce=1); it does not compute aerodynamic
+         thrust from that spin the way the deleted MulticopterMotorModel
+         plugin did (motorConstant * velocity^2). Task 5 added the six
+         LiftDrag blocks directly above to supply that missing force --
+         they are load-bearing, not decoration; delete them and the
+         vehicle cannot leave the ground.
+
+         Link/joint names (rotor_0/1/2, motor_0/1/2_joint) and physical
+         positions are unchanged from ../tricopter/model.sdf:
+           motor_0 = FRONT RIGHT (0.35, -0.35), rotor_0 spins ccw
+           motor_1 = REAR        (-0.35, 0),    rotor_1 spins ccw
+           motor_2 = FRONT LEFT  (0.35, 0.35),  rotor_2 spins cw
+         matching Task 2's AP_MotorsTri ordering (front right / front left
+         / rear) and turning directions already baked into the PX4 mesh
+         choices (iris_prop_ccw.dae vs iris_prop_cw.dae) above. -->
+    <plugin name="ArduPilotPlugin" filename="ArduPilotPlugin">
+      <fdm_addr>127.0.0.1</fdm_addr>
+      <fdm_port_in>9002</fdm_port_in>
+      <connectionTimeoutMaxCount>5</connectionTimeoutMaxCount>
+      <lock_step>1</lock_step>
+      <gazeboXYZToNED degrees="true">0 0 0 180 0 90</gazeboXYZToNED>
+      <modelXYZToAirplaneXForwardZDown degrees="true">0 0 0 180 0 0</modelXYZToAirplaneXForwardZDown>
+      <imuName>base_link::imu_sensor</imuName>
+
+      <!-- Motor thrust controls -- type VELOCITY, matching the PX4
+           model's velocity-based MulticopterMotorModel setup (Step 3's
+           mandated choice) and iris_with_ardupilot's own VELOCITY
+           controls. multiplier=1500 matches the deleted plugins'
+           <maxRotVelocity>1500</maxRotVelocity> so a full-scale [0,1]
+           command asks for the same top rotor speed as before; sign
+           follows each rotor's real turning direction (ccw positive, cw
+           negative), the same convention iris_with_ardupilot uses for
+           its own ccw/cw rotor pairs. p_gain=0.20 is iris_with_ardupilot's
+           verified-working value, not independently tuned here -- Step 2
+           of the brief is explicit that these numbers are a structurally-
+           valid starting point, empirically confirmed only once Gazebo+
+           SITL actually fly (Task 5), the same way CA_ROTORi_CT needed
+           live tuning on the PX4 branch.
+
+           Channel numbers here follow Task 2's live SITL channel
+           assignment (SERVO5/6/8 -> M1 front-right/M2 front-left/M4 rear,
+           1-indexed servo output -> 0-indexed fdm channel = SERVOn - 1).
+           Task 4 assigns SERVOn_FUNCTION independently and may not
+           reproduce these exact numbers -- what this SDF actually
+           depends on is the angle/velocity mapping per channel, not the
+           channel number itself. -->
+      <control channel="4"> <!-- SERVO5: motor 1 = front right -->
+        <jointName>rotor_0_joint</jointName>
+        <useForce>1</useForce>
+        <multiplier>1500</multiplier>
+        <offset>0</offset>
+        <servo_min>1000</servo_min>
+        <servo_max>2000</servo_max>
+        <type>VELOCITY</type>
+        <p_gain>0.20</p_gain>
+        <i_gain>0</i_gain>
+        <d_gain>0</d_gain>
+        <i_max>0</i_max>
+        <i_min>0</i_min>
+        <cmd_max>2.5</cmd_max>
+        <cmd_min>-2.5</cmd_min>
+        <rotorVelocitySlowdownSim>1</rotorVelocitySlowdownSim>
+      </control>
+      <control channel="5"> <!-- SERVO6: motor 2 = front left -->
+        <jointName>rotor_2_joint</jointName>
+        <useForce>1</useForce>
+        <multiplier>-1500</multiplier>
+        <offset>0</offset>
+        <servo_min>1000</servo_min>
+        <servo_max>2000</servo_max>
+        <type>VELOCITY</type>
+        <p_gain>0.20</p_gain>
+        <i_gain>0</i_gain>
+        <d_gain>0</d_gain>
+        <i_max>0</i_max>
+        <i_min>0</i_min>
+        <cmd_max>2.5</cmd_max>
+        <cmd_min>-2.5</cmd_min>
+        <rotorVelocitySlowdownSim>1</rotorVelocitySlowdownSim>
+      </control>
+      <control channel="7"> <!-- SERVO8: motor 4 = rear -->
+        <jointName>rotor_1_joint</jointName>
+        <useForce>1</useForce>
+        <multiplier>1500</multiplier>
+        <offset>0</offset>
+        <servo_min>1000</servo_min>
+        <servo_max>2000</servo_max>
+        <type>VELOCITY</type>
+        <p_gain>0.20</p_gain>
+        <i_gain>0</i_gain>
+        <d_gain>0</d_gain>
+        <i_max>0</i_max>
+        <i_min>0</i_min>
+        <cmd_max>2.5</cmd_max>
+        <cmd_min>-2.5</cmd_min>
+        <rotorVelocitySlowdownSim>1</rotorVelocitySlowdownSim>
+      </control>
+
+      <!-- Tilt-servo controls -- type POSITION, useForce=1 (a PID drives
+           JointForceCmd toward a target JointPosition in radians; this is
+           the only working POSITION path in ArduPilotPlugin.cc -- pure
+           position-mode without useForce warns "no JointPositionCmd
+           component" and does nothing, confirmed by reading
+           ApplyMotorForces() in ~/ardupilot_gazebo/src/ArduPilotPlugin.cc).
+
+           cmd (target radians) = multiplier * (raw_cmd + offset), where
+           raw_cmd = clamp((pwm - servo_min)/(servo_max - servo_min), 0, 1)
+           -- see UpdateMotorCommands() in the same file. Both front and
+           rear use servo_min=1000/servo_max=2000 and a 110 deg (1.9199
+           rad) span, per Task 2's report ("both tilt joints share a 0.11
+           deg/us PWM scale"); only the offset differs, since it's the
+           same linear scale positioned at a different point on the
+           shared axis:
+
+             front (motor_0_joint, motor_2_joint): PWM 1000->-20 deg,
+             PWM 2000->+90 deg.
+               multiplier = (90 - -20) deg in rad = 1.9198621771937625
+               offset     = -20 deg in rad / multiplier = -0.18181818...
+               check: raw=0 -> -0.349066 rad (-20 deg); raw=1 -> 1.570796
+               rad (+90 deg). Matches Task 2's verified hover waypoint
+               (PWM 1181 -> 0 deg) and the widened motor_0/2_joint
+               <limit> above.
+
+             rear (motor_1_joint): Task 2's wire-verified waypoints are
+             PWM 1000 -> "90 deg" (cruise, thrust forward) and PWM 1818
+             -> "180 deg" (hover, thrust up), in the SPEC's rear-datum
+             convention. In THIS SDF's joint convention 0 rad is upright
+             (rotor_1's link pose carries no 180 deg mounting rotation),
+             so subtract 180 deg from both: PWM 1818 -> 0 rad and
+             PWM 1000 -> +pi/2, the same +pi/2 = forward the front pair
+             uses. That makes the rear's PWM->angle slope NEGATIVE, hence
+             the negative multiplier -- the only sign inversion in this
+             file, and it is a real physical one, not a duplicate of
+             SERVO14_REVERSED=1 (which is already baked into the PWM Task
+             2 measured on the wire):
+               multiplier = -1.9198621771937625 (same 110 deg span, reversed)
+               offset     = -0.8181818181818182
+               check: raw=0    -> +1.570796 rad (+90 deg, cruise)
+                      raw=0.818-> +0.000000 rad (hover, PWM 1818)
+                      raw=1    -> -0.349066 rad (-20 deg, unused end)
+             Task 5 fix: Task 3's +1.9199/+0.8182 pair put the rear rotor
+             at +180 deg (inverted, thrusting DOWN) at hover; the vehicle
+             flipped within ~2 s of arming until this was corrected.
+
+           Task 5 retuned these from zephyr_with_ardupilot's p_gain=10.0 /
+           cmd_max=2.5 (Task 3 copied them and flagged them as untuned for
+           this heavier joint). zephyr drives a near-frictionless control
+           surface; these tilt joints carry <friction>1.0</friction>, so a
+           P-only controller capped at 2.5 N.m needed a 0.25 rad error just
+           to reach the cap and could not break static friction for the few
+           degrees of vectored-yaw trim ArduPilot actually asks for. The
+           joints stayed pinned at hover position, the yaw loop saw no
+           response, wound its command open-loop, and the airframe spun up
+           to 0.74 rad/s of yaw while climbing -- observed live.
+
+           p_gain=500 puts the stick-slip deadband at 1.0/500 = 0.002 rad
+           (0.11 deg); at p_gain=100 the residual +-0.57 deg deadband showed
+           up as a slow +-8 deg yaw limit cycle in flight. cmd_max=20 N.m
+           leaves headroom to slew, d_gain=5.0 damps the stiff loop. -->
+      <control channel="11"> <!-- SERVO12: k_tiltMotorRight -> front right -->
+        <jointName>motor_0_joint</jointName>
+        <useForce>1</useForce>
+        <multiplier>1.9198621771937625</multiplier>
+        <offset>-0.18181818181818182</offset>
+        <servo_min>1000</servo_min>
+        <servo_max>2000</servo_max>
+        <type>POSITION</type>
+        <p_gain>500.0</p_gain>
+        <i_gain>0</i_gain>
+        <d_gain>5.0</d_gain>
+        <i_max>0</i_max>
+        <i_min>0</i_min>
+        <cmd_max>20.0</cmd_max>
+        <cmd_min>-20.0</cmd_min>
+      </control>
+      <control channel="12"> <!-- SERVO13: k_tiltMotorLeft -> front left -->
+        <jointName>motor_2_joint</jointName>
+        <useForce>1</useForce>
+        <multiplier>1.9198621771937625</multiplier>
+        <offset>-0.18181818181818182</offset>
+        <servo_min>1000</servo_min>
+        <servo_max>2000</servo_max>
+        <type>POSITION</type>
+        <p_gain>500.0</p_gain>
+        <i_gain>0</i_gain>
+        <d_gain>5.0</d_gain>
+        <i_max>0</i_max>
+        <i_min>0</i_min>
+        <cmd_max>20.0</cmd_max>
+        <cmd_min>-20.0</cmd_min>
+      </control>
+      <control channel="13"> <!-- SERVO14: k_tiltMotorRear -> rear -->
+        <jointName>motor_1_joint</jointName>
+        <useForce>1</useForce>
+        <multiplier>-1.9198621771937625</multiplier>
+        <offset>-0.8181818181818182</offset>
+        <servo_min>1000</servo_min>
+        <servo_max>2000</servo_max>
+        <type>POSITION</type>
+        <p_gain>500.0</p_gain>
+        <i_gain>0</i_gain>
+        <d_gain>5.0</d_gain>
+        <i_max>0</i_max>
+        <i_min>0</i_min>
+        <cmd_max>20.0</cmd_max>
+        <cmd_min>-20.0</cmd_min>
+      </control>
     </plugin>
     <static>0</static>
   </model>

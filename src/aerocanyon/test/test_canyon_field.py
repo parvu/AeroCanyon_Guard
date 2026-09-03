@@ -57,7 +57,7 @@ def test_wind_inside_a_building_is_near_zero():
     field, meta = cf.generate(nx=40, ny=30, nz=16)
     grid = cf.WindGrid(field, meta)
     b = cg.BUILDINGS[0]
-    inside = grid.at(np.array([b.cx, b.cy, b.sz / 2.0]))
+    inside = grid.at(np.array([b.cx, b.cy, cg.GROUND_Z + b.sz / 2.0]))
     assert np.linalg.norm(inside) < 1.0
 
 
@@ -90,3 +90,43 @@ def test_dryden_is_correlated_in_time():
     s = np.array([g.step(15.0) for _ in range(4000)])[:, 0]
     lag1 = np.corrcoef(s[:-1], s[1:])[0, 1]
     assert lag1 > 0.8
+
+
+def test_generate_map_zone_has_the_declared_shape():
+    field, meta = cf.generate_map_zone(nx=10, ny=8, nz=6)
+    assert field.shape == (10, 8, 6, 3)
+    assert meta['shape'] == [10, 8, 6]
+
+
+def test_generate_map_zone_wind_increases_with_height_away_from_buildings():
+    """log_law is still the vertical-profile backbone for map_zone --
+    away from any building's recirculation zone, wind should still
+    increase with height the same way it does over urban_canyon."""
+    field, meta = cf.generate_map_zone(nx=10, ny=10, nz=16)
+    grid = cf.WindGrid(field, meta)
+    p_far = np.array([200.0, 200.0])  # corner of the grid, away from buildings
+    low = np.linalg.norm(grid.at(np.array([p_far[0], p_far[1], cg.GROUND_Z + 5.0])))
+    high = np.linalg.norm(grid.at(np.array([p_far[0], p_far[1], cg.GROUND_Z + 50.0])))
+    assert high > low
+
+
+def test_wind_grid_save_and_load_round_trip_per_world(tmp_path):
+    field, meta = cf.generate(nx=6, ny=5, nz=4)
+    grid = cf.WindGrid(field, meta)
+    grid.save(tmp_path, world='urban_canyon')
+    grid.save(tmp_path, world='map_zone')
+    assert (tmp_path / 'wind_grid.npy').exists(), (
+        'urban_canyon keeps the original, un-suffixed filename')
+    assert (tmp_path / 'wind_grid_map_zone.npy').exists()
+
+    loaded_uc = cf.WindGrid.load(tmp_path, world='urban_canyon')
+    loaded_mz = cf.WindGrid.load(tmp_path, world='map_zone')
+    np.testing.assert_array_equal(loaded_uc.field, field)
+    np.testing.assert_array_equal(loaded_mz.field, field)
+
+
+def test_wind_grid_load_defaults_to_urban_canyon(tmp_path):
+    field, meta = cf.generate(nx=6, ny=5, nz=4)
+    cf.WindGrid(field, meta).save(tmp_path)
+    loaded = cf.WindGrid.load(tmp_path)
+    np.testing.assert_array_equal(loaded.field, field)

@@ -1,303 +1,457 @@
-"""Regression coverage for the arm/offboard/takeoff sequence.
+"""Regression coverage for controller_node's AUTO-mission control path."""
+import json
 
-controller_node previously crashed with a C-level assertion on the very
-first control tick (numpy.float32 handed to a geometry_msgs/Vector3
-field), which silently killed the node before it ever reached the tick
-that requests offboard mode and arms the vehicle. PX4 logged nothing --
-no rejected command, no error -- because the publisher was already dead.
-Nothing in the test suite exercised the tick loop at all, so this went
-unnoticed. These tests drive the real tick loop (no mocked physics) and
-assert the vehicle_command sequence actually gets sent.
-"""
 import numpy as np
+import pytest
 import rclpy
-from rclpy.duration import Duration
+from mavros_msgs.msg import OverrideRCIn
+from mavros_msgs.msg import Waypoint as MavWaypoint
+from mavros_msgs.msg import WaypointList
 
-import aerocanyon.controller_node as controller_node
-from aerocanyon.controller_node import (ENGAGE_RETRY_TICKS,
+from aerocanyon import canyon_geometry as cg
+from aerocanyon import frames
+from aerocanyon.controller_node import (CRUISE_ALT_M, CRUISE_WP_SEQ,
+                                        ENGAGE_RETRY_TICKS, HOME_LAT, HOME_LON,
+                                        LAND_TRIGGER_LOCAL_M, MODE_AUTO,
+                                        QSTAB_CLIMB_ALT_M,
                                         SETPOINTS_BEFORE_OFFBOARD,
                                         ControllerNode)
-from px4_msgs.msg import VehicleCommand, VtolVehicleStatus
+from aerocanyon.rc_pwm import MODE_QSTABILIZE
 
 
-def _run_ticks(mode, n):
-    """Run the real tick loop n times, recording every VehicleCommand the
-    node would have sent and every TrajectorySetpoint it published.
-    Publishing still goes through rclpy (so any serialization crash from
-    earlier is still exercised), we just also intercept the send/publish
-    calls to observe intent without needing a live PX4/DDS peer."""
-    rclpy.init(args=[])
-    try:
-        node = ControllerNode()
-        node.mode = mode  # override the 'baseline' default without a launch param
-        sent = []
-        real_send = node._send_command
+class _FakeFuture:
+    """A WaypointPush service future that's already done -- _tick() reads
+    .done()/.result() the same tick it fires the request, matching the
+    synchronous stubs the rest of this test file already uses for
+    arm()/set_mode()."""
 
-        def spy_send(command, param1=0.0, param2=0.0):
-            sent.append((command, param1, param2))
-            real_send(command, param1, param2)
+    def __init__(self, result):
+        self._result = result
 
-        node._send_command = spy_send
+    def done(self):
+        return True
 
-        setpoints = []
-        real_publish = node.sp_pub.publish
-
-        def spy_publish(msg):
-            setpoints.append(msg)
-            real_publish(msg)
-
-        node.sp_pub.publish = spy_publish
-
-        for _ in range(n):
-            node._tick()
-        node.destroy_node()
-        return sent, setpoints
-    finally:
-        rclpy.shutdown()
+    def result(self):
+        return self._result
 
 
-def test_tick_loop_survives_past_first_tick():
-    # This alone would have caught the numpy.float32/Vector3 crash: the
-    # old code aborted the whole process on tick 0, so even reaching here
-    # is the regression check.
-    sent, _ = _run_ticks('baseline', SETPOINTS_BEFORE_OFFBOARD + 10)
-    assert len(sent) >= 1
+class _FakeWaypointPushResult:
+    def __init__(self, success=True, wp_transfered=4):
+        self.success = success
+        self.wp_transfered = wp_transfered
 
 
-def test_requests_offboard_mode_and_arm_after_setpoint_stream():
-    sent, _ = _run_ticks('baseline', SETPOINTS_BEFORE_OFFBOARD + 1)
-
-    mode_cmds = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_SET_MODE]
-    arm_cmds = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM]
-
-    assert len(mode_cmds) == 1, 'must request the mode switch exactly once'
-    _, custom_main_mode, custom_sub_mode = mode_cmds[0]
-    assert custom_main_mode == 1.0
-    assert custom_sub_mode == 6.0, 'sub-mode 6 is PX4 offboard'
-
-    assert len(arm_cmds) == 1, 'must request arming exactly once'
-    _, arm_param, _ = arm_cmds[0]
-    assert arm_param == 1.0, 'param1=1 arms; 0 would disarm'
+def _confirmed_push(mission_pushes=None):
+    """A mission_client.call_async stub that reports the push succeeded
+    immediately -- see _FakeFuture. Pass a list to also record requests."""
+    def call_async(req):
+        if mission_pushes is not None:
+            mission_pushes.append(req)
+        return _FakeFuture(_FakeWaypointPushResult())
+    return call_async
 
 
-def test_does_not_request_offboard_before_the_setpoint_stream_is_established():
-    # PX4 rejects an offboard switch with no prior setpoint stream -- the
-    # node must not ask before SETPOINTS_BEFORE_OFFBOARD ticks have primed it.
-    sent, _ = _run_ticks('baseline', SETPOINTS_BEFORE_OFFBOARD)
-    assert sent == []
-
-
-def test_retries_arm_request_until_engaged():
-    # A single arm/offboard request can be silently rejected if PX4 hasn't
-    # finished its own preflight/EKF convergence yet at exactly the tick
-    # SETPOINTS_BEFORE_OFFBOARD fires. Nothing in _run_ticks ever satisfies
-    # ControllerNode.armed/offboard_engaged (no PX4 is present), so if the
-    # node only asked once, this would see exactly one request no matter
-    # how long it ran -- it must keep asking instead.
-    sent, _ = _run_ticks('baseline', SETPOINTS_BEFORE_OFFBOARD + 2 * ENGAGE_RETRY_TICKS + 1)
-    arm_cmds = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM]
-    assert len(arm_cmds) == 3, 'must retry roughly once per ENGAGE_RETRY_TICKS while unengaged'
-
-
-def test_yaw_points_down_the_canyons_actual_travel_direction():
-    # The canyon corridor runs along Gazebo ENU +x (east, see
-    # canyon_geometry.BUILDINGS), not north. A hardcoded sp.yaw=0.0
-    # (north) previously pointed the nose the wrong way while the mission
-    # pulled the vehicle east -- a ~90 degree mismatch that showed up as
-    # the vehicle visibly snapping to the correct heading after takeoff.
-    _, setpoints = _run_ticks('baseline', SETPOINTS_BEFORE_OFFBOARD + 5)
-    from aerocanyon.mission import Mission
-    expected_yaw = float(np.arctan2(Mission().direction[1], Mission().direction[0]))
-    assert setpoints, 'tick loop must publish at least one TrajectorySetpoint'
-    for sp in setpoints:
-        assert abs(sp.yaw - expected_yaw) < 1e-6, (
-            f'sp.yaw={sp.yaw} does not match the canyon travel direction '
-            f'({expected_yaw} rad); a hardcoded yaw=0.0 (north) would fail this')
-        assert abs(sp.yaw) > 1e-6, 'yaw must not silently regress to hardcoded north (0.0)'
-
-
-def test_treatment_mode_also_survives_the_tick_loop():
-    # Treatment mode additionally publishes CBF diagnostics; make sure that
-    # path (float(np.clip(...)) etc.) doesn't have the same bug.
-    sent, _ = _run_ticks('treatment', SETPOINTS_BEFORE_OFFBOARD + 10)
-    assert len(sent) >= 1
-
-
-def _run_ticks_already_engaged(n, elapsed_at_start_s, vel=(0.0, 0.0, 0.0),
-                               pos=(0.0, 0.0, 0.0)):
-    """Like _run_ticks, but fakes the vehicle as already armed + offboard
-    (as if _on_status had already received confirmation) with the mission
-    clock already elapsed_at_start_s into the flight and fixed measured
-    velocity/position, so tests can reach the post-hold cruise phase and
-    control the VTOL transition's speed gate / RTL's position gate
-    without waiting on real wall-clock time or real physics."""
-    rclpy.init(args=[])
-    try:
-        node = ControllerNode()
-        node.armed = True
-        node.offboard_engaged = True
-        node.start_time = node.get_clock().now() - Duration(seconds=elapsed_at_start_s)
-        node.vel = np.array(vel, dtype=float)
-        node.pos = np.array(pos, dtype=float)
-        sent = []
-        real_send = node._send_command
-
-        def spy_send(command, param1=0.0, param2=0.0):
-            sent.append((command, param1, param2))
-            real_send(command, param1, param2)
-
-        node._send_command = spy_send
-        for _ in range(n):
-            node._tick()
-        node.destroy_node()
-        return sent
-    finally:
-        rclpy.shutdown()
-
-
-def test_vtol_transition_is_disabled_by_default():
-    # See controller_node's module docstring / ENABLE_VTOL_TRANSITION
-    # comment for the full account of this session's attempts. Short
-    # version: the Gazebo airspeed sensor is now genuinely fixed (the
-    # world file was missing the gz-sim-air-speed-system plugin), and
-    # with it a full transition+cruise+landing run has been live-verified
-    # to complete successfully for the first time. But cruise still has
-    # recurring pitch excursions (past +-45 degrees), and the one attempt
-    # to fix that via FW_AIRSPD_TRIM/MIN tuning made it WORSE live -- a
-    # sustained ~22s nose-down dive to near-ground contact instead of a
-    # bounded wobble. This test is the safety net: it must keep failing
-    # (loudly, in review) if someone flips ENABLE_VTOL_TRANSITION back on
-    # without first doing real TECS/attitude-rate tuning against live
-    # telemetry, or replacing PX4's transition state machine with direct
-    # actuator control from this node.
-    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=20.0, vel=(12.0, 0.0, -1.0))
-    transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
-    assert transitions == [], (
-        'ENABLE_VTOL_TRANSITION must stay False until either the Gazebo '
-        'airspeed sensor is made functional or PX4\'s transition state '
-        'machine is replaced with direct actuator control from this node')
-
-
-def test_requests_vtol_transition_to_fixed_wing_after_the_hold_phase(monkeypatch):
-    monkeypatch.setattr(controller_node, 'ENABLE_VTOL_TRANSITION', True)
-    # elapsed starts just before hold_s (3.0s default): the transition
-    # must not fire during the vertical-climb/hold phase...
-    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=2.9, vel=(12.0, 0.0, -1.0))
-    transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
-    assert transitions == [], 'must not transition to fixed-wing before the hold phase ends'
-
-
-def test_vtol_transition_fires_once_cruise_speed_and_climb_are_reached(monkeypatch):
-    monkeypatch.setattr(controller_node, 'ENABLE_VTOL_TRANSITION', True)
-    # Regression: transitioning at elapsed == hold_s alone (with no speed
-    # check) stalled and crashed the vehicle every time, because that
-    # instant is exactly when the target has JUST started moving off the
-    # pinned hold point -- horizontal speed is still ~0 then, and a VTOL
-    # has no lift in fixed-wing mode without forward airspeed. vz=-1.0
-    # (NED, climbing) satisfies the added climb-rate precondition.
-    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=3.1, vel=(12.0, 0.0, -1.0))
-    transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
-    assert len(transitions) == 1, 'must request the VTOL transition exactly once'
-
-
-def test_vtol_transition_does_not_fire_at_low_speed_even_after_the_hold_phase(monkeypatch):
-    monkeypatch.setattr(controller_node, 'ENABLE_VTOL_TRANSITION', True)
-    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=3.1, vel=(0.5, 0.0, -1.0))
-    transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
-    assert transitions == [], 'must wait for real forward speed, not just elapsed time'
-
-
-def test_vtol_transition_does_not_fire_without_positive_climb_rate(monkeypatch):
-    monkeypatch.setattr(controller_node, 'ENABLE_VTOL_TRANSITION', True)
-    # Cruise speed alone isn't enough: a level, non-climbing pass at
-    # cruise speed must not trigger the transition either -- this is the
-    # explicitly requested "gain speed, then transition once climbing"
-    # sequence, not a speed-only gate.
-    sent = _run_ticks_already_engaged(5, elapsed_at_start_s=3.1, vel=(12.0, 0.0, 0.0))
-    transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
-    assert transitions == [], 'must wait for a positive climb rate, not just horizontal speed'
-
-
-def test_vtol_transition_fires_anyway_after_the_timeout_cap_even_at_zero_speed(monkeypatch):
-    monkeypatch.setattr(controller_node, 'ENABLE_VTOL_TRANSITION', True)
-    # A stuck-at-zero velocity reading (e.g. the same telemetry-topic bug
-    # fixed elsewhere in this project) must not withhold the transition
-    # forever -- there's a generous elapsed-time cap as a fallback.
-    sent = _run_ticks_already_engaged(1, elapsed_at_start_s=20.0, vel=(0.0, 0.0, 0.0))
-    transitions = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_DO_VTOL_TRANSITION]
-    assert len(transitions) == 1, 'must transition anyway once the timeout cap is reached'
-    _, param1, _ = transitions[0]
-    assert param1 == float(VtolVehicleStatus.VEHICLE_VTOL_STATE_FW)
-
-
-def _run_land_ticks(n, pos, mode='baseline'):
-    """Like _run_ticks_already_engaged, but also exposes the live node
-    (not just the sent commands) so land tests can inspect
-    node.land_requested and the actually-published setpoints."""
+def _run_ticks(mode, n, armed=False):
     rclpy.init(args=[])
     try:
         node = ControllerNode()
         node.mode = mode
-        node.armed = True
-        node.offboard_engaged = True
-        node.start_time = node.get_clock().now() - Duration(seconds=30.0)
-        node.pos = np.array(pos, dtype=float)
-        sent = []
-        real_send = node._send_command
-        node._send_command = lambda command, param1=0.0, param2=0.0: (
-            sent.append((command, param1, param2)), real_send(command, param1, param2))[0]
-        setpoints = []
-        real_publish = node.sp_pub.publish
-        node.sp_pub.publish = lambda msg: (setpoints.append(msg), real_publish(msg))[0]
+        node.mavros_armed = armed
+        arm_calls = []
+        mode_calls = []
+        mission_pushes = []
+        import aerocanyon.controller_node as cn
+        cn.arm = lambda client, value: arm_calls.append(value)
+        cn.set_mode = lambda client, mode: mode_calls.append(mode)
+        node.mission_client.call_async = _confirmed_push(mission_pushes)
 
         for _ in range(n):
             node._tick()
-        result = (sent, setpoints, node.land_requested)
         node.destroy_node()
-        return result
+        return arm_calls, mode_calls, mission_pushes
     finally:
         rclpy.shutdown()
 
 
-def test_lands_in_place_once_position_clears_the_last_tower_row_by_the_margin():
-    # Both modes land where they are once clear of the towers -- see
-    # LAND_CLEARANCE_M's comment for why flying anywhere first (native
-    # RTL, or an earlier custom fly-home-and-land design) is no longer
-    # needed now that each leg gets its own fresh Gazebo/PX4 process --
-    # and why landing is handed off to PX4's own AUTO_LAND rather than
-    # flown under this node's own control: a self-controlled descent held
-    # heading correctly, but its own disarm logic was verified live to be
-    # unsafe (a rejected disarm-while-airborne request could leave the
-    # vehicle with no control input at all, mid-air).
-    #
-    # Triggered on clearing the LAST TOWER ROW's edge (LAND_TRIGGER_LOCAL_M),
-    # not the mission's own exit waypoint -- CANYON_EXIT sits 45m further
-    # out for stable transit dynamics, not as a landing cue, and landing
-    # that much later would mean more time drifting under wind before the
-    # vehicle is actually on the ground.
-    for mode in ('baseline', 'treatment'):
-        sent, setpoints, land_requested = _run_land_ticks(
-            2, pos=(0.0, controller_node.LAND_TRIGGER_LOCAL_M, 0.0), mode=mode)
-        land_cmds = [s for s in sent if s[0] == VehicleCommand.VEHICLE_CMD_NAV_LAND]
-        assert land_requested, f'{mode}: must request landing on clearing the tower row'
-        assert len(land_cmds) == 1, f'{mode}: must request landing exactly once'
-        assert setpoints == [], (
-            f'{mode}: must stop publishing its own setpoint stream once handed off '
-            'to AUTO_LAND -- continuing would fight PX4 for control authority')
+def test_uploads_a_mission_before_requesting_auto_and_arm():
+    arm_calls, mode_calls, pushes = _run_ticks(
+        'baseline', SETPOINTS_BEFORE_OFFBOARD + 1)
+    assert len(pushes) == 1, 'must upload the mission exactly once'
+    assert pushes[0].start_index == 0
+    assert len(pushes[0].waypoints) == 4, (
+        'seq 0 is a home placeholder ArduPilot always overwrites -- '
+        'the real 3-item mission starts at seq 1')
+    assert arm_calls == [] and mode_calls == [], (
+        'must not request AUTO/arm on the same tick as the mission upload')
 
 
-def test_does_not_land_before_clearing_the_last_tower_row_by_the_margin():
-    # 1m short of the required clearance margin.
-    _, _, land_requested = _run_land_ticks(
-        5, pos=(0.0, controller_node.LAND_TRIGGER_LOCAL_M - 1.0, 0.0))
-    assert not land_requested, 'must not land until actually 2m clear of the last tower row'
+def _write_mission_file(tmp_path, items):
+    p = tmp_path / 'mission.json'
+    p.write_text(json.dumps(items))
+    return str(p)
 
 
-if __name__ == '__main__':
-    # Several tests above need pytest's monkeypatch fixture (to flip
-    # ENABLE_VTOL_TRANSITION on for the duration of one test), so this
-    # file needs pytest as its runner rather than a plain function-call
-    # list -- `pytest <this file>` is the real entry point either way.
-    import sys
-    import pytest as _pytest
-    sys.exit(_pytest.main([__file__, '-q']))
+def test_build_mission_for_map_zone_loads_and_replays_the_mission_file(tmp_path):
+    items = [
+        {'command': 84, 'frame': 3, 'x_lat': 44.4345, 'y_long': 26.0480,
+         'z_alt': 25.0, 'autocontinue': True},
+        {'command': 16, 'frame': 3, 'x_lat': 44.4348, 'y_long': 26.0490,
+         'z_alt': 30.0, 'autocontinue': True},
+        {'command': 85, 'frame': 3, 'x_lat': 44.4350, 'y_long': 26.0495,
+         'z_alt': 0.0, 'autocontinue': True},
+    ]
+    mission_file = _write_mission_file(tmp_path, items)
+
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        node.world = 'map_zone'
+        node.mission_file = mission_file
+        mission = node._build_mission()
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+
+    assert len(mission) == 4, (
+        'home placeholder (seq 0, always overwritten by ArduPilot -- see '
+        'the urban_canyon mission\'s own docstring) + the 3 real items')
+    assert mission[1].command == 84 and mission[1].is_current
+    assert mission[2].command == 16 and not mission[2].is_current
+    assert mission[3].command == 85
+    assert mission[3].x_lat == pytest.approx(44.4350)
+    assert mission[2].z_alt == pytest.approx(30.0), (
+        'map_zone replays each item\'s own captured altitude, not the '
+        'fixed CRUISE_ALT_M urban_canyon uses')
+
+
+def test_build_mission_for_urban_canyon_is_unaffected():
+    """world defaults to urban_canyon -- _build_mission's existing
+    4-item fixed mission must be byte-for-byte the same as before this
+    task's changes."""
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        mission = node._build_mission()
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+    assert len(mission) == 4
+    assert mission[1].command == 84  # NAV_VTOL_TAKEOFF
+    assert mission[3].command == 85  # NAV_VTOL_LAND
+
+
+def test_requests_qstabilize_and_arm_once_mission_confirmed():
+    arm_calls, mode_calls, _ = _run_ticks(
+        'baseline', SETPOINTS_BEFORE_OFFBOARD + ENGAGE_RETRY_TICKS + 1)
+    assert mode_calls == [MODE_QSTABILIZE], (
+        'arms into QSTABILIZE first (climbs, then AUTO) -- gated on '
+        '_mission_confirmed, not just the push having been sent, which is '
+        'what actually fixed the mission-complete-instantly bug (see the '
+        'module docstring above _tick)')
+    assert arm_calls == [True]
+
+
+def test_does_not_switch_to_auto_before_climbing_past_threshold():
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        node.mode = 'baseline'
+        node.mavros_armed = True
+        mode_calls = []
+        import aerocanyon.controller_node as cn
+        cn.arm = lambda client, value: None
+        cn.set_mode = lambda client, mode: mode_calls.append(mode)
+        node.mission_client.call_async = _confirmed_push()
+
+        for _ in range(5):
+            node._tick()
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+    assert mode_calls == []
+
+
+def test_switches_to_auto_once_climbed_past_threshold():
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        node.mode = 'baseline'
+        node.mavros_armed = True
+        mode_calls = []
+        import aerocanyon.controller_node as cn
+        cn.arm = lambda client, value: None
+        cn.set_mode = lambda client, mode: mode_calls.append(mode)
+        node.mission_client.call_async = _confirmed_push()
+
+        node._tick()  # enters 'climbing', captures the start altitude
+        node.pos = np.array([0.0, 0.0, -QSTAB_CLIMB_ALT_M - 1.0])  # NED down: climbed past threshold
+        node._tick()
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+    assert mode_calls == [MODE_AUTO]
+
+
+def test_disarming_after_flying_marks_mission_complete_and_stops_re_arming():
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        node.mode = 'baseline'
+        node.mavros_armed = True
+        arm_calls = []
+        mode_calls = []
+        import aerocanyon.controller_node as cn
+        cn.arm = lambda client, value: arm_calls.append(value)
+        cn.set_mode = lambda client, mode: mode_calls.append(mode)
+        node.mission_client.call_async = _confirmed_push()
+
+        node._tick()  # enters 'climbing'
+        node.pos = np.array([0.0, 0.0, -QSTAB_CLIMB_ALT_M - 1.0])
+        node._tick()  # switches to AUTO
+        assert mode_calls == [MODE_AUTO]
+
+        node.mavros_armed = False  # landed and disarmed
+        for _ in range(3 * ENGAGE_RETRY_TICKS):
+            node._tick()
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+    assert mode_calls == [MODE_AUTO], (
+        'must not request QSTABILIZE/AUTO again after mission completion')
+    assert arm_calls == [], 'must not re-arm after landing'
+
+
+def test_retries_arm_request_until_engaged():
+    arm_calls, _, _ = _run_ticks(
+        'baseline', SETPOINTS_BEFORE_OFFBOARD + 3 * ENGAGE_RETRY_TICKS + 1)
+    assert len(arm_calls) == 3
+
+
+def test_stops_retrying_once_mavros_reports_armed():
+    arm_calls, _, _ = _run_ticks(
+        'baseline', SETPOINTS_BEFORE_OFFBOARD + 3 * ENGAGE_RETRY_TICKS + 1, armed=True)
+    assert arm_calls == []
+
+
+def test_treatment_mode_publishes_cbf_diagnostics_and_survives_the_tick_loop():
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        node.mode = 'treatment'
+        node.mavros_armed = True
+        diags = []
+        real_publish = node.cbf_pub.publish
+        node.cbf_pub.publish = lambda msg: (diags.append(msg), real_publish(msg))[0]
+        node.mission_client.call_async = _confirmed_push()
+        import aerocanyon.controller_node as cn
+        cn.arm = lambda client, value: None
+        cn.set_mode = lambda client, mode: None
+        for _ in range(SETPOINTS_BEFORE_OFFBOARD + 5):
+            node._tick()
+        assert len(diags) >= 1
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+
+
+def _waypoint_list(current_seq, items):
+    """items: list of (lat, lon, alt) -- builds a WaypointList the way
+    MAVROS would report it, home placeholder at seq 0 included (that's
+    how the real topic looks -- see WaypointList.msg)."""
+    msg = WaypointList()
+    msg.current_seq = current_seq
+    msg.waypoints = []
+    for lat, lon, alt in items:
+        w = MavWaypoint()
+        w.x_lat = lat
+        w.y_long = lon
+        w.z_alt = alt
+        msg.waypoints.append(w)
+    return msg
+
+
+def test_active_target_defaults_to_the_fixed_urban_canyon_land_point():
+    """Before any WaypointList has arrived, _active_target must match
+    what _treatment_tick has always corrected -- CRUISE_WP_SEQ's own
+    land-trigger point at CRUISE_ALT_M -- so every existing treatment
+    test (which never publishes a WaypointList) keeps passing."""
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        target_ned, alt = node._active_target()
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+    entry_ned = frames.enu_to_ned(cg.CANYON_ENTRY)
+    assert target_ned[0] == pytest.approx(entry_ned[0])
+    assert target_ned[1] == pytest.approx(LAND_TRIGGER_LOCAL_M)
+    assert alt == pytest.approx(CRUISE_ALT_M)
+
+
+def test_active_target_tracks_the_fcu_reported_current_waypoint():
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        node._on_mission_waypoints(_waypoint_list(
+            current_seq=2,
+            items=[(44.4344, 26.0478, 25.0),   # seq 0: home placeholder
+                   (44.4345, 26.0480, 25.0),   # seq 1: takeoff
+                   (44.4350, 26.0490, 42.0)]))  # seq 2: active cruise wp
+        target_ned, alt = node._active_target()
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+    expected_north, expected_east = frames.latlon_to_ned(
+        44.4350, 26.0490, HOME_LAT, HOME_LON)
+    assert target_ned[0] == pytest.approx(expected_north)
+    assert target_ned[1] == pytest.approx(expected_east)
+    assert alt == pytest.approx(42.0)
+
+
+def test_treatment_corrects_the_fcu_reported_current_seq_not_a_hardcoded_one():
+    """Generalization for map_zone's N-waypoint missions: the correction
+    push/restart must target whichever seq MAVROS reports as current,
+    not the urban_canyon-only CRUISE_WP_SEQ constant."""
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        node.mode = 'treatment'
+        node.mavros_armed = True
+        node._mission_confirmed = True
+        node.wind_est = np.array([2.0, 0.0, 0.0])
+        node._on_mission_waypoints(_waypoint_list(
+            current_seq=5,
+            items=[(44.4344, 26.0478, 25.0)] * 6))
+        pushes = []
+        restarts = []
+        node.mission_client.call_async = _confirmed_push(pushes)
+        node.set_current_client.call_async = lambda req: restarts.append(req)
+
+        for _ in range(60):
+            node._tick()
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+    assert len(pushes) == 1
+    assert pushes[0].start_index == 5
+    assert len(restarts) == 1
+    assert restarts[0].wp_seq == 5
+
+
+def test_treatment_restarts_cruise_waypoint_once_correction_push_confirms():
+    """The correction push alone doesn't move the vehicle -- ArduPilot
+    caches the active nav command's target in RAM and only re-reads
+    mission storage when that command is restarted (AP_Mission::
+    replace_cmd's own doc comment). _treatment_tick must follow every
+    confirmed push with a WaypointSetCurrent on the same index to force
+    that restart -- this is the fix for the bug a 49-point wind sweep
+    caught live (treatment and baseline flew identically). Precondition:
+    _mission_confirmed already True -- see the next test for what
+    happens before that."""
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        node.mode = 'treatment'
+        node.mavros_armed = True
+        node._mission_confirmed = True
+        node.wind_est = np.array([2.0, 0.0, 0.0])  # non-zero so a correction accumulates
+        pushes = []
+        restarts = []
+        node.mission_client.call_async = _confirmed_push(pushes)
+        node.set_current_client.call_async = lambda req: restarts.append(req)
+
+        for _ in range(60):  # > CORRECTION_UPDATE_HZ's 50-tick period, plus a tick to see the confirm
+            node._tick()
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+    assert len(pushes) == 1, 'must have pushed exactly one correction by tick 60'
+    assert len(restarts) == 1, 'must restart the cruise nav command once the push confirms'
+    assert restarts[0].wp_seq == CRUISE_WP_SEQ
+
+
+def test_treatment_does_not_push_corrections_before_initial_mission_confirms():
+    """Live-caught bug: _treatment_tick runs from tick 0 regardless of
+    mission state. Its first correction push landed on tick 50, before
+    the initial 4-item mission upload even starts (tick
+    SETPOINTS_BEFORE_OFFBOARD=100), and its second landed on the SAME
+    tick as that upload -- two concurrent WaypointPush transfers on
+    ArduPilot's one stateful mission-write handshake, which broke both
+    ("Mission upload timeout" on the FCU, no real mission ever
+    delivered). Correction pushes must wait for _mission_confirmed."""
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        node.mode = 'treatment'
+        node.mavros_armed = True
+        node.wind_est = np.array([2.0, 0.0, 0.0])
+        pushes = []
+        node.mission_client.call_async = _confirmed_push(pushes)
+        node.set_current_client.call_async = lambda req: None
+
+        for _ in range(SETPOINTS_BEFORE_OFFBOARD + 1):  # past both correction-push ticks (50, 100)
+            node._tick()
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+    assert len(pushes) == 1, (
+        'the one push by now must be the initial mission upload, not a '
+        'colliding correction push -- _mission_confirmed is only set '
+        'once that upload\'s own future resolves, one tick later')
+
+
+def test_yaw_to_target_publishes_yaw_only_override_when_in_auto():
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        node.fcu_mode = f'CMODE({MODE_AUTO})'
+        entry_ned = frames.enu_to_ned(cg.CANYON_ENTRY)
+        land_ned = np.array([entry_ned[0], LAND_TRIGGER_LOCAL_M, entry_ned[2]])
+        node.pos = land_ned - np.array([0.0, 50.0, 0.0])  # target is due east
+        node.quat = np.array([1.0, 0.0, 0.0, 0.0])  # identity -> yaw 0 (nose north)
+        published = []
+        node.rc_pub.publish = lambda msg: published.append(msg)
+        node._yaw_to_target()
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+    assert len(published) == 1
+    ch = published[0].channels
+    assert ch[3] == 2000, 'target due east of a north-facing vehicle should command full right yaw'
+    assert list(ch[0:3]) == [OverrideRCIn.CHAN_NOCHANGE] * 3, 'must not touch roll/pitch/throttle'
+
+
+def test_yaw_to_target_does_nothing_outside_auto_mode():
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        node.fcu_mode = 'CMODE(18)'  # QHOVER, not AUTO
+        published = []
+        node.rc_pub.publish = lambda msg: published.append(msg)
+        node._yaw_to_target()
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+    assert published == []
+
+
+def test_accumulate_offset_zero_correction_stays_zero():
+    off = ControllerNode._accumulate_offset(
+        np.zeros(3), dt=1.0, current_offset=np.zeros(2), max_offset_m=3.0)
+    assert np.allclose(off, [0.0, 0.0])
+
+
+def test_accumulate_offset_grows_with_sustained_correction():
+    off = np.zeros(2)
+    for _ in range(5):
+        off = ControllerNode._accumulate_offset(
+            np.array([1.0, 0.0, 0.0]), dt=1.0, current_offset=off, max_offset_m=100.0)
+    assert off[0] > 0.0
+
+
+def test_accumulate_offset_clamps_to_max_magnitude():
+    off = np.zeros(2)
+    for _ in range(1000):
+        off = ControllerNode._accumulate_offset(
+            np.array([50.0, 0.0, 0.0]), dt=1.0, current_offset=off, max_offset_m=3.0)
+    assert np.linalg.norm(off) <= 3.0 + 1e-6

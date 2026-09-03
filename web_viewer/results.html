@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>AeroCanyon-Guard trial results</title>
+<style>
+  body { font-family: sans-serif; max-width: 1100px; margin: 2em auto; padding: 0 1em; }
+  h1 { font-size: 1.3em; }
+  figure { margin: 2em 0; }
+  img { max-width: 100%; border: 1px solid #ccc; }
+  figcaption { color: #555; font-size: 0.9em; margin-top: 0.4em; }
+  #missing { color: #a33; display: none; }
+</style>
+</head>
+<body>
+  <h1>AeroCanyon-Guard: baseline vs. FO-PINN+CBF trial results</h1>
+  <p id="missing">No results yet -- this page is served the whole time
+  <code>run_trial.py</code> runs, before the trial finishes and writes
+  <code>results/comparison.png</code>/<code>cbf_intervention.png</code>
+  here. Reload once "results:" prints in the trial's own console output.</p>
+
+  <figure>
+    <img id="comparison" src="results/comparison.png" alt="baseline vs treatment trajectory comparison">
+    <figcaption>Canyon transit trajectory (baseline vs. FO-PINN+CBF) and RMS lateral deviation.</figcaption>
+  </figure>
+
+  <figure>
+    <img id="intervention" src="results/cbf_intervention.png" alt="CBF safety filter intervention">
+    <figcaption>CBF barrier value and filter activity during the treatment flight.</figcaption>
+  </figure>
+
+  <script>
+    // Cache-bust so a re-run's fresh PNGs don't get stuck behind a stale
+    // browser cache of the same filename, and detect a genuinely missing
+    // image (trial still running / hasn't reached plot_results yet)
+    // rather than silently showing a broken-image icon.
+    var t = Date.now();
+    ['comparison', 'intervention'].forEach(function (id) {
+      var img = document.getElementById(id);
+      img.onerror = function () { document.getElementById('missing').style.display = 'block'; };
+      img.src = img.src + '?t=' + t;
+    });
+  </script>
+</body>
+</html>

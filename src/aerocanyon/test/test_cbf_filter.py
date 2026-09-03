@@ -5,7 +5,7 @@ from aerocanyon import cbf_filter, frames
 
 LEVEL = np.array([1.0, 0.0, 0.0, 0.0])
 # Use a position outside the canyon where barrier constraints are weak
-CLEAR_NED = frames.enu_to_ned(np.array([-100.0, 0.0, 25.0]))
+CLEAR_NED = frames.enu_to_ned(np.array([-100.0, 0.0, cg.GROUND_Z + 25.0]))
 
 
 def test_safe_command_in_open_air_passes_through_unchanged():
@@ -22,7 +22,7 @@ def test_command_driving_into_a_building_is_modified():
     f = cbf_filter.CBFFilter()
     b = cg.BUILDINGS[0]
     # Just inside the canyon, next to a tower's -y face, moving toward it.
-    p_enu = np.array([b.cx, b.cy - b.sy / 2 - 3.0, 25.0])
+    p_enu = np.array([b.cx, b.cy - b.sy / 2 - 3.0, cg.GROUND_Z + 25.0])
     p_ned = frames.enu_to_ned(p_enu)
     v_ned = frames.enu_to_ned(np.array([0.0, 4.0, 0.0]))   # toward the wall
     u_ned = frames.enu_to_ned(np.array([0.0, 6.0, 0.0]))   # accelerating into it
@@ -111,11 +111,48 @@ def test_filter_never_returns_a_non_finite_command():
         assert np.all(np.isfinite(out))
 
 
+def test_open_air_skips_the_optimizer_entirely(monkeypatch):
+    # Regression: filter() used to call scipy.optimize.minimize on every
+    # single 20ms tick regardless of whether anything was actually
+    # constraining the command -- live-verified this was slow/jittery
+    # enough to occasionally blow ArduPilot's RC_OVERRIDE_TIME (3s)
+    # failsafe and land the vehicle mid-mission. The overwhelmingly
+    # common case (nothing nearby, no slew violation) must never call
+    # the optimizer at all.
+    calls = []
+    monkeypatch.setattr(cbf_filter, 'minimize',
+                        lambda *a, **k: calls.append(1))
+    f = cbf_filter.CBFFilter()
+    f.filter(np.array([0.5, 0.0, 0.0]), CLEAR_NED,
+             np.array([12.0, 0.0, 0.0]), np.zeros(3), LEVEL)
+    assert calls == [], 'the optimizer must not run when nothing is constraining the command'
+
+
+def test_constrained_case_still_uses_the_optimizer(monkeypatch):
+    # The other half of the regression above: the fast path must not
+    # silently skip real constraint enforcement either.
+    real_minimize = cbf_filter.minimize
+    calls = []
+
+    def spy(*a, **k):
+        calls.append(1)
+        return real_minimize(*a, **k)
+
+    monkeypatch.setattr(cbf_filter, 'minimize', spy)
+    f = cbf_filter.CBFFilter()
+    b = cg.BUILDINGS[0]
+    p_ned = frames.enu_to_ned(np.array([b.cx, b.cy - b.sy / 2 - 3.0, cg.GROUND_Z + 25.0]))
+    v_ned = frames.enu_to_ned(np.array([0.0, 4.0, 0.0]))
+    u_ned = frames.enu_to_ned(np.array([0.0, 6.0, 0.0]))
+    f.filter(u_ned, p_ned, v_ned, np.zeros(3), LEVEL)
+    assert calls == [1], 'a genuinely constrained command must still go through the optimizer'
+
+
 def test_solve_is_fast_enough_for_the_control_loop():
     import time
     f = cbf_filter.CBFFilter()
     b = cg.BUILDINGS[0]
-    p_ned = frames.enu_to_ned(np.array([b.cx, b.cy - b.sy / 2 - 3.0, 25.0]))
+    p_ned = frames.enu_to_ned(np.array([b.cx, b.cy - b.sy / 2 - 3.0, cg.GROUND_Z + 25.0]))
     v_ned = frames.enu_to_ned(np.array([0.0, 4.0, 0.0]))
     u_ned = frames.enu_to_ned(np.array([0.0, 6.0, 0.0]))
     t = time.perf_counter()

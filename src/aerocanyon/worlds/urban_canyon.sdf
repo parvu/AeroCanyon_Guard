@@ -42,6 +42,7 @@
 
     <model name="ground_plane">
       <static>true</static>
+      <pose>0 0 74 0 0 0</pose>
       <link name="link">
         <!-- 600x200, centred at the origin (so the towers -- themselves
              centred at (0,0), see canyon_geometry.BUILDINGS -- stay in the
@@ -69,7 +70,7 @@
     
     <model name="tower_0_n">
       <static>true</static>
-      <pose>-45.0 20.0 22.5 0 0 0</pose>
+      <pose>-45.0 20.0 96.5 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry><box><size>20.0 16.0 45.0</size></box></geometry>
@@ -85,7 +86,7 @@
     </model>
     <model name="tower_0_s">
       <static>true</static>
-      <pose>-45.0 -20.0 22.5 0 0 0</pose>
+      <pose>-45.0 -20.0 96.5 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry><box><size>20.0 16.0 45.0</size></box></geometry>
@@ -101,7 +102,7 @@
     </model>
     <model name="tower_1_n">
       <static>true</static>
-      <pose>0.0 20.0 30.0 0 0 0</pose>
+      <pose>0.0 20.0 104.0 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry><box><size>20.0 16.0 60.0</size></box></geometry>
@@ -117,7 +118,7 @@
     </model>
     <model name="tower_1_s">
       <static>true</static>
-      <pose>0.0 -20.0 30.0 0 0 0</pose>
+      <pose>0.0 -20.0 104.0 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry><box><size>20.0 16.0 60.0</size></box></geometry>
@@ -133,7 +134,7 @@
     </model>
     <model name="tower_2_n">
       <static>true</static>
-      <pose>45.0 20.0 19.0 0 0 0</pose>
+      <pose>45.0 20.0 93.0 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry><box><size>20.0 16.0 38.0</size></box></geometry>
@@ -149,7 +150,7 @@
     </model>
     <model name="tower_2_s">
       <static>true</static>
-      <pose>45.0 -20.0 19.0 0 0 0</pose>
+      <pose>45.0 -20.0 93.0 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry><box><size>20.0 16.0 38.0</size></box></geometry>
@@ -171,5 +172,26 @@
       <longitude_deg>8.546163739800146</longitude_deg>
       <elevation>0</elevation>
     </spherical_coordinates>
+
+    <!-- PX4's own SITL startup script used to spawn the vehicle into this
+         world dynamically via a gz service call (PX4_SIM_MODEL/
+         PX4_GZ_MODEL_POSE env vars in run_trial.py's old PX4 launch) --
+         no model was ever baked into this file. ArduPilot's SITL has no
+         equivalent: ArduPilotPlugin expects its model already present in
+         the world via <include>, connecting to it over its own FDM
+         socket (see src/aerocanyon/models/tricopter_ap/model.sdf). PX4
+         is gone from this repo entirely now, so there is no reason to
+         keep a second PX4-only copy of this world -- baked in directly.
+         run_trial.py's SPAWN_XYZ (canyon_geometry.CANYON_ENTRY horizontal
+         position, GROUND_Z + 0.2 ground clearance) sets this pose to
+         match. This block was previously missing from this template --
+         urban_canyon.sdf had it hand-added directly, which the "never
+         edit worlds/urban_canyon.sdf by hand: regenerate it" docstring in
+         canyon_geometry.py explicitly warns against; a regeneration would
+         have silently dropped the vehicle spawn. -->
+    <include>
+      <uri>model://tricopter_ap</uri>
+      <pose>-100 0 74.2 0 0 0</pose>
+    </include>
   </world>
 </sdf>

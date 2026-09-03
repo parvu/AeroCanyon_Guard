@@ -1,31 +1,98 @@
+"""Pure-function tests for the ENU/FLU (MAVROS) <-> NED/FRD (this
+project's, and PX4's) convention conversion. No rclpy/ROS needed.
+"""
 import numpy as np
-from aerocanyon import frames
+import pytest
+
+from aerocanyon.frames import (enu_flu_quat_to_ned_frd,
+                               enu_flu_rate_to_ned_frd, latlon_to_ned,
+                               ned_to_latlon, quat_mul, yaw_from_quat)
 
 
-def test_ned_enu_roundtrip():
+def test_quat_mul_identity():
+    q = np.array([0.7071, 0.0, 0.0, 0.7071])
+    identity = np.array([1.0, 0.0, 0.0, 0.0])
+    result = quat_mul(q, identity)
+    np.testing.assert_allclose(result, q, atol=1e-6)
+
+
+def test_quat_mul_two_90_degree_yaws_make_a_180():
+    # 90 deg yaw (about ENU +z / NED -z, doesn't matter which -- pure
+    # quaternion algebra) composed with itself twice is a 180 deg yaw.
+    q90 = np.array([np.cos(np.pi / 4), 0.0, 0.0, np.sin(np.pi / 4)])
+    q180 = quat_mul(q90, q90)
+    expected = np.array([np.cos(np.pi / 2), 0.0, 0.0, np.sin(np.pi / 2)])
+    np.testing.assert_allclose(np.abs(q180), np.abs(expected), atol=1e-6)
+
+
+def test_enu_flu_level_nose_east_matches_ned_frd_level_nose_east():
+    # Physical orientation must not change, only its numeric
+    # representation. "Level, nose pointing east" in ENU/FLU is a 90 deg
+    # yaw about ENU +z (body FLU +x from ENU +x/east to ENU... actually
+    # nose-east in ENU means body +x aligned with world +x, i.e. the
+    # IDENTITY quaternion, since ENU's own +x axis IS east). In NED, east
+    # is world +y, so "nose east" there is a +90 deg yaw about NED +z (a
+    # quaternion with real part cos(45deg), z part sin(45deg)).
+    q_enu_flu_identity = np.array([1.0, 0.0, 0.0, 0.0])
+    q_ned_frd = enu_flu_quat_to_ned_frd(q_enu_flu_identity)
+    expected = np.array([np.cos(np.pi / 4), 0.0, 0.0, np.sin(np.pi / 4)])
+    # Quaternions double-cover rotations (q and -q are the same
+    # orientation) -- compare up to sign.
+    assert (np.allclose(q_ned_frd, expected, atol=1e-6)
+            or np.allclose(q_ned_frd, -expected, atol=1e-6))
+
+
+def test_enu_flu_rate_to_ned_frd_flips_y_and_z_only():
     v = np.array([1.0, 2.0, 3.0])
-    assert np.allclose(frames.enu_to_ned(frames.ned_to_enu(v)), v)
+    result = enu_flu_rate_to_ned_frd(v)
+    np.testing.assert_allclose(result, [1.0, -2.0, -3.0])
 
 
-def test_ned_to_enu_swaps_axes_and_flips_down():
-    # NED (north=1, east=2, down=3) -> ENU (east=2, north=1, up=-3)
-    assert np.allclose(frames.ned_to_enu(np.array([1.0, 2.0, 3.0])),
-                       np.array([2.0, 1.0, -3.0]))
+def test_ned_to_latlon_zero_offset_returns_home():
+    lat, lon = ned_to_latlon(np.array([0.0, 0.0, 0.0]), 44.0, 26.0)
+    assert lat == pytest.approx(44.0, abs=1e-9)
+    assert lon == pytest.approx(26.0, abs=1e-9)
 
 
-def test_identity_quaternion_is_identity_rotation():
-    assert np.allclose(frames.quat_to_rotmat(np.array([1.0, 0.0, 0.0, 0.0])),
-                       np.eye(3))
+def test_ned_to_latlon_north_offset_increases_latitude():
+    lat, lon = ned_to_latlon(np.array([100.0, 0.0, 0.0]), 44.0, 26.0)
+    assert lat > 44.0
+    assert lon == pytest.approx(26.0, abs=1e-6)
 
 
-def test_yaw_90_rotates_x_to_y():
-    s = np.sqrt(0.5)
-    R = frames.quat_to_rotmat(np.array([s, 0.0, 0.0, s]))  # +90 deg about z
-    assert np.allclose(R @ np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]),
-                       atol=1e-9)
+def test_ned_to_latlon_east_offset_increases_longitude():
+    lat, lon = ned_to_latlon(np.array([0.0, 100.0, 0.0]), 44.0, 26.0)
+    assert lon > 26.0
+    assert lat == pytest.approx(44.0, abs=1e-6)
 
 
-def test_body_z_level_points_down_in_ned():
-    # Level attitude: body -z is up, so body +z is NED +down.
-    assert np.allclose(frames.body_z_in_ned(np.array([1.0, 0.0, 0.0, 0.0])),
-                       np.array([0.0, 0.0, 1.0]))
+def test_yaw_from_quat_identity_is_zero():
+    assert yaw_from_quat([1.0, 0.0, 0.0, 0.0]) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_yaw_from_quat_90_degrees():
+    q90 = [np.cos(np.pi / 4), 0.0, 0.0, np.sin(np.pi / 4)]
+    assert yaw_from_quat(q90) == pytest.approx(np.pi / 2, abs=1e-6)
+
+
+def test_ned_to_latlon_matches_known_scale():
+    # 1 degree of latitude is ~111,320 m -- a 111.32 m north offset should
+    # read back within a small fraction of a degree of 0.001 deg latitude.
+    lat, lon = ned_to_latlon(np.array([111.32, 0.0, 0.0]), 0.0, 0.0)
+    assert lat == pytest.approx(0.001, rel=1e-2)
+
+
+def test_latlon_to_ned_is_the_exact_inverse_of_ned_to_latlon():
+    home_lat, home_lon = 44.434424990487216, 26.04781615647584
+    north_in, east_in = 123.4, -67.8
+    lat, lon = ned_to_latlon([north_in, east_in, 0.0], home_lat, home_lon)
+    north_out, east_out = latlon_to_ned(lat, lon, home_lat, home_lon)
+    assert north_out == pytest.approx(north_in, abs=1e-6)
+    assert east_out == pytest.approx(east_in, abs=1e-6)
+
+
+def test_latlon_to_ned_is_zero_at_home():
+    home_lat, home_lon = 44.434424990487216, 26.04781615647584
+    north, east = latlon_to_ned(home_lat, home_lon, home_lat, home_lon)
+    assert north == pytest.approx(0.0, abs=1e-9)
+    assert east == pytest.approx(0.0, abs=1e-9)

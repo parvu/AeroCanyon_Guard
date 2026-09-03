@@ -1,0 +1,186 @@
+# src/aerocanyon/ardupilot/tricopter.parm
+# QuadPlane tilt-tricopter -- see docs/superpowers/specs/2026-09-02-tricopter-ardupilot-phase1-design.md
+# for the geometry this encodes (front -20..90deg incl. hover-yaw-trim
+# sub-range + stop/fold in cruise, rear 90..180deg always-on pusher).
+#
+# Every param name below was confirmed against the ~/ardupilot source tree
+# for this checkout (ArduPlane/quadplane.cpp, ArduPlane/tiltrotor.cpp,
+# libraries/AC_AttitudeControl/AC_AttitudeControl_Multi.cpp,
+# libraries/AP_Arming/AP_Arming.cpp, libraries/SITL/SITL.cpp,
+# libraries/AP_SerialManager/AP_SerialManager.cpp) -- none are guessed.
+
+# --- Frame / tilt geometry -- exact values from Task 2's live SITL spike ---
+Q_ENABLE          1
+Q_FRAME_CLASS     7        # tricopter
+Q_FRAME_TYPE      1
+Q_TILT_ENABLE     1
+Q_TILT_MASK       3        # front pair (motors 1+2) ONLY -- rear stays out, see Task 2 section 5
+Q_TILT_TYPE       2        # VectoredYaw -- required for the rear tilt servo (k_tiltMotorRear) to move at all
+Q_TILT_YAW_ANGLE  20       # front pair's -20..0 deg hover yaw-trim sub-range
+Q_TILT_FIX_ANGLE  0        # must stay 0, or it eats into the range maths
+Q_TILT_MAX        8         # degrees, down from 45 -- see the AUTO-mission note further down
+# RATE_UP/RATE_DN are named for forward-to-hover / hover-to-forward
+# respectively (ArduPlane/tiltrotor.cpp's own @Description, opposite of
+# what the names suggest). At the old 40 deg/s, the full Q_TILT_MAX=8deg
+# sweep completed in ~0.2s -- effectively an instant step at arm time,
+# not a settle. Slowed to 15 deg/s (still well inside the documented
+# 10-300 range) for a smoother ~0.5s tilt-servo transition instead of a
+# snap; explicitly set both rather than leaving RATE_DN at its
+# fall-back-to-RATE_UP default of 0, so the two directions can be tuned
+# independently later if needed.
+Q_TILT_RATE_UP    15
+Q_TILT_RATE_DN    15
+
+# Motor thrust channels -- must match Task 3's Gazebo ArduPilotPlugin channels
+# 4/5/7 (0-indexed) = SERVO5/6/8 (1-indexed). Tri motor order per
+# AP_MotorsTri.cpp: motor1=front right, motor2=front left, motor4=rear.
+SERVO5_FUNCTION   33       # motor 1 = front right
+SERVO6_FUNCTION   34       # motor 2 = front left
+SERVO8_FUNCTION   36       # motor 4 = rear (never stops)
+SERVO7_FUNCTION   0
+SERVO3_FUNCTION   0        # no separate fixed fwd throttle in Phase 1 (see Task 2 section 5 cruise-thrust concern)
+
+# Tilt servo channels -- must match Task 3's Gazebo ArduPilotPlugin channels
+# 11/12/13 (0-indexed) = SERVO12/13/14 (1-indexed).
+# PWM->angle mapping verified live in Task 2 (SITL, cold-reboot persistence checked):
+#   front (SERVO12/13): PWM 1000..2000 -> -20deg..+90deg
+#   rear  (SERVO14):    PWM 1000..2000 -> +90deg..+200deg (REVERSED=1 required;
+#                        SERVOn_MIN>MAX does NOT invert, per SRV_Channel::pwm_from_range's guard)
+SERVO12_FUNCTION  76       # k_tiltMotorRight -> front right tilt
+SERVO12_MIN       1000
+SERVO12_MAX       2000
+SERVO12_REVERSED  0
+
+SERVO13_FUNCTION  75       # k_tiltMotorLeft -> front left tilt
+SERVO13_MIN       1000
+SERVO13_MAX       2000
+SERVO13_REVERSED  0
+
+SERVO14_FUNCTION  45       # k_tiltMotorRear -> rear tilt
+SERVO14_MIN       1000
+SERVO14_MAX       2000
+SERVO14_REVERSED  1        # REQUIRED -- the only way to invert; MIN>MAX does NOT work
+
+# --- Rate gains: starting point ONLY, reasoned from this session's PX4 ---
+# empirical tuning (MC_ROLL_P=5.0, MC_ROLLRATE_P/I/D=0.2/0.2/0.004,
+# MC_YAWRATE_P/I/D=0.16/0.027/0.004, hover thrust fraction ~0.7).
+# ArduPilot's rate controller scales gains differently than PX4's
+# allocator-mediated ones (different units, different filtering, different
+# feedforward structure) -- these are a REASONED GUESS to start iterating
+# from in Task 5, NOT a port. Pitch mirrors roll (symmetric airframe in
+# pitch); PX4's MC_ROLLRATE_* had no direct pitch equivalent recorded this
+# session, so pitch is set equal to roll rather than invented separately.
+Q_A_RAT_RLL_P     0.20
+Q_A_RAT_RLL_I     0.20
+Q_A_RAT_RLL_D     0.004
+Q_A_RAT_PIT_P     0.20
+Q_A_RAT_PIT_I     0.20
+Q_A_RAT_PIT_D     0.004
+Q_A_RAT_YAW_P     0.16
+Q_A_RAT_YAW_I     0.027
+Q_A_RAT_YAW_D     0.004
+
+# --- Q-mode attitude limit (Phase 2 gain-tuning pass) ---
+# Q_A_ANGLE_MAX (AC_AttitudeControl's ANGLE_MAX, exposed here under the
+# Q_ group; stored in plain DEGREES -- confirmed against
+# AC_AttitudeControl.cpp's own @Units: deg and the _angle_max_deg field
+# name, not centidegrees) defaults to 30 degrees -- the actual
+# lean-angle ceiling full RC stick deflection commands in QHOVER.
+# controller_node.py's own lean commands were found (live) to already
+# saturate full stick well before this limit even mattered (the desired
+# lean from a large position error is tens of degrees, clipped to +-1
+# regardless of the Python-side MAX_LEAN_RAD normalization constant) --
+# so the achievable cruise speed (~5 m/s observed, against the mission's
+# 12 m/s target) is bounded by THIS parameter, not by anything on the
+# Python side. Raised modestly, not aggressively -- see
+# docs/superpowers/plans/2026-09-02-mission-stack-mavros-port.md for the
+# gain-tuning trail.
+Q_A_ANGLE_MAX     35       # degrees, up from the 30 deg default
+
+# --- RC-override failsafe margin (Phase 2, mid-flight-landing bug) ---
+# RC_OVERRIDE_TIME (RC_Channel.cpp / RC_Channels_VarInfo.h, confirmed
+# against ArduPilot's own Tools/autotest/rover.py usage) is how long an
+# RC_CHANNELS_OVERRIDE is honoured after the last one arrives before
+# ArduPilot falls back to its own RC failsafe handling -- default 3.0s.
+# controller_node.py publishes overrides at 50 Hz continuously, but was
+# live-verified this session to occasionally miss that cadence for long
+# enough to trip this and self-land mid-mission, well short of the
+# canyon exit, with no error anywhere in the stack (root-caused to
+# cbf_filter.py calling its scipy optimizer on every tick regardless of
+# whether anything was actually constraining the command -- fixed
+# separately, see that file's own fast-path comment). Raised as
+# defense-in-depth against any OTHER source of publish jitter (this is
+# a simulated vehicle on a shared, loaded machine, not real hardware
+# with a dedicated RC link) -- not a substitute for the real fix above.
+RC_OVERRIDE_TIME  15       # seconds, up from the 3s default
+
+# --- Hover thrust (Task 5, measured in flight) ---
+# The Gazebo model's LiftDrag rig gives ~36.2 N per rotor at full command
+# vs 50.7 N of vehicle weight, so hover sits near 47% thrust, not the 35%
+# ArduPilot defaults to. Confirmed live: steady hover in QHOVER settles at
+# 47-49% throttle. Leaving the default 0.35 makes QHOVER's altitude loop
+# start from a bad feedforward on every takeoff.
+Q_M_THST_HOVER    0.47
+
+# --- Q-mode waypoint-navigation speed (AUTO-mission redesign) ---
+# AC_WPNav's Q_WP_SPD defaults to 10 m/s (WP_SPD_DEFAULT, AC_WPNav.cpp).
+# Lowered to 5.0 as a first attempt at the climb-then-crash symptom
+# below, kept there even after finding the real cause (Q_TILT_MAX,
+# above) since 10 m/s is an aggressive cruise target for this frame's
+# thrust margin -- raised again at the user's request back to the
+# ArduPilot default.
+Q_WP_SPD          10.0       # m/s, ArduPilot's own default
+
+# --- Root cause of the above: Tiltrotor::continuous_update's AUTO-mode
+# forward-tilt fallback (Q_TILT_MAX, moved up next to the other tilt
+# params) ---
+# Live-verified this session: in AUTO (unlike QHOVER, which this
+# project's earlier hover tuning was done in), ArduPlane/tiltrotor.cpp's
+# continuous_update() does NOT hold the front tilt motors near their
+# hover baseline. With Q_FWD_THR_USE left at its OFF default (no
+# forward-thrust-motor substitute configured), get_vfwd_method()
+# returns NONE, and continuous_update() falls through to its final,
+# unconditional branch: settilt = (throttle_output - throttle_min) *
+# 0.02, slew(MIN(settilt * Q_TILT_MAX / 90, ~1.0)) -- forward tilt
+# driven straight off throttle percentage, with NO mode-specific gating
+# and no dependency on Q_VFWD_GAIN/Q_FWD_THR_GAIN actually being
+# configured (their descriptions suggest otherwise, but the code path
+# taken here doesn't check them). At the climb throttle this frame
+# needs (hovers around 47%, Q_M_THST_HOVER above), that formula was
+# already commanding tilt near Q_TILT_MAX degrees on the front pair --
+# and since only the front pair tilts (Q_TILT_MASK=3, rear stays
+# vertical), tilting them forward directly removes vertical thrust with
+# nothing compensating for it. Confirmed live: at the old Q_TILT_MAX=45
+# this reproduced on every AUTO-mission attempt regardless of Q_WP_SPD
+# -- climb to ~10-12m during NAV_VTOL_TAKEOFF, then a rapid descent to
+# near-ground once cruise throttle triggered the tilt, settling into a
+# low crawl instead of continuing to the next waypoint. This project
+# never wants ANY forward-tilt thrust assist (ENABLE_VTOL_TRANSITION
+# stays False in controller_node.py -- pure Q-mode navigation the whole
+# flight), so rather than wiring up Q_FWD_THR_USE/GAIN correctly for a
+# behavior this project doesn't want, Q_TILT_MAX is capped low enough
+# that this fallback's worst case is a few degrees of unwanted tilt,
+# not a lift-destroying 45. (Q_TILT_YAW_ANGLE's own -20..0 deg hover-
+# yaw-trim sub-range is a separate, absolute-degree servo-calibration
+# offset applied in Tiltrotor::vectoring() -- confirmed unaffected by
+# this change.)
+
+FLTMODE_CH        0        # disable RC mode-switch: control_server pins ch8 to 1500,
+                           # which ArduPilot would otherwise read as a mode-switch position
+
+# --- Arming / simulation ---
+# NOTE: this ArduPilot checkout has already migrated ARMING_CHECK (old
+# AP_Int16 "checks to perform" bitmask) to ARMING_SKIPCHK (new AP_Int32
+# "checks to SKIP" bitmask, inverted sense) -- see
+# libraries/AP_Arming/AP_Arming.cpp:230-260. The brief's plan-era
+# `ARMING_CHECK 0` name/value no longer exists in this tree and would be
+# silently dropped as an unknown param. -1 (all bits set) is the current
+# equivalent of the old "disable all checks" behaviour: check_enabled()
+# returns (checks_to_skip & check) == 0, so -1 skips everything.
+ARMING_SKIPCHK    -1
+SIM_SPEEDUP       1
+SERIAL0_PROTOCOL  2
+# (The brief also listed a bare `FRAME_CLASS 1` here. No such top-level
+# param exists for ArduPlane -- confirmed absent from ArduPlane/Parameters.cpp
+# and Parameters.h. Q_FRAME_CLASS above is the real, already-set equivalent.
+# Omitted rather than writing an unknown param.)

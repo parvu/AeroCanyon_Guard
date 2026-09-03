@@ -1,0 +1,22 @@
+<?xml version='1.0'?>
+<gz version='1.0'>
+
+  <!-- Ported from CaveX-Explorer-Pro/web_viewer: bridges the ALREADY-RUNNING
+       gz-transport session started by run_trial.py's fly-by-hand path (the
+       README's "Watching a trial fly, or flying manually" section) via
+       `gz launch -f websocket.gzlaunch`. No separate sim launch here. -->
+  <plugin name="gz::launch::WebsocketServer"
+          filename="gz-launch-websocket-server">
+    <publication_hz>30</publication_hz>
+    <port>9002</port>
+    <max_connections>-1</max_connections>
+    <!-- See CaveX-Explorer-Pro's own comment on this key: with none
+         configured, WebsocketServer.cc still authorizes every connection
+         but never sends the "authorized" ack the client is waiting for,
+         so the handshake stalls forever. Matches index.html's key below.
+         Trivial/shared, fine for a local dev viewer only reachable on
+         localhost. -->
+    <authorization_key>aerocanyon_dev</authorization_key>
+  </plugin>
+
+</gz>

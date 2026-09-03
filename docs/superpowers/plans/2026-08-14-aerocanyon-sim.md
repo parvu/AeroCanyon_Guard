@@ -14,12 +14,12 @@
 
 - ROS2 distro is **Jazzy**. Every terminal sources `/opt/ros/jazzy/setup.bash` then `install/setup.bash`.
 - Gazebo is **Harmonic / gz-sim 8.11.0**. The `gz` binary lives at `/opt/ros/jazzy/opt/gz_tools_vendor/bin/gz` and is only on `PATH` after sourcing ROS.
-- Python venv at `/home/parvu/ros2_pinn_sim/.venv` holds torch/numpy/scipy/pandas/matplotlib. **Do not add new pip dependencies** — everything in this plan is solvable with what is installed.
+- Python venv at `/home/parvu/AeroCanyon_Guard/.venv` holds torch/numpy/scipy/pandas/matplotlib. **Do not add new pip dependencies** — everything in this plan is solvable with what is installed.
 - PX4 airframe is `4020_gz_tiltrotor`, launched with `PX4_SIM_MODEL=tiltrotor` (**not** `gz_tiltrotor`).
 - New package name is `aerocanyon`, build type `ament_python`, at `src/aerocanyon/`.
 - Existing packages `phy_ai_simulation`, `px4_teleop`, `px4_msgs` are **not modified** by this plan.
 - All PX4 topics use `px4_msgs` types with QoS `rclpy.qos.qos_profile_sensor_data` on subscriptions (PX4 publishes BEST_EFFORT; RELIABLE subscriptions silently receive nothing).
-- Build with `colcon build --symlink-install` from `/home/parvu/ros2_pinn_sim`.
+- Build with `colcon build --symlink-install` from `/home/parvu/AeroCanyon_Guard`.
 - Frames: PX4 local position and `TrajectorySetpoint` are **NED**. Gazebo is **ENU**. Every conversion goes through `aerocanyon.frames`; never inline a sign flip.
 - Vehicle mass constant: `MASS_KG = 2.0`, `G = 9.81`. Defined once in `aerocanyon/constants.py`.
 - Deadline is ~2026-10-01. If a task is blocked for more than half a day, note it and move to the next task rather than stalling.
@@ -85,7 +85,7 @@ src/aerocanyon/
 - [ ] **Step 1: Create the package skeleton**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim/src
+cd /home/parvu/AeroCanyon_Guard/src
 mkdir -p aerocanyon/aerocanyon aerocanyon/resource aerocanyon/test \
          aerocanyon/launch aerocanyon/worlds aerocanyon/data
 touch aerocanyon/aerocanyon/__init__.py
@@ -206,7 +206,7 @@ def test_body_z_level_points_down_in_ned():
 - [ ] **Step 3: Run the test to verify it fails**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim && source .venv/bin/activate
+cd /home/parvu/AeroCanyon_Guard && source .venv/bin/activate
 PYTHONPATH=src/aerocanyon python -m pytest src/aerocanyon/test/test_frames.py -v
 ```
 
@@ -284,7 +284,7 @@ def body_z_in_ned(q):
 - [ ] **Step 5: Run the test to verify it passes**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim && source .venv/bin/activate
+cd /home/parvu/AeroCanyon_Guard && source .venv/bin/activate
 PYTHONPATH=src/aerocanyon python -m pytest src/aerocanyon/test/test_frames.py -v
 ```
 
@@ -293,7 +293,7 @@ Expected: PASS, 5 passed.
 - [ ] **Step 6: Verify the package builds**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim
+cd /home/parvu/AeroCanyon_Guard
 source /opt/ros/jazzy/setup.bash
 colcon build --symlink-install --packages-select aerocanyon
 ```
@@ -303,7 +303,7 @@ Expected: `Finished <<< aerocanyon`.
 - [ ] **Step 7: Commit**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim
+cd /home/parvu/AeroCanyon_Guard
 git add src/aerocanyon
 git commit -m "feat(aerocanyon): package skeleton, constants and frame conversions"
 ```
@@ -381,7 +381,7 @@ def test_entry_and_exit_are_on_the_canyon_axis_outside_the_buildings():
 - [ ] **Step 2: Run the test to verify it fails**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim && source .venv/bin/activate
+cd /home/parvu/AeroCanyon_Guard && source .venv/bin/activate
 PYTHONPATH=src/aerocanyon python -m pytest src/aerocanyon/test/test_canyon_geometry.py -v
 ```
 
@@ -512,7 +512,7 @@ if __name__ == '__main__':
 - [ ] **Step 4: Run the test to verify it passes**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim && source .venv/bin/activate
+cd /home/parvu/AeroCanyon_Guard && source .venv/bin/activate
 PYTHONPATH=src/aerocanyon python -m pytest src/aerocanyon/test/test_canyon_geometry.py -v
 ```
 
@@ -525,7 +525,7 @@ plugin list must be preserved — adding any plugin to a PX4 world disables the
 implicit default set, so all of them stay declared.
 
 ```bash
-cd /home/parvu/ros2_pinn_sim
+cd /home/parvu/AeroCanyon_Guard
 cp src/phy_ai_simulation/worlds/dve_wind_arena.sdf src/aerocanyon/worlds/_template.sdf
 ```
 
@@ -558,7 +558,7 @@ Then edit `src/aerocanyon/worlds/_template.sdf`:
 - [ ] **Step 6: Generate the world and verify it loads**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim && source .venv/bin/activate
+cd /home/parvu/AeroCanyon_Guard && source .venv/bin/activate
 PYTHONPATH=src/aerocanyon python -m aerocanyon.canyon_geometry
 ```
 
@@ -593,7 +593,7 @@ Expected before the edit: no output. Edit the file, and inside
 Then install the world where PX4 looks for it:
 
 ```bash
-cp /home/parvu/ros2_pinn_sim/src/aerocanyon/worlds/urban_canyon.sdf \
+cp /home/parvu/AeroCanyon_Guard/src/aerocanyon/worlds/urban_canyon.sdf \
    ~/PX4-Autopilot/Tools/simulation/gz/worlds/urban_canyon.sdf
 grep -c 'enable_wind' ~/PX4-Autopilot/Tools/simulation/gz/models/tiltrotor/model.sdf
 ```
@@ -667,7 +667,7 @@ def generate_launch_description():
 - [ ] **Step 10: Commit**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim
+cd /home/parvu/AeroCanyon_Guard
 git add src/aerocanyon
 git commit -m "feat(aerocanyon): canyon geometry, generated world and launch file"
 ```
@@ -773,7 +773,7 @@ def test_dryden_is_correlated_in_time():
 - [ ] **Step 2: Run the test to verify it fails**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim && source .venv/bin/activate
+cd /home/parvu/AeroCanyon_Guard && source .venv/bin/activate
 PYTHONPATH=src/aerocanyon python -m pytest src/aerocanyon/test/test_canyon_field.py -v
 ```
 
@@ -986,7 +986,7 @@ if __name__ == '__main__':
 - [ ] **Step 4: Run the test to verify it passes**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim && source .venv/bin/activate
+cd /home/parvu/AeroCanyon_Guard && source .venv/bin/activate
 PYTHONPATH=src/aerocanyon python -m pytest src/aerocanyon/test/test_canyon_field.py -v
 ```
 
@@ -995,7 +995,7 @@ Expected: PASS, 11 passed.
 - [ ] **Step 5: Generate and commit the grid**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim && source .venv/bin/activate
+cd /home/parvu/AeroCanyon_Guard && source .venv/bin/activate
 PYTHONPATH=src/aerocanyon python -m aerocanyon.canyon_field
 ```
 
@@ -1008,7 +1008,7 @@ field being physically plausible.
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim
+cd /home/parvu/AeroCanyon_Guard
 git add src/aerocanyon
 git commit -m "feat(aerocanyon): urban canyon wind field generation and lookup"
 ```
@@ -1032,7 +1032,7 @@ git commit -m "feat(aerocanyon): urban canyon wind field generation and lookup"
 Before writing the node, confirm the mechanism independently:
 
 ```bash
-cd /home/parvu/ros2_pinn_sim && source /opt/ros/jazzy/setup.bash
+cd /home/parvu/AeroCanyon_Guard && source /opt/ros/jazzy/setup.bash
 python3 -c "
 from gz.msgs10.wind_pb2 import Wind
 from gz.transport13 import Node
@@ -1156,7 +1156,7 @@ if __name__ == '__main__':
 - [ ] **Step 3: Build**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim && source /opt/ros/jazzy/setup.bash
+cd /home/parvu/AeroCanyon_Guard && source /opt/ros/jazzy/setup.bash
 colcon build --symlink-install --packages-select aerocanyon
 ```
 
@@ -1168,7 +1168,7 @@ This is the integration gate for the task. Start PX4 in the canyon world and
 the DDS agent as in Task 2, then:
 
 ```bash
-cd /home/parvu/ros2_pinn_sim
+cd /home/parvu/AeroCanyon_Guard
 source /opt/ros/jazzy/setup.bash && source install/setup.bash
 ros2 run aerocanyon wind_field_node
 ```
@@ -1176,7 +1176,7 @@ ros2 run aerocanyon wind_field_node
 In another terminal, confirm both ends of the pipe:
 
 ```bash
-source /opt/ros/jazzy/setup.bash && source ~/ros2_pinn_sim/install/setup.bash
+source /opt/ros/jazzy/setup.bash && source ~/AeroCanyon_Guard/install/setup.bash
 ros2 topic echo /aerocanyon/wind_truth --once
 gz topic -e -t /world/urban_canyon/wind -n 1
 ```
@@ -1191,7 +1191,7 @@ and that PX4 fights the drift. If the vehicle does not move at all, the
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim
+cd /home/parvu/AeroCanyon_Guard
 git add src/aerocanyon
 git commit -m "feat(aerocanyon): wind field replay node driving Gazebo WindEffects"
 ```
@@ -1261,7 +1261,7 @@ def test_mission_is_deterministic():
 - [ ] **Step 2: Run the test to verify it fails**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim && source .venv/bin/activate
+cd /home/parvu/AeroCanyon_Guard && source .venv/bin/activate
 PYTHONPATH=src/aerocanyon python -m pytest src/aerocanyon/test/test_mission.py -v
 ```
 
@@ -1318,7 +1318,7 @@ class Mission:
 - [ ] **Step 4: Run the test to verify it passes**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim && source .venv/bin/activate
+cd /home/parvu/AeroCanyon_Guard && source .venv/bin/activate
 PYTHONPATH=src/aerocanyon python -m pytest src/aerocanyon/test/test_mission.py -v
 ```
 
@@ -1607,7 +1607,7 @@ if __name__ == '__main__':
 Start PX4 and the DDS agent as before, then:
 
 ```bash
-cd /home/parvu/ros2_pinn_sim
+cd /home/parvu/AeroCanyon_Guard
 source /opt/ros/jazzy/setup.bash && source install/setup.bash
 colcon build --symlink-install --packages-select aerocanyon
 ros2 launch aerocanyon canyon_sim.launch.py mode:=baseline trial:=smoke
@@ -1635,7 +1635,7 @@ continuing, because every later figure depends on this disturbance being real.
 - [ ] **Step 8: Commit**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim
+cd /home/parvu/AeroCanyon_Guard
 echo "trials/" >> .gitignore
 git add src/aerocanyon .gitignore
 git commit -m "feat(aerocanyon): canyon transit mission, baseline controller and trial logger"
@@ -1765,7 +1765,7 @@ def test_state_vector_has_the_declared_dimension():
 - [ ] **Step 2: Run the test to verify it fails**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim && source .venv/bin/activate
+cd /home/parvu/AeroCanyon_Guard && source .venv/bin/activate
 PYTHONPATH=src/aerocanyon python -m pytest src/aerocanyon/test/test_fo_pinn.py -v
 ```
 
@@ -1905,7 +1905,7 @@ if __name__ == '__main__':
 - [ ] **Step 4: Run the test to verify it passes**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim && source .venv/bin/activate
+cd /home/parvu/AeroCanyon_Guard && source .venv/bin/activate
 PYTHONPATH=src/aerocanyon python -m pytest src/aerocanyon/test/test_fo_pinn.py -v
 PYTHONPATH=src/aerocanyon python -m aerocanyon.fo_pinn
 ```
@@ -1915,7 +1915,7 @@ Expected: 12 passed, then an `ok: ...` line.
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim
+cd /home/parvu/AeroCanyon_Guard
 git add src/aerocanyon
 git commit -m "feat(aerocanyon): fractional-order physics-informed wind estimator"
 ```
@@ -2050,7 +2050,7 @@ def test_solve_is_fast_enough_for_the_control_loop():
 - [ ] **Step 2: Run the test to verify it fails**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim && source .venv/bin/activate
+cd /home/parvu/AeroCanyon_Guard && source .venv/bin/activate
 PYTHONPATH=src/aerocanyon python -m pytest src/aerocanyon/test/test_cbf_filter.py -v
 ```
 
@@ -2212,7 +2212,7 @@ class CBFFilter:
 - [ ] **Step 4: Run the test to verify it passes**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim && source .venv/bin/activate
+cd /home/parvu/AeroCanyon_Guard && source .venv/bin/activate
 PYTHONPATH=src/aerocanyon python -m pytest src/aerocanyon/test/test_cbf_filter.py -v
 ```
 
@@ -2223,7 +2223,7 @@ real QP solver before anything else proceeds.
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim
+cd /home/parvu/AeroCanyon_Guard
 git add src/aerocanyon
 git commit -m "feat(aerocanyon): CBF safety filter over the acceleration setpoint"
 ```
@@ -2252,7 +2252,7 @@ Run three baseline trials with different turbulence seeds so the network sees
 more than one gust realisation:
 
 ```bash
-cd /home/parvu/ros2_pinn_sim
+cd /home/parvu/AeroCanyon_Guard
 source /opt/ros/jazzy/setup.bash && source install/setup.bash
 for seed in 1 2 3; do
   # restart PX4 in the canyon world between runs, then:
@@ -2396,7 +2396,7 @@ if __name__ == '__main__':
 - [ ] **Step 3: Train and verify the model beats predicting zero**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim && source .venv/bin/activate
+cd /home/parvu/AeroCanyon_Guard && source .venv/bin/activate
 PYTHONPATH=src/aerocanyon python -m aerocanyon.train_pinn trials/train*_baseline.csv
 ```
 
@@ -2411,7 +2411,7 @@ The fractional order is the project's central claim, so measure it rather than
 asserting it:
 
 ```bash
-cd /home/parvu/ros2_pinn_sim && source .venv/bin/activate
+cd /home/parvu/AeroCanyon_Guard && source .venv/bin/activate
 for a in 0.0 0.3 0.5 0.7 0.9 1.0; do
   echo "=== alpha=$a"
   PYTHONPATH=src/aerocanyon python -m aerocanyon.train_pinn \
@@ -2538,7 +2538,7 @@ if __name__ == '__main__':
 - [ ] **Step 6: Verify inference runs live at rate**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim
+cd /home/parvu/AeroCanyon_Guard
 source /opt/ros/jazzy/setup.bash && source install/setup.bash
 colcon build --symlink-install --packages-select aerocanyon
 # with PX4 and the DDS agent running:
@@ -2553,7 +2553,7 @@ a blocked callback rather than the network.
 - [ ] **Step 7: Commit**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim
+cd /home/parvu/AeroCanyon_Guard
 git add src/aerocanyon docs/alpha_sweep.txt
 git commit -m "feat(aerocanyon): FO-PINN training pipeline and inference node"
 ```
@@ -2849,7 +2849,7 @@ if __name__ == '__main__':
 - [ ] **Step 4: Run the paired trial and generate the figures**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim
+cd /home/parvu/AeroCanyon_Guard
 source /opt/ros/jazzy/setup.bash && source install/setup.bash
 colcon build --symlink-install --packages-select aerocanyon
 python3 -m aerocanyon.run_trial --trial compare --duration 60
@@ -2870,7 +2870,7 @@ spec — rather than tuning until a number appears.
 - [ ] **Step 5: Record the demo video**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim
+cd /home/parvu/AeroCanyon_Guard
 python3 -m aerocanyon.run_trial --trial demo --duration 60 --gui
 ```
 
@@ -2880,7 +2880,7 @@ Screen-record the Gazebo window during the treatment run. Save to
 - [ ] **Step 6: Run the whole test suite**
 
 ```bash
-cd /home/parvu/ros2_pinn_sim && source .venv/bin/activate
+cd /home/parvu/AeroCanyon_Guard && source .venv/bin/activate
 PYTHONPATH=src/aerocanyon python -m pytest src/aerocanyon/test/ -v
 ```
 
@@ -2894,7 +2894,7 @@ patches required (`enable_wind` on the tiltrotor, the `urban_canyon.sdf` copy,
 the model, and how to run the paired trial.
 
 ```bash
-cd /home/parvu/ros2_pinn_sim
+cd /home/parvu/AeroCanyon_Guard
 git add src/aerocanyon README.md figures/
 git commit -m "feat(aerocanyon): close the FO-PINN/CBF loop and generate trial figures"
 ```

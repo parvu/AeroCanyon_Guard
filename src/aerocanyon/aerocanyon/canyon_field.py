@@ -25,9 +25,10 @@ KARMAN = 0.41
 def log_law(z, u_ref=10.0, z_ref=30.0, z0=1.0):
     """Neutral-stability logarithmic wind profile.
 
-    z0 = 1.0 m is the standard roughness length for a dense urban centre.
-    Below z0 the profile is undefined, so it clamps to zero rather than
-    returning a negative wind speed.
+    z is height ABOVE GROUND (AGL), not absolute Gazebo world z -- see
+    canyon_geometry.GROUND_Z. z0 = 1.0 m is the standard roughness length
+    for a dense urban centre. Below z0 the profile is undefined, so it
+    clamps to zero rather than returning a negative wind speed.
     """
     if z <= z0:
         return 0.0
@@ -37,9 +38,10 @@ def log_law(z, u_ref=10.0, z_ref=30.0, z0=1.0):
 def _channeling(y, z):
     """Speedup factor for flow squeezed between the two tower rows.
 
-    Peaks on the canyon axis and decays to 1.0 (no effect) outside the
-    throat. Only applies below the roofline; above it the flow is not
-    channelled.
+    z is height ABOVE GROUND (AGL), matching log_law -- see
+    canyon_geometry.GROUND_Z. Peaks on the canyon axis and decays to 1.0
+    (no effect) outside the throat. Only applies below the roofline;
+    above it the flow is not channelled.
     """
     w = cg.CANYON_HALF_WIDTH
     if abs(y) > 3.0 * w:
@@ -49,7 +51,7 @@ def _channeling(y, z):
     return 1.0 + 0.6 * height_factor * np.exp(-(y / w) ** 2)
 
 
-def _recirculation(p):
+def _recirculation(p, buildings=None):
     """Corner separation: a lateral+vertical eddy in each tower's lee.
 
     Modelled as a rotational contribution centred just downstream of each
@@ -57,8 +59,8 @@ def _recirculation(p):
     hazardous and is the disturbance the PINN has to learn.
     """
     v = np.zeros(3)
-    for b in cg.BUILDINGS:
-        centre = np.array([b.cx + b.sx * 0.75, b.cy, b.sz * 0.5])
+    for b in (buildings if buildings is not None else cg.BUILDINGS):
+        centre = np.array([b.cx + b.sx * 0.75, b.cy, cg.GROUND_Z + b.sz * 0.5])
         r = p - centre
         scale = np.array([b.sx, b.sy, b.sz])
         d2 = float(np.sum((r / scale) ** 2))
@@ -78,7 +80,10 @@ def generate(nx=60, ny=40, nz=24):
     """
     xs_lo, xs_hi = cg.CANYON_ENTRY[0] - 20.0, cg.CANYON_EXIT[0] + 20.0
     ys_lo, ys_hi = -150.0, 150.0
-    zs_lo, zs_hi = 0.0, 100.0
+    # Absolute Gazebo z, spanning canyon_geometry.GROUND_Z (ground) to
+    # GROUND_Z + 100 (well above the tallest building) -- log_law/
+    # _channeling below convert back to AGL height internally.
+    zs_lo, zs_hi = cg.GROUND_Z, cg.GROUND_Z + 100.0
 
     xs = np.linspace(xs_lo, xs_hi, nx)
     ys = np.linspace(ys_lo, ys_hi, ny)
@@ -92,7 +97,8 @@ def generate(nx=60, ny=40, nz=24):
                 d, _ = cg.distance_and_normal(p)
                 if d <= 0.0:
                     continue  # inside a building: no flow
-                base = log_law(z) * _channeling(y, z)
+                agl = z - cg.GROUND_Z
+                base = log_law(agl) * _channeling(y, agl)
                 # Prevailing wind along +x, down the canyon axis.
                 v = np.array([base, 0.0, 0.0]) + _recirculation(p)
                 # Blend to zero at the walls (no-slip).
@@ -111,6 +117,56 @@ def generate(nx=60, ny=40, nz=24):
     return field, meta
 
 
+def generate_map_zone(nx=60, ny=40, nz=24):
+    """Wind grid over the real map_zone terrain: log-law vertical
+    profile + per-building recirculation from real OSM geometry
+    (map_zone_geometry.BUILDINGS) -- no channeling term, unlike
+    generate() above, since _channeling assumes urban_canyon's symmetric
+    two-row corridor (CANYON_HALF_WIDTH, flow along +x), which doesn't
+    exist in a real street layout. See the design spec, part 2.
+
+    +-300m in x/y comfortably covers map_zone.osm's own bounds (~500m x
+    180m around the home point). Returns (field, meta), same shape as
+    generate()'s own return.
+    """
+    from . import map_zone_geometry as mz
+
+    xs_lo, xs_hi = -300.0, 300.0
+    ys_lo, ys_hi = -300.0, 300.0
+    zs_lo, zs_hi = cg.GROUND_Z, cg.GROUND_Z + 100.0
+
+    xs = np.linspace(xs_lo, xs_hi, nx)
+    ys = np.linspace(ys_lo, ys_hi, ny)
+    zs = np.linspace(zs_lo, zs_hi, nz)
+
+    field = np.zeros((nx, ny, nz, 3))
+    for i, x in enumerate(xs):
+        for j, y in enumerate(ys):
+            for k, z in enumerate(zs):
+                p = np.array([x, y, z])
+                agl = z - cg.GROUND_Z
+                base = log_law(agl)
+                v = np.array([base, 0.0, 0.0]) + _recirculation(p, mz.BUILDINGS)
+                field[i, j, k] = v
+
+    meta = {
+        'origin': [xs_lo, ys_lo, zs_lo],
+        'spacing': [(xs_hi - xs_lo) / (nx - 1),
+                    (ys_hi - ys_lo) / (ny - 1),
+                    (zs_hi - zs_lo) / (nz - 1)],
+        'shape': [nx, ny, nz],
+        'u_ref': 10.0,
+        'z0': 1.0,
+    }
+    return field, meta
+
+
+def _grid_filenames(world):
+    if world == 'urban_canyon':
+        return 'wind_grid.npy', 'wind_grid.json'
+    return f'wind_grid_{world}.npy', f'wind_grid_{world}.json'
+
+
 class WindGrid:
     """Trilinear lookup into a generated or CFD-produced wind grid."""
 
@@ -122,17 +178,19 @@ class WindGrid:
         self.meta = meta
 
     @classmethod
-    def load(cls, data_dir):
+    def load(cls, data_dir, world='urban_canyon'):
         d = pathlib.Path(data_dir)
-        field = np.load(d / 'wind_grid.npy')
-        meta = json.loads((d / 'wind_grid.json').read_text())
+        npy_name, json_name = _grid_filenames(world)
+        field = np.load(d / npy_name)
+        meta = json.loads((d / json_name).read_text())
         return cls(field, meta)
 
-    def save(self, data_dir):
+    def save(self, data_dir, world='urban_canyon'):
         d = pathlib.Path(data_dir)
         d.mkdir(parents=True, exist_ok=True)
-        np.save(d / 'wind_grid.npy', self.field)
-        (d / 'wind_grid.json').write_text(json.dumps(self.meta, indent=2))
+        npy_name, json_name = _grid_filenames(world)
+        np.save(d / npy_name, self.field)
+        (d / json_name).write_text(json.dumps(self.meta, indent=2))
 
     def at(self, p_enu):
         """Wind velocity at an ENU point. Clamps outside the grid."""
@@ -200,9 +258,15 @@ class DrydenGust:
 
 
 if __name__ == '__main__':
-    field, meta = generate()
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--world', choices=('urban_canyon', 'map_zone'), default='urban_canyon')
+    args = ap.parse_args()
+
+    field, meta = generate_map_zone() if args.world == 'map_zone' else generate()
     out = pathlib.Path(__file__).resolve().parents[1] / 'data'
-    WindGrid(field, meta).save(out)
+    WindGrid(field, meta).save(out, world=args.world)
+    npy_name, _ = _grid_filenames(args.world)
     speeds = np.linalg.norm(field, axis=-1)
-    print(f'wrote {out}/wind_grid.npy shape={field.shape} '
+    print(f'wrote {out}/{npy_name} shape={field.shape} '
           f'max={speeds.max():.2f} m/s mean={speeds.mean():.2f} m/s')

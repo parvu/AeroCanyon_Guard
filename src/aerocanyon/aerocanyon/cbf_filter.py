@@ -152,16 +152,40 @@ class CBFFilter:
             slew = self.p.slew_max * self.dt
             bounds = [(self.last_u[i] - slew, self.last_u[i] + slew) for i in range(3)]
 
-        cons = [{'type': 'ineq', 'fun': (lambda u, a=a, b=b: float(a @ u - b)),
-                 'jac': (lambda u, a=a: a)} for a, b in rows]
-
         if self._force_infeasible:
             info['feasible'] = False
             return self.last_safe.copy(), info
 
+        lo = np.array([b[0] for b in bounds])
+        hi = np.array([b[1] for b in bounds])
+        u0 = np.clip(u_des, lo, hi)
+
+        # Fast path: box-clipping u_des is the unconstrained-by-barriers
+        # optimum (the closest point to u_des inside the slew box alone).
+        # If that point ALSO already satisfies every linear barrier
+        # constraint, it is -- by convexity of box intersected with
+        # half-spaces -- the exact same point SLSQP would converge to, not
+        # an approximation of it, so calling the optimizer at all is pure
+        # overhead in the (overwhelmingly common -- no obstacle nearby,
+        # no slew violation) case where nothing is actually constraining
+        # the command. Live-verified this is what actually mattered:
+        # ArduPilot's RC_OVERRIDE_TIME (3s) failsafed controller_node's
+        # whole autonomous leg into a self-landing multiple times this
+        # session, root-caused to this filter's own SLSQP call running on
+        # literally every 20ms tick regardless of whether anything nearby
+        # needed it.
+        if all(a @ u0 - b >= -self.p.eps for a, b in rows):
+            info['active'] = bool(np.linalg.norm(u0 - u_des) > 1e-3)
+            self.last_u = u0.copy()
+            self.last_safe = u0.copy()
+            return u0, info
+
+        cons = [{'type': 'ineq', 'fun': (lambda u, a=a, b=b: float(a @ u - b)),
+                 'jac': (lambda u, a=a: a)} for a, b in rows]
+
         res = minimize(
             lambda u: float(np.sum((u - u_des) ** 2)),
-            x0=np.clip(u_des, [b[0] for b in bounds], [b[1] for b in bounds]),
+            x0=u0,
             jac=lambda u: 2.0 * (u - u_des),
             bounds=bounds, constraints=cons, method='SLSQP',
             options={'maxiter': 30, 'ftol': 1e-6},
