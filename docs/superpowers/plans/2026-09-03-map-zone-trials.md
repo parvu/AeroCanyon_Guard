@@ -493,7 +493,7 @@ Expected: writes `data/wind_grid_map_zone.npy` and `data/wind_grid_map_zone.json
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/aerocanyon/aerocanyon/canyon_field.py src/aerocanyon/test/test_canyon_field.py data/wind_grid_map_zone.npy data/wind_grid_map_zone.json
+git add src/aerocanyon/aerocanyon/canyon_field.py src/aerocanyon/test/test_canyon_field.py src/aerocanyon/data/wind_grid_map_zone.npy src/aerocanyon/data/wind_grid_map_zone.json
 git commit -m "canyon_field: generate a map_zone wind field from real OSM buildings
 
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
