@@ -130,8 +130,15 @@ def _spawn_xyz(world, mission_file):
     return (east, north, cg.GROUND_Z + 0.2)
 
 
+# map_zone's world file is map_zone_ap.sdf, not map_zone.sdf -- its
+# internal <world name="map_zone"> (what the /world/{world}/... gz
+# services and gz_wind_topic key off) still matches the `world` value
+# used everywhere else; only the filename on disk differs.
+_WORLD_SDF_FILENAME = {'map_zone': 'map_zone_ap'}
+
+
 def _world_sdf(world):
-    return WS / 'src' / 'aerocanyon' / 'worlds' / f'{world}.sdf'
+    return WS / 'src' / 'aerocanyon' / 'worlds' / f'{_WORLD_SDF_FILENAME.get(world, world)}.sdf'
 
 WEB_VIEWER = WS / 'web_viewer'
 # The launch7 plugin's own binary, not the `gz launch` subcommand -- verified

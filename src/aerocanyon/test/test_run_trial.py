@@ -30,7 +30,7 @@ from aerocanyon import constants as C
 from aerocanyon import run_trial as rt
 from aerocanyon.run_trial import (MAP_ZONE_SPAWN_XYZ, MAX_STALL_RETRIES,
                                   SPAWN_XYZ, _LandWatcher, _LegStalled,
-                                  _reset_gazebo_model, _spawn_xyz,
+                                  _reset_gazebo_model, _spawn_xyz, _world_sdf,
                                   _verify_sitl_started, _wait_for_landing)
 
 
@@ -54,6 +54,19 @@ def test_reset_gazebo_model_teleports_the_right_entity_to_the_spawn_pose(monkeyp
     assert request.name == C.MODEL_NAME
     x, y, z = SPAWN_XYZ
     assert (request.position.x, request.position.y, request.position.z) == (x, y, z)
+
+
+def test_world_sdf_matches_the_file_on_disk_for_urban_canyon():
+    assert _world_sdf('urban_canyon').name == 'urban_canyon.sdf'
+
+
+def test_world_sdf_maps_map_zone_to_its_actual_filename():
+    """Live-caught: gz sim exited immediately (255, "Unable to find or
+    download file") because _world_sdf('map_zone') built
+    worlds/map_zone.sdf -- the real file is map_zone_ap.sdf, even though
+    the world's own internal name (<world name="map_zone">, what the gz
+    services key off) is just "map_zone"."""
+    assert _world_sdf('map_zone').name == 'map_zone_ap.sdf'
 
 
 def test_spawn_xyz_is_unchanged_for_urban_canyon():
