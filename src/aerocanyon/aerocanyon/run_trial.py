@@ -46,6 +46,7 @@ for the manual/external-Gazebo flow (README), where a single Gazebo
 process IS reused across runs.
 """
 import argparse
+import json
 import os
 import pathlib
 import shutil
@@ -56,6 +57,7 @@ import tempfile
 import time
 
 import rclpy
+from geometry_msgs.msg import PoseStamped
 from gz.msgs10.entity_pb2 import Entity
 from gz.msgs10.pose_pb2 import Pose
 from gz.msgs10.boolean_pb2 import Boolean
@@ -66,6 +68,7 @@ from rclpy.qos import qos_profile_sensor_data
 
 from . import canyon_geometry as cg
 from . import constants as C
+from . import frames
 
 WS = pathlib.Path(__file__).resolve().parents[3]
 
@@ -97,7 +100,29 @@ SPAWN_XYZ = (float(cg.CANYON_ENTRY[0]), float(cg.CANYON_ENTRY[1]),
 # -- that static XML can't reference this value directly, so keep them
 # in sync by hand if either changes.
 
-WORLD_SDF = WS / 'src' / 'aerocanyon' / 'worlds' / f'{C.WORLD_NAME}.sdf'
+# map_zone's documented default spawn (README's manual-flight setup):
+# local ENU (0, 0), 0.2m above the terrain's z=74 ground level, same
+# convention SPAWN_XYZ above uses for urban_canyon.
+MAP_ZONE_SPAWN_XYZ = (0.0, 0.0, cg.GROUND_Z + 0.2)
+
+
+def _spawn_xyz(world, mission_file):
+    """Spawn point for a trial leg. urban_canyon is unaffected (always
+    SPAWN_XYZ). map_zone spawns at the mission file's first waypoint if
+    one is given (so the vehicle starts where the captured mission
+    actually begins), else the documented default spawn above."""
+    if world != 'map_zone':
+        return SPAWN_XYZ
+    if not mission_file:
+        return MAP_ZONE_SPAWN_XYZ
+    items = json.loads(pathlib.Path(mission_file).read_text())
+    north, east = frames.latlon_to_ned(items[0]['x_lat'], items[0]['y_long'],
+                                       HOME_LAT, HOME_LON)
+    return (east, north, cg.GROUND_Z + 0.2)
+
+
+def _world_sdf(world):
+    return WS / 'src' / 'aerocanyon' / 'worlds' / f'{world}.sdf'
 
 WEB_VIEWER = WS / 'web_viewer'
 # The launch7 plugin's own binary, not the `gz launch` subcommand -- verified
@@ -142,7 +167,7 @@ def _gazebo_env():
     return env
 
 
-def _spawn_gazebo():
+def _spawn_gazebo(world):
     """Start a brand-new `gz sim` server for this leg -- see run_leg for
     why: a genuinely fresh Gazebo process, not just an in-world entity
     reset, gives the SITL nothing carried over from any previous leg at
@@ -160,7 +185,7 @@ def _spawn_gazebo():
     process-group kill in run_leg's teardown. Moot now that this
     function doesn't want a GUI process at all, but worth remembering if
     a native GUI is ever wanted back."""
-    proc = _spawn(f'gz sim -v 2 {WORLD_SDF} -r -s',
+    proc = _spawn(f'gz sim -v 2 {_world_sdf(world)} -r -s',
                   cwd=WS, env=_gazebo_env())
     time.sleep(5)  # matches the README's manual startup margin
     if proc.poll() is not None:
@@ -211,7 +236,7 @@ def _spawn_static_server():
                   cwd=WEB_VIEWER)
 
 
-def _reset_gazebo_model():
+def _reset_gazebo_model(world=C.WORLD_NAME, spawn_xyz=SPAWN_XYZ):
     """Teleport the tricopter entity back to the spawn pose, if it exists
     from a previous trial (a no-op the first time nothing has spawned
     yet), instead of destroying and recreating it -- see the module
@@ -240,14 +265,14 @@ def _reset_gazebo_model():
     trial. Forcing orientation level on every reset can't fix the initial
     flip, but it stops it from persisting across legs."""
     node = GzNode()
-    x, y, z = SPAWN_XYZ
+    x, y, z = spawn_xyz
     req = Pose(name=C.MODEL_NAME, position={'x': x, 'y': y, 'z': z},
                orientation={'w': 1.0, 'x': 0.0, 'y': 0.0, 'z': 0.0})
-    node.request(f'/world/{C.WORLD_NAME}/set_pose', req, Pose, Boolean, 2000)
+    node.request(f'/world/{world}/set_pose', req, Pose, Boolean, 2000)
     time.sleep(1)
 
 
-def _recreate_gazebo_model():
+def _recreate_gazebo_model(world=C.WORLD_NAME):
     """Remove the tricopter entity outright instead of teleporting it, so
     PX4's own create-on-boot call produces a genuinely fresh entity with
     no carried-over physics state, on the theory that the live-observed
@@ -263,7 +288,7 @@ def _recreate_gazebo_model():
     reading this first."""
     node = GzNode()
     req = Entity(name=C.MODEL_NAME, type=Entity.MODEL)
-    node.request(f'/world/{C.WORLD_NAME}/remove', req, Entity, Boolean, 2000)
+    node.request(f'/world/{world}/remove', req, Entity, Boolean, 2000)
     time.sleep(1)
 
 
@@ -287,15 +312,42 @@ def _verify_sitl_started(sitl_proc, timeout_s=5):
             'both itself -- do not start them manually alongside it).')
 
 
+# Live-caught bug (seed=1, three reproductions): Gazebo's ArduPilotPlugin
+# sometimes stops sending FDM/sensor JSON to arduplane mid-flight and
+# never resumes -- confirmed via arduplane's own console output, normally
+# discarded by _spawn()'s stdout=DEVNULL but captured for this diagnosis:
+# "No JSON sensor message received, resending servos", repeating forever.
+# arduplane itself stays alive the whole time (not a SITL crash) --
+# waiting out the rest of `duration` on a stalled leg like this just
+# wastes the full timeout on a CSV that's mostly frozen-duplicate rows
+# past the stall point (confirmed live: 4619/4686 rows in one repro).
+# Since the freeze never self-heals once it starts, catching it early via
+# pose staleness and retrying the WHOLE leg from a fresh `gz sim` (see
+# run_leg's MAX_STALL_RETRIES) is strictly better than either waiting it
+# out or accepting the resulting data.
+#
+# NOTE the staleness check has to be on the pose VALUE, not message
+# arrival timing: live-verified (first version of this fix) that MAVROS
+# keeps publishing /mavros/local_position/pose at its normal ~20ms
+# cadence straight through the stall, just with the last-known,
+# unchanging position -- ArduPilot's own MAVLink telemetry stream
+# doesn't stop just because its FDM input from Gazebo did. A
+# message-arrival-timeout check never saw a gap and never fired.
+STALL_TIMEOUT_S = 15.0  # generous margin over normal QoS/scheduling jitter
+STALL_MOVEMENT_EPS_M = 1e-4  # position change below this counts as "unchanged"
+
+
 class _LandWatcher(RosNode):
-    """Watches /mavros/extended_state -- nothing else. controller_node
-    requests ArduPilot's own QLAND, in place, once it measures having
-    cleared the canyon exit by LAND_CLEARANCE_M (see controller_node.py),
-    and stops publishing RC overrides at that same moment so it isn't
-    fighting QLAND's landing logic for control authority. That means the
-    mission nodes (including trial_logger) can -- and should -- stay
-    alive and keep recording for the whole hold/transit/landing sequence;
-    this node only needs to watch for the landing to actually finish.
+    """Watches /mavros/extended_state and /mavros/local_position/pose.
+    controller_node requests ArduPilot's own QLAND, in place, once it
+    measures having cleared the canyon exit by LAND_CLEARANCE_M (see
+    controller_node.py), and stops publishing RC overrides at that same
+    moment so it isn't fighting QLAND's landing logic for control
+    authority. That means the mission nodes (including trial_logger) can
+    -- and should -- stay alive and keep recording for the whole
+    hold/transit/landing sequence; this node only needs to watch for the
+    landing to actually finish (or the JSON-FDM stall above, via pose
+    staleness).
 
     landed requires having been AIRBORNE first: ExtendedState.landed_state
     reads ON_GROUND by default at boot (resting on the ground, motors
@@ -307,9 +359,15 @@ class _LandWatcher(RosNode):
         super().__init__('land_watcher')
         self.was_airborne = False
         self.landed = False
+        self.pose_seen = False
+        self.last_pos = None
+        self.last_pose_change_monotonic = 0.0
         self.create_subscription(
             ExtendedState, '/mavros/extended_state',
             self._on_land, qos_profile_sensor_data)
+        self.create_subscription(
+            PoseStamped, '/mavros/local_position/pose',
+            self._on_pose, qos_profile_sensor_data)
 
     def _on_land(self, msg):
         if msg.landed_state == ExtendedState.LANDED_STATE_IN_AIR:
@@ -317,22 +375,39 @@ class _LandWatcher(RosNode):
         self.landed = (self.was_airborne
                        and msg.landed_state == ExtendedState.LANDED_STATE_ON_GROUND)
 
+    def _on_pose(self, msg):
+        p = msg.pose.position
+        pos = (p.x, p.y, p.z)
+        now = time.monotonic()
+        if (self.last_pos is None
+                or sum((a - b) ** 2 for a, b in zip(pos, self.last_pos))
+                > STALL_MOVEMENT_EPS_M ** 2):
+            self.last_pose_change_monotonic = now
+        self.last_pos = pos
+        self.pose_seen = True
 
-def _wait_for_landing(timeout_s):
+
+def _wait_for_landing(timeout_s, stall_timeout_s=STALL_TIMEOUT_S):
     """Block until /mavros/extended_state reports landed after having
-    been airborne, or timeout_s elapses. Returns whether it actually
-    confirmed landed -- callers should keep going either way (killing the
-    SITL mid-air is still better than hanging the whole pipeline on a
-    stuck telemetry reading), but should log the difference."""
+    been airborne, timeout_s elapses, or the pose topic goes stale for
+    stall_timeout_s (see STALL_TIMEOUT_S above) -- returns 'landed',
+    'timeout', or 'stalled' respectively. Callers should treat 'timeout'
+    the same as before (keep the CSV, it's real flight data that just
+    didn't confirm a landing in time) but retry 'stalled' from a fresh
+    `gz sim` instead of accepting it."""
     rclpy.init(args=[])
     try:
         node = _LandWatcher()
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline and not node.landed:
             rclpy.spin_once(node, timeout_sec=0.5)
+            if (node.pose_seen
+                    and time.monotonic() - node.last_pose_change_monotonic > stall_timeout_s):
+                node.destroy_node()
+                return 'stalled'
         landed = node.landed
         node.destroy_node()
-        return landed
+        return 'landed' if landed else 'timeout'
     finally:
         rclpy.shutdown()
 
@@ -352,11 +427,20 @@ def _kill(proc):
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
 
 
-def run_one(mode, trial, duration, clean_respawn=False, seed=0, turbulence=2.5, ff_gain=0.2):
+class _LegStalled(Exception):
+    """Raised by run_one when _wait_for_landing detects the Gazebo<->
+    ArduPilot JSON-FDM stall (see STALL_TIMEOUT_S) -- run_leg catches
+    this and retries the whole leg from a fresh `gz sim`, since the stall
+    is on Gazebo's side of that link and never self-heals in place."""
+
+
+def run_one(mode, trial, duration, clean_respawn=False, seed=0, turbulence=2.5,
+           ff_gain=0.2, world=C.WORLD_NAME, mission_file=''):
+    spawn_xyz = _spawn_xyz(world, mission_file)
     if clean_respawn:
-        _recreate_gazebo_model()
+        _recreate_gazebo_model(world)
     else:
-        _reset_gazebo_model()
+        _reset_gazebo_model(world, spawn_xyz)
 
     apstate_dir = pathlib.Path(tempfile.mkdtemp(prefix='aerocanyon_apstate_'))
     home_str = f'{HOME_LAT},{HOME_LON},{HOME_ALT},0'
@@ -385,18 +469,21 @@ def run_one(mode, trial, duration, clean_respawn=False, seed=0, turbulence=2.5, 
         env=mavros_env)
     time.sleep(5)  # MAVROS connect margin
 
+    launch_args = (f'mode:={mode} trial:={trial} seed:={seed} '
+                   f'turbulence_sigma:={turbulence} feedforward_gain:={ff_gain} '
+                   f'world:={world}')
+    if mission_file:
+        launch_args += f' mission_file:={mission_file}'
     launch = (f'bash -lc "source /opt/ros/jazzy/setup.bash && '
               f'source {WS}/install/setup.bash && '
-              f'ros2 launch aerocanyon canyon_sim.launch.py '
-              f'mode:={mode} trial:={trial} seed:={seed} '
-              f'turbulence_sigma:={turbulence} feedforward_gain:={ff_gain}"')
+              f'ros2 launch aerocanyon canyon_sim.launch.py {launch_args}"')
     nodes = _spawn(launch, cwd=WS)
 
     # Both modes hand off to ArduPilot's own QLAND, in place, once
     # controller_node measures clearing the canyon exit -- see
     # controller_node.LAND_CLEARANCE_M.
-    landed = _wait_for_landing(timeout_s=duration)
-    if not landed:
+    status = _wait_for_landing(timeout_s=duration)
+    if status == 'timeout':
         print(f'warning: {mode} did not confirm landed within {duration}s '
               '(extended_state never reported landed) -- proceeding anyway')
 
@@ -404,6 +491,11 @@ def run_one(mode, trial, duration, clean_respawn=False, seed=0, turbulence=2.5, 
         _kill(p)
     shutil.rmtree(apstate_dir, ignore_errors=True)
     time.sleep(3)
+
+    if status == 'stalled':
+        raise _LegStalled(
+            f'{mode}: Gazebo<->ArduPilot JSON-FDM link stalled mid-flight '
+            f'(pose topic silent for {STALL_TIMEOUT_S}s) -- see STALL_TIMEOUT_S')
 
     csv = WS / 'trials' / f'{trial}_{mode}.csv'
     if not csv.exists() or csv.stat().st_size < 1000:
@@ -414,32 +506,54 @@ def run_one(mode, trial, duration, clean_respawn=False, seed=0, turbulence=2.5, 
     return csv
 
 
-def run_leg(mode, trial, duration, seed=0, turbulence=2.5, ff_gain=0.2):
+MAX_STALL_RETRIES = 5  # total of 6 attempts per leg before giving up -- raised
+# from 2 after live-verifying the stall recurs often enough (seed=1 burned
+# all 3 original attempts on the treatment leg) that a cheap retry is worth
+# it: each one now costs STALL_TIMEOUT_S (15s) to detect, not the full
+# per-leg duration, so even several retries in a row are inexpensive next
+# to giving up on a whole trial.
+
+
+def run_leg(mode, trial, duration, seed=0, turbulence=2.5, ff_gain=0.2,
+           world=C.WORLD_NAME, mission_file=''):
     """Own one leg's entire Gazebo+ArduPilot lifecycle: spawn a fresh
     `gz sim`, run the leg, tear the world back down -- always, even if
     the leg raises. This is what main() runs as a separate OS process
     per leg (see `--mode`), so a leg's Gazebo/ArduPilot/rclpy state can
     never leak into the next one. Also owns this leg's web viewer bridge (see
     _spawn_web_bridge) -- paired 1:1 with its own gz sim instance, unlike
-    the static file server in main(), which spans the whole trial."""
-    gz = _spawn_gazebo()
-    bridge = _spawn_web_bridge()
-    try:
-        return run_one(mode, trial, duration, seed=seed, turbulence=turbulence,
-                       ff_gain=ff_gain)
-    finally:
-        _kill(bridge)
-        _kill(gz)
-        # Belt-and-suspenders: verified live that `gz sim ... -g` (the
-        # standalone gui-client flag, no longer used by _spawn_gazebo --
-        # see its docstring for why) can leave behind an orphaned
-        # companion process that escapes the process-group kill above.
-        # -x matches the pattern against the WHOLE command line only, so
-        # this can never collide with the combined server+gui process
-        # _spawn_gazebo actually launches.
-        subprocess.run(['pkill', '-xf', 'gz sim -g'],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(2)
+    the static file server in main(), which spans the whole trial.
+
+    Retries up to MAX_STALL_RETRIES times, each from a completely fresh
+    `gz sim`, if run_one raises _LegStalled (see STALL_TIMEOUT_S) -- the
+    stall is on Gazebo's side of the JSON-FDM link to ArduPilot and
+    live-confirmed to never self-heal in place, so only a fresh Gazebo
+    process (not just a fresh arduplane/mavros) can recover it."""
+    for attempt in range(MAX_STALL_RETRIES + 1):
+        gz = _spawn_gazebo(world)
+        bridge = _spawn_web_bridge()
+        try:
+            return run_one(mode, trial, duration, seed=seed, turbulence=turbulence,
+                           ff_gain=ff_gain, world=world, mission_file=mission_file)
+        except _LegStalled as e:
+            if attempt == MAX_STALL_RETRIES:
+                raise SystemExit(
+                    f'{e} -- giving up after {MAX_STALL_RETRIES + 1} attempts')
+            print(f'{e} -- retrying leg {attempt + 2}/{MAX_STALL_RETRIES + 1} '
+                  'from a fresh gz sim')
+        finally:
+            _kill(bridge)
+            _kill(gz)
+            # Belt-and-suspenders: verified live that `gz sim ... -g` (the
+            # standalone gui-client flag, no longer used by _spawn_gazebo --
+            # see its docstring for why) can leave behind an orphaned
+            # companion process that escapes the process-group kill above.
+            # -x matches the pattern against the WHOLE command line only, so
+            # this can never collide with the combined server+gui process
+            # _spawn_gazebo actually launches.
+            subprocess.run(['pkill', '-xf', 'gz sim -g'],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(2)
 
 
 def main():
@@ -467,11 +581,24 @@ def main():
                     help='scales the PINN feedforward (treatment mode only)')
     ap.add_argument('--mode', choices=('baseline', 'treatment'), default=None,
                     help=argparse.SUPPRESS)  # internal: run_leg's own subprocess re-invokes with this set
+    ap.add_argument('--world', choices=('urban_canyon', 'map_zone'),
+                    default='urban_canyon',
+                    help='which Gazebo world to fly the trial in')
+    ap.add_argument('--mission-file', default='', dest='mission_file',
+                    help='JSON mission (see dump_mission.py) to fly for '
+                         '--world map_zone -- required in that case')
     args = ap.parse_args()
+
+    if args.world == 'map_zone' and not args.mission_file:
+        raise SystemExit(
+            '--world map_zone requires --mission-file <path> -- capture '
+            'one first with `python3 -m aerocanyon.dump_mission <name>` '
+            '(see README)')
 
     if args.mode:
         run_leg(args.mode, args.trial, args.duration, seed=args.seed,
-                turbulence=args.turbulence, ff_gain=args.ff_gain)
+                turbulence=args.turbulence, ff_gain=args.ff_gain,
+                world=args.world, mission_file=args.mission_file)
         return
 
     # Started once here, not per leg -- see _spawn_static_server's own
@@ -489,7 +616,10 @@ def main():
                '--mode', mode, '--trial', args.trial,
                '--duration', str(args.duration), '--seed', str(args.seed),
                '--turbulence', str(args.turbulence),
-               '--ff-gain', str(args.ff_gain)]
+               '--ff-gain', str(args.ff_gain),
+               '--world', args.world]
+        if args.mission_file:
+            cmd += ['--mission-file', args.mission_file]
         result = subprocess.run(cmd, cwd=WS)
         if result.returncode != 0:
             raise SystemExit(f'{mode} leg failed (exit code {result.returncode})')

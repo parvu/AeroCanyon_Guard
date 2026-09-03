@@ -16,6 +16,8 @@ def generate_launch_description():
     seed = LaunchConfiguration('seed')
     turbulence = LaunchConfiguration('turbulence_sigma')
     ff_gain = LaunchConfiguration('feedforward_gain')
+    world = LaunchConfiguration('world')
+    mission_file = LaunchConfiguration('mission_file')
     return LaunchDescription([
         DeclareLaunchArgument('mode', default_value='baseline',
                               description='baseline or treatment'),
@@ -31,6 +33,11 @@ def generate_launch_description():
         DeclareLaunchArgument('feedforward_gain', default_value='0.2',
                               description='scales the PINN feedforward; see '
                                           'controller_node'),
+        DeclareLaunchArgument('world', default_value='urban_canyon',
+                              description='urban_canyon or map_zone'),
+        DeclareLaunchArgument('mission_file', default_value='',
+                              description='JSON mission path (map_zone '
+                                          'only -- see dump_mission.py)'),
         # Real bug found live: every node here uses create_timer()/get_clock()
         # with no use_sim_time set, and nothing bridged Gazebo's own /clock
         # into ROS2 -- so all of them ran on wall-clock ROS time while
@@ -52,6 +59,7 @@ def generate_launch_description():
              name='wind_field_node', output='screen',
              parameters=[{'seed': ParameterValue(seed, value_type=int),
                           'turbulence_sigma': ParameterValue(turbulence, value_type=float),
+                          'world': world,
                           'use_sim_time': True}]),
         Node(package='aerocanyon', executable='fo_pinn_node',
              name='fo_pinn_node', output='screen',
@@ -60,6 +68,8 @@ def generate_launch_description():
              name='controller_node', output='screen',
              parameters=[{'mode': mode,
                           'feedforward_gain': ParameterValue(ff_gain, value_type=float),
+                          'world': world,
+                          'mission_file': mission_file,
                           'use_sim_time': True}]),
         Node(package='aerocanyon', executable='trial_logger',
              name='trial_logger', output='screen',
