@@ -428,10 +428,21 @@ class ControllerNode(Node):
     def _yaw_to_target(self):
         """Stream a yaw-only RC override toward the mission's active
         cruise/landing target -- see the YAW_RATE_MAX_DEG_S/YAW_KP
-        comment above for why this is needed at all. Gated to
-        in_vtol_auto() (mode CMODE(MODE_AUTO)) only, matching where
-        QuadPlane actually reads pilot yaw input during a mission."""
-        if self.fcu_mode != f'CMODE({MODE_AUTO})':
+        comment above for why this is needed at all. Runs in both
+        CMODE(MODE_QSTABILIZE) (the climb phase) and CMODE(MODE_AUTO):
+        QSTABILIZE reads RC yaw directly as a manual yaw-rate command
+        (no STICK_MIXING gating needed, unlike AUTO's in_vtol_auto()
+        path), so starting this correction during the climb rather than
+        only once AUTO engages means the vehicle is already facing
+        roughly the right way when AUTO takes over navigation --
+        live-verified the alternative (yaw uncontrolled during climb):
+        the vehicle can enter AUTO facing nearly the OPPOSITE direction
+        from its target (up to ~165 deg off observed), and since
+        QuadPlane's own position controller converts world-frame desired
+        motion into body-frame lean using the CURRENT heading, a badly
+        wrong heading at AUTO engage actively flies it away from the
+        target until the YAW_RATE_MAX_DEG_S-capped correction catches up."""
+        if self.fcu_mode not in (f'CMODE({MODE_QSTABILIZE})', f'CMODE({MODE_AUTO})'):
             return
 
         target_ned, _ = self._active_target()

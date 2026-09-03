@@ -421,11 +421,35 @@ def test_yaw_to_target_publishes_yaw_only_override_when_in_auto():
     assert list(ch[0:3]) == [OverrideRCIn.CHAN_NOCHANGE] * 3, 'must not touch roll/pitch/throttle'
 
 
-def test_yaw_to_target_does_nothing_outside_auto_mode():
+def test_yaw_to_target_publishes_yaw_only_override_during_qstabilize_climb():
+    """The climb phase (QSTABILIZE) has no yaw control of its own --
+    live-verified the vehicle can enter AUTO facing ~165 deg away from
+    its target if nothing corrects heading during the climb. Same
+    correction as AUTO mode, just gated on QSTABILIZE instead."""
     rclpy.init(args=[])
     try:
         node = ControllerNode()
-        node.fcu_mode = 'CMODE(18)'  # QHOVER, not AUTO
+        node.fcu_mode = f'CMODE({MODE_QSTABILIZE})'
+        entry_ned = frames.enu_to_ned(cg.CANYON_ENTRY)
+        land_ned = np.array([entry_ned[0], LAND_TRIGGER_LOCAL_M, entry_ned[2]])
+        node.pos = land_ned - np.array([0.0, 50.0, 0.0])  # target is due east
+        node.quat = np.array([1.0, 0.0, 0.0, 0.0])  # identity -> yaw 0 (nose north)
+        published = []
+        node.rc_pub.publish = lambda msg: published.append(msg)
+        node._yaw_to_target()
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+    assert len(published) == 1
+    ch = published[0].channels
+    assert ch[3] == 2000, 'target due east of a north-facing vehicle should command full right yaw'
+
+
+def test_yaw_to_target_does_nothing_outside_qstabilize_or_auto_mode():
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        node.fcu_mode = 'CMODE(18)'  # QHOVER, neither QSTABILIZE nor AUTO
         published = []
         node.rc_pub.publish = lambda msg: published.append(msg)
         node._yaw_to_target()
