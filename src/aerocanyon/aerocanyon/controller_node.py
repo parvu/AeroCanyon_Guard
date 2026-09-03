@@ -16,11 +16,15 @@ including the QuadPlane::in_vtol_auto() source evidence that a
 [NAV_VTOL_TAKEOFF, NAV_WAYPOINT, NAV_VTOL_LAND] mission stays in
 Q-mode/VTOL navigation the whole way, never transitioning to fixed-wing.
 """
+import json
+import pathlib
+
 import numpy as np
 import rclpy
 from geometry_msgs.msg import PoseStamped, TwistStamped, Vector3Stamped
 from mavros_msgs.msg import OverrideRCIn, State, Waypoint
-from mavros_msgs.srv import CommandBool, CommandLong, WaypointPush
+from mavros_msgs.srv import (CommandBool, CommandLong, WaypointPush,
+                             WaypointSetCurrent)
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Imu
@@ -77,6 +81,12 @@ LAND_CLEARANCE_M = 5.0
 _LAST_TOWER_EDGE_ENU_X = max(b.cx + b.sx / 2.0 for b in cg.BUILDINGS if b.cx > 0)
 LAND_TRIGGER_LOCAL_M = _LAST_TOWER_EDGE_ENU_X + LAND_CLEARANCE_M
 
+# seq 2 in _build_mission()'s list -- the single NAV_WAYPOINT the whole
+# canyon transit flies toward. Shared by _treatment_tick's correction
+# push and its follow-up WaypointSetCurrent restart -- see that method's
+# docstring for why the restart is required at all.
+CRUISE_WP_SEQ = 2
+
 ENABLE_VTOL_TRANSITION = False  # unchanged -- see cbf_filter.py's own use of this flag
 
 # Four engage-sequence variants were tried live, and every one, at least
@@ -132,6 +142,11 @@ class ControllerNode(Node):
             raise ValueError(f'mode must be baseline or treatment, got {self.mode}')
         self.get_logger().info(f'controller mode: {self.mode}')
 
+        self.declare_parameter('world', 'urban_canyon')
+        self.world = self.get_parameter('world').value
+        self.declare_parameter('mission_file', '')
+        self.mission_file = self.get_parameter('mission_file').value
+
         # Scales the PINN feedforward before it reaches the CBF. See the
         # mission-stack port spec for the full measured-live rationale
         # behind 0.2 (unchanged from the RC-override design -- this only
@@ -143,6 +158,7 @@ class ControllerNode(Node):
         self.mission_uploaded = False
         self._mission_push_future = None
         self._mission_confirmed = False
+        self._correction_push_future = None
         self.wind_est = np.zeros(3)
         self.pos = np.zeros(3)
         self.vel = np.zeros(3)
@@ -165,6 +181,8 @@ class ControllerNode(Node):
         self.arm_client = self.create_client(CommandBool, '/mavros/cmd/arming')
         self.cmd_client = self.create_client(CommandLong, '/mavros/cmd/command')
         self.mission_client = self.create_client(WaypointPush, '/mavros/mission/push')
+        self.set_current_client = self.create_client(
+            WaypointSetCurrent, '/mavros/mission/set_current')
         self.rc_pub = self.create_publisher(OverrideRCIn, '/mavros/rc/override', 10)
 
         self.mavros_connected = False
@@ -211,6 +229,11 @@ class ControllerNode(Node):
         self.wind_truth = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
 
     def _build_mission(self):
+        if self.world == 'map_zone':
+            return self._build_map_zone_mission()
+        return self._build_urban_canyon_mission()
+
+    def _build_urban_canyon_mission(self):
         """[home placeholder, NAV_VTOL_TAKEOFF @ entry, NAV_WAYPOINT @
         landing-trigger point, NAV_VTOL_LAND @ landing-trigger point] --
         all at CRUISE_ALT_M, all in Q-mode/VTOL navigation the whole way
@@ -249,6 +272,35 @@ class ControllerNode(Node):
             wp(85, land_ned),                     # MAV_CMD_NAV_VTOL_LAND
         ]
 
+    def _build_map_zone_mission(self):
+        """Replay a mission captured by dump_mission.py from a live
+        Mission Planner session (see README/dump_mission.py) verbatim:
+        [home placeholder, item 0 (is_current), item 1, ..., item N-1] --
+        same seq-0-placeholder shape as _build_urban_canyon_mission, for
+        the same reason (ArduPilot always overwrites it). Each item's
+        own command/frame/altitude is replayed as captured, unlike
+        urban_canyon's fixed CRUISE_ALT_M -- the mission was authored at
+        whatever altitudes made sense for the real terrain."""
+        items = json.loads(pathlib.Path(self.mission_file).read_text())
+        if not items:
+            raise ValueError(f'mission file {self.mission_file} has no waypoints')
+
+        def wp(item, is_current=False):
+            w = Waypoint()
+            w.frame = item['frame']
+            w.command = item['command']
+            w.is_current = is_current
+            w.autocontinue = item['autocontinue']
+            w.x_lat = item['x_lat']
+            w.y_long = item['y_long']
+            w.z_alt = item['z_alt']
+            return w
+
+        home_placeholder = wp(items[0])  # content is irrelevant -- ArduPilot overwrites seq 0
+        return [home_placeholder] + [
+            wp(item, is_current=(i == 0)) for i, item in enumerate(items)
+        ]
+
     @staticmethod
     def _accumulate_offset(u_safe, dt, current_offset, max_offset_m):
         """Kinematic displacement over one update interval (0.5*a*dt^2),
@@ -264,6 +316,35 @@ class ControllerNode(Node):
         return new_offset
 
     def _treatment_tick(self):
+        # Confirm the PREVIOUS correction push, then restart the cruise
+        # nav command on it. Pushing a WaypointPush to an already-active
+        # mission item only rewrites its entry in ArduPilot's mission
+        # STORAGE -- confirmed against AP_Mission::replace_cmd's own doc
+        # comment ("replacing the current active command will have no
+        # effect until the command is restarted"): ArduPlane caches the
+        # active nav command's target in RAM (_nav_cmd, set once by
+        # advance_current_nav_cmd() when the command starts) and never
+        # re-reads storage while it's running. Every correction this loop
+        # computed was therefore silently discarded in flight -- baseline
+        # and treatment flew identically, confirmed live by a 49-point
+        # wind sweep landing at ~0% mean effect (noise-sized variance,
+        # not a real one). MISSION_SET_CURRENT on the SAME index
+        # (mavros's /mavros/mission/set_current -> AP_Mission::
+        # set_current_cmd -> advance_current_nav_cmd) is ArduPilot's own
+        # supported mechanism for restarting the active nav command in
+        # place, forcing it to re-read the just-written target from
+        # storage. Gated on the push's own future the same way
+        # _mission_confirmed gates arm/AUTO above -- firing SET_CURRENT
+        # before the FCU has actually finished the WaypointPush handshake
+        # would restart onto the STALE, not-yet-updated location.
+        if self._correction_push_future is not None and self._correction_push_future.done():
+            result = self._correction_push_future.result()
+            self._correction_push_future = None
+            if result is not None and result.success:
+                set_current_req = WaypointSetCurrent.Request()
+                set_current_req.wp_seq = CRUISE_WP_SEQ
+                self.set_current_client.call_async(set_current_req)
+
         u_des = -self.ff_gain * self.wind_est / MASS_KG
         u_safe, info = self.cbf.filter(u_des, self.pos, self.vel,
                                        self.wind_truth, self.quat)
@@ -282,7 +363,22 @@ class ControllerNode(Node):
             C.MAX_WAYPOINT_OFFSET_M)
 
         since_last_push = self.tick - self._last_offset_push_tick
-        if since_last_push >= C.CONTROL_HZ / C.CORRECTION_UPDATE_HZ:
+        # Also gated on the initial mission having actually been
+        # confirmed, and on the previous correction push having resolved
+        # (either confirmed above, or failed). ArduPilot's mission-item
+        # protocol is a single stateful request/ack handshake shared by
+        # EVERY WaypointPush regardless of target index -- live-verified
+        # this collides: this method runs from tick 0 regardless of mode
+        # state, so its first correction push (tick 50) landed BEFORE
+        # the initial 4-item mission upload even starts (tick
+        # SETPOINTS_BEFORE_OFFBOARD=100), and its second (tick 100) fired
+        # on the SAME tick as that upload -- two concurrent WaypointPush
+        # transfers on one handshake, which ArduPilot's mission protocol
+        # cannot do, producing "Mission upload timeout" on the FCU and
+        # leaving the vehicle without a real mission at all.
+        if (self._mission_confirmed
+                and since_last_push >= C.CONTROL_HZ / C.CORRECTION_UPDATE_HZ
+                and self._correction_push_future is None):
             entry_ned = frames.enu_to_ned(cg.CANYON_ENTRY)
             land_ned = np.array([entry_ned[0], LAND_TRIGGER_LOCAL_M, entry_ned[2]])
             corrected_ned = land_ned + np.array(
@@ -299,9 +395,9 @@ class ControllerNode(Node):
             wp.z_alt = CRUISE_ALT_M
 
             req = WaypointPush.Request()
-            req.start_index = 2  # seq 2 -- the cruise NAV_WAYPOINT item (see _build_mission's seq-0-is-home note)
+            req.start_index = CRUISE_WP_SEQ
             req.waypoints = [wp]
-            self.mission_client.call_async(req)
+            self._correction_push_future = self.mission_client.call_async(req)
             self._last_offset_push_tick = self.tick
 
     def _yaw_to_target(self):

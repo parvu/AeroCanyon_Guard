@@ -1,11 +1,17 @@
 """Regression coverage for controller_node's AUTO-mission control path."""
+import json
+
 import numpy as np
+import pytest
 import rclpy
 from mavros_msgs.msg import OverrideRCIn
+from mavros_msgs.msg import Waypoint as MavWaypoint
+from mavros_msgs.msg import WaypointList
 
 from aerocanyon import canyon_geometry as cg
 from aerocanyon import frames
-from aerocanyon.controller_node import (ENGAGE_RETRY_TICKS,
+from aerocanyon.controller_node import (CRUISE_ALT_M, CRUISE_WP_SEQ,
+                                        ENGAGE_RETRY_TICKS, HOME_LAT, HOME_LON,
                                         LAND_TRIGGER_LOCAL_M, MODE_AUTO,
                                         QSTAB_CLIMB_ALT_M,
                                         SETPOINTS_BEFORE_OFFBOARD,
@@ -77,6 +83,61 @@ def test_uploads_a_mission_before_requesting_auto_and_arm():
         'the real 3-item mission starts at seq 1')
     assert arm_calls == [] and mode_calls == [], (
         'must not request AUTO/arm on the same tick as the mission upload')
+
+
+def _write_mission_file(tmp_path, items):
+    p = tmp_path / 'mission.json'
+    p.write_text(json.dumps(items))
+    return str(p)
+
+
+def test_build_mission_for_map_zone_loads_and_replays_the_mission_file(tmp_path):
+    items = [
+        {'command': 84, 'frame': 3, 'x_lat': 44.4345, 'y_long': 26.0480,
+         'z_alt': 25.0, 'autocontinue': True},
+        {'command': 16, 'frame': 3, 'x_lat': 44.4348, 'y_long': 26.0490,
+         'z_alt': 30.0, 'autocontinue': True},
+        {'command': 85, 'frame': 3, 'x_lat': 44.4350, 'y_long': 26.0495,
+         'z_alt': 0.0, 'autocontinue': True},
+    ]
+    mission_file = _write_mission_file(tmp_path, items)
+
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        node.world = 'map_zone'
+        node.mission_file = mission_file
+        mission = node._build_mission()
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+
+    assert len(mission) == 4, (
+        'home placeholder (seq 0, always overwritten by ArduPilot -- see '
+        'the urban_canyon mission\'s own docstring) + the 3 real items')
+    assert mission[1].command == 84 and mission[1].is_current
+    assert mission[2].command == 16 and not mission[2].is_current
+    assert mission[3].command == 85
+    assert mission[3].x_lat == pytest.approx(44.4350)
+    assert mission[2].z_alt == pytest.approx(30.0), (
+        'map_zone replays each item\'s own captured altitude, not the '
+        'fixed CRUISE_ALT_M urban_canyon uses')
+
+
+def test_build_mission_for_urban_canyon_is_unaffected():
+    """world defaults to urban_canyon -- _build_mission's existing
+    4-item fixed mission must be byte-for-byte the same as before this
+    task's changes."""
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        mission = node._build_mission()
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+    assert len(mission) == 4
+    assert mission[1].command == 84  # NAV_VTOL_TAKEOFF
+    assert mission[3].command == 85  # NAV_VTOL_LAND
 
 
 def test_requests_qstabilize_and_arm_once_mission_confirmed():
@@ -191,6 +252,68 @@ def test_treatment_mode_publishes_cbf_diagnostics_and_survives_the_tick_loop():
         node.destroy_node()
     finally:
         rclpy.shutdown()
+
+
+def test_treatment_restarts_cruise_waypoint_once_correction_push_confirms():
+    """The correction push alone doesn't move the vehicle -- ArduPilot
+    caches the active nav command's target in RAM and only re-reads
+    mission storage when that command is restarted (AP_Mission::
+    replace_cmd's own doc comment). _treatment_tick must follow every
+    confirmed push with a WaypointSetCurrent on the same index to force
+    that restart -- this is the fix for the bug a 49-point wind sweep
+    caught live (treatment and baseline flew identically). Precondition:
+    _mission_confirmed already True -- see the next test for what
+    happens before that."""
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        node.mode = 'treatment'
+        node.mavros_armed = True
+        node._mission_confirmed = True
+        node.wind_est = np.array([2.0, 0.0, 0.0])  # non-zero so a correction accumulates
+        pushes = []
+        restarts = []
+        node.mission_client.call_async = _confirmed_push(pushes)
+        node.set_current_client.call_async = lambda req: restarts.append(req)
+
+        for _ in range(60):  # > CORRECTION_UPDATE_HZ's 50-tick period, plus a tick to see the confirm
+            node._tick()
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+    assert len(pushes) == 1, 'must have pushed exactly one correction by tick 60'
+    assert len(restarts) == 1, 'must restart the cruise nav command once the push confirms'
+    assert restarts[0].wp_seq == CRUISE_WP_SEQ
+
+
+def test_treatment_does_not_push_corrections_before_initial_mission_confirms():
+    """Live-caught bug: _treatment_tick runs from tick 0 regardless of
+    mission state. Its first correction push landed on tick 50, before
+    the initial 4-item mission upload even starts (tick
+    SETPOINTS_BEFORE_OFFBOARD=100), and its second landed on the SAME
+    tick as that upload -- two concurrent WaypointPush transfers on
+    ArduPilot's one stateful mission-write handshake, which broke both
+    ("Mission upload timeout" on the FCU, no real mission ever
+    delivered). Correction pushes must wait for _mission_confirmed."""
+    rclpy.init(args=[])
+    try:
+        node = ControllerNode()
+        node.mode = 'treatment'
+        node.mavros_armed = True
+        node.wind_est = np.array([2.0, 0.0, 0.0])
+        pushes = []
+        node.mission_client.call_async = _confirmed_push(pushes)
+        node.set_current_client.call_async = lambda req: None
+
+        for _ in range(SETPOINTS_BEFORE_OFFBOARD + 1):  # past both correction-push ticks (50, 100)
+            node._tick()
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+    assert len(pushes) == 1, (
+        'the one push by now must be the initial mission upload, not a '
+        'colliding correction push -- _mission_confirmed is only set '
+        'once that upload\'s own future resolves, one tick later')
 
 
 def test_yaw_to_target_publishes_yaw_only_override_when_in_auto():
