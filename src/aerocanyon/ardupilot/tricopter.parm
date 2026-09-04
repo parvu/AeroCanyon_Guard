@@ -94,8 +94,9 @@ SERVO13_REVERSED  0
 # the wrong direction, flip this back to 1 first before suspecting the
 # script logic.
 SERVO14_FUNCTION  94
-SERVO14_MIN       1000
-SERVO14_MAX       2000
+SERVO14_MIN       1200
+SERVO14_TRIM      1500
+SERVO14_MAX       1900
 SERVO14_REVERSED  0
 
 # --- Rate gains: starting point ONLY, reasoned from this session's PX4 ---
@@ -291,3 +292,18 @@ Q_RTL_ALT         50
 # Matrix, set above alongside the other Q_FRAME_* params) hands
 # motor-factor allocation to scripts/tricopter_mixer.lua instead.
 SCR_ENABLE        1
+
+# --- Throttle failsafe -- disabled for SITL bench testing, 2026-09-04 ---
+# Live-caught: with no real RC transmitter/joystick source (pure
+# MAVLink/scripted testing), ArduPilot correctly sees no valid RC signal
+# and raises throttle failsafe (real param name confirmed against
+# ArduPlane/Parameters.cpp's GSCALAR(throttle_fs_enabled, "THR_FAILSAFE",
+# ...) -- compiled default Enabled), which clamps channel 3 to a
+# safe-low PWM regardless of any RC-override command sent over MAVLink
+# -- confirmed live via RC_CHANNELS echoing chan3_raw=1000 despite an
+# active rc_channels_override_send(...,1900,...). This is correct,
+# intentional ArduPilot safety behaviour, not a bug -- disabled here
+# only because this project drives the vehicle entirely via
+# MAVLink/scripted commands, never a real transmitter. Re-enable (or
+# remove this override) before any test involving actual RC hardware.
+THR_FAILSAFE      0

@@ -1376,13 +1376,26 @@
         <cmd_max>20.0</cmd_max>
         <cmd_min>-20.0</cmd_min>
       </control>
-      <control channel="13"> <!-- SERVO14: k_tiltMotorRear -> rear -->
+      <control channel="13"> <!-- SERVO14: k_scripting1 (Lua tricopter_mixer) -> rear tilt
+           2026-09-04: multiplier/offset were negated relative to front
+           (-1.9198.../-0.8181... vs front's +1.9198.../-0.1818...),
+           calibrated back when this channel was k_tiltMotorRear with
+           SERVO14_REVERSED=1. This session repurposed SERVO14 to
+           k_scripting1 with SERVO14_REVERSED=0 so tricopter_mixer.lua
+           can own the rear tilt directly -- the joint's own comment
+           above states front and rear share the identical SDF
+           convention (0 rad=hover, +pi/2=cruise), so with REVERSED=0
+           the rear now needs the SAME calibration as front, not its
+           negation. Left uncorrected, the Lua script's hover-tilt PWM
+           (1000, meant to command 0 rad) instead computed to -0.818 rad
+           -- outside the joint's [-0.349, +1.5708] limit -- and clamped
+           near the lower bound instead of sitting upright. -->
         <jointName>motor_1_joint</jointName>
         <useForce>1</useForce>
-        <multiplier>-1.9198621771937625</multiplier>
-        <offset>-0.8181818181818182</offset>
-        <servo_min>1000</servo_min>
-        <servo_max>2000</servo_max>
+        <multiplier>1.9198621771937625</multiplier>
+        <offset>-0.18181818181818182</offset>
+        <servo_min>1200</servo_min>
+        <servo_max>1900</servo_max>
         <type>POSITION</type>
         <p_gain>500.0</p_gain>
         <i_gain>0</i_gain>
