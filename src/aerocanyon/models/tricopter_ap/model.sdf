@@ -986,16 +986,27 @@
       <forward>1 0 0</forward>
       <upward>0 1 0</upward>
       <link_name>base_link</link_name>
-      <!-- <control_joint_name>
+      <control_joint_name>
         rudder_joint
-      </control_joint_name> -->
+      </control_joint_name>
+      <control_joint_rad_to_cl>-1.0</control_joint_rad_to_cl>
     </plugin>
-    <!-- <plugin
+    <!-- Wired up 2026-09-04 -- live-caught via Mission Planner showing
+         no rudder output ("servo 4"). Previously disabled (both blocks
+         commented out) with sub_topic=servo_5 (SERVO6), which today's
+         motor SERVO-remapping (see tricopter.parm) claimed for the
+         front-left motor -- would have driven the rudder off the
+         front-left motor's throttle command if just uncommented as-is.
+         SERVO4 (index 3, topic servo_3) is genuinely free and is
+         ArduPlane's own compiled default k_rudder channel already,
+         matching what Mission Planner shows without needing any
+         tricopter.parm change. -->
+    <plugin
       filename="gz-sim-joint-position-controller-system"
-    name="gz::sim::systems::JointPositionController">
+      name="gz::sim::systems::JointPositionController">
       <joint_name>rudder_joint</joint_name>
-      <sub_topic>servo_5</sub_topic>
-    </plugin> -->
+      <sub_topic>servo_3</sub_topic>
+    </plugin>
     <!-- Task 5: this plugin is what makes the three tilt servos work at
          all. ArduPilotPlugin's POSITION + useForce=1 path reads the
          joint's gz::sim::components::JointPosition component
