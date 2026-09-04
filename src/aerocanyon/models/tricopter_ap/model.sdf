@@ -1158,7 +1158,13 @@
          / rear) and turning directions already baked into the PX4 mesh
          choices (iris_prop_ccw.dae vs iris_prop_cw.dae) above. -->
     <plugin name="ArduPilotPlugin" filename="ArduPilotPlugin">
-      <fdm_addr>127.0.0.1</fdm_addr>
+      <!-- 0.0.0.0, not 127.0.0.1: accepts the JSON-FDM connection from a
+           SITL instance running on the Windows host (outside WSL), where
+           127.0.0.1 refers to Windows itself, not this WSL VM. The
+           Windows-side SITL still needs to target this VM's actual IP
+           (`hostname -I` in WSL -- changes across reboots) rather than
+           127.0.0.1 for the other half of this to work. -->
+      <fdm_addr>0.0.0.0</fdm_addr>
       <fdm_port_in>9002</fdm_port_in>
       <connectionTimeoutMaxCount>5</connectionTimeoutMaxCount>
       <lock_step>1</lock_step>
