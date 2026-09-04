@@ -223,3 +223,29 @@ SERIAL0_PROTOCOL  2
 # (planes need room to turn), way too loose for this hovering
 # multicopter's waypoint transitions. Corrected live to 5m.
 WP_RADIUS         5
+
+# --- Airspeed sensor -- FW-transition prerequisite, 2026-09-04 ---
+# Never overridden here before either, so the compiled default
+# (ARSPD_TYPE=2, Analog -- a physical-pin sensor, meaningless in
+# simulation) was in effect, explaining the recurring "Preflight Fail:
+# Airspeed selector module down" this project's history documents on
+# both autopilot branches. The Gazebo side was already correctly wired
+# -- tricopter_ap/model.sdf includes model://airspeed, and
+# map_zone_ap.sdf loads gz-sim-air-speed-system -- and ArduPilot's own
+# SIM_JSON.cpp already accepts an `airspeed` field over the JSON-FDM
+# link (SIM_JSON.h:148) -- the ONLY missing piece was telling ArduPilot
+# to actually read it. ARSPD_TYPE=100 is ArduPilot's own SITL backend
+# (reads the simulation's true airspeed directly, not an emulated
+# analog/I2C device -- see AP_Airspeed::TYPE_SITL). Without this,
+# ArduPlane/quadplane.cpp's transition logic (~line 1394-1518) has no
+# ahrs.airspeed_EAS() to wait on and falls back to a groundspeed
+# estimate instead (quadplane.cpp:1491) -- close enough in still air,
+# but groundspeed != airspeed in any wind, exactly the condition this
+# project's wind_field_node tests.
+ARSPD_TYPE        100
+ARSPD_USE         1
+
+# --- QRTL climb altitude -- live-caught 2026-09-04 ---
+# Default 15m was too low for map_zone's real Bucharest building heights,
+# risking a collision during the VTOL climb-then-return home. Raised to 50m.
+Q_RTL_ALT         50

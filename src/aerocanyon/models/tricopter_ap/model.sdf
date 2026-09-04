@@ -868,15 +868,39 @@
       </physics>
     </joint>
     <plugin filename="gz-sim-lift-drag-system" name="gz::sim::systems::LiftDrag">
-      <a0>0.05984281113</a0>
-      <cla>4.752798721</cla>
-      <cda>0.6417112299</cda>
+      <!-- a0/cla/cda derived 2026-09-04 from a real AVL vortex-lattice run
+           (see ardupilot_phase2_notes -- AVL prerequisite item 1) against a
+           purpose-sized planform: AR=6 (matching the real Skywalker X8's
+           actual proportions, since this vehicle already reuses its wing
+           mesh), total area kept at 1.0 m^2 (0.5 m^2/side, unchanged from
+           this project's existing hover/thrust tuning), taper 0.45,
+           15deg LE sweep, -3deg tip washout. AVL's own airfoil data files
+           weren't available (Hirrus.avl's MH49/AZ2003 .dat files are
+           missing) so AVL fell back to a zero-camber section -- cla/a0 are
+           geometry-driven (solid), cda is AVL's induced-drag slope (0-10deg
+           3-point fit) plus an approximate 0.015 profile-drag floor spread
+           over a 10deg operating range (a real approximation, not a
+           measured polar -- validate against live cruise L/D once
+           transition flight testing starts). cma stays 0.0: the plugin's
+           cma is the LOCAL section moment about this surface's own cp
+           (~aerodynamic center), not a whole-aircraft static-margin
+           derivative -- a symmetric/flat section genuinely has ~0 moment
+           about its own AC in thin-airfoil theory, so 0.0 is a real value
+           here, not an unfixed placeholder (whole-aircraft pitch stability
+           instead comes from where cp sits relative to the vehicle's own
+           CG, set separately by mass/inertia). cp's y moved from 0.3 to
+           0.535 -- the real spanwise area-centroid of this half-wing
+           (b_half/3 * (c_root+2*c_tip)/(c_root+c_tip)), not just the old
+           placeholder tip-ish position. -->
+      <a0>-0.02576</a0>
+      <cla>4.320084</cla>
+      <cda>0.2275</cda>
       <cma>0.0</cma>
       <alpha_stall>0.3391428111</alpha_stall>
       <cla_stall>-3.85</cla_stall>
       <cda_stall>-0.9233984055</cda_stall>
       <cma_stall>0</cma_stall>
-      <cp>-0.05 0.3 0.05</cp>
+      <cp>-0.05 0.535 0.05</cp>
       <area>0.5</area>
       <air_density>1.2041</air_density>
       <forward>1 0 0</forward>
@@ -894,15 +918,17 @@
       <sub_topic>servo_0</sub_topic>
     </plugin>
     <plugin filename="gz-sim-lift-drag-system" name="gz::sim::systems::LiftDrag">
-      <a0>0.05984281113</a0>
-      <cla>4.752798721</cla>
-      <cda>0.6417112299</cda>
+      <!-- Mirror of left_elevon's block above -- see its comment for the
+           full AVL derivation. -->
+      <a0>-0.02576</a0>
+      <cla>4.320084</cla>
+      <cda>0.2275</cda>
       <cma>0.0</cma>
       <alpha_stall>0.3391428111</alpha_stall>
       <cla_stall>-3.85</cla_stall>
       <cda_stall>-0.9233984055</cda_stall>
       <cma_stall>0</cma_stall>
-      <cp>-0.05 -0.3 0.05</cp>
+      <cp>-0.05 -0.535 0.05</cp>
       <area>0.5</area>
       <air_density>1.2041</air_density>
       <forward>1 0 0</forward>

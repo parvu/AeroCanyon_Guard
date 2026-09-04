@@ -1,0 +1,98 @@
+# 
+# Note : check consistency of area unit and length units in this file
+# Note : check consistency with inertia units of the .mass file
+# 
+# 
+Hirrus
+0.0                          | Mach
+0     0     0.0              | iYsym  iZsym  Zsym
+
+600696.000    307.588   2600.000  | Sref   Cref   Bref
+ 260.028     0.000    -8.084          | Xref   Yref   Zref
+ 0.00                        | CDp  (optional)
+
+
+
+#=================================================
+SURFACE                      | (keyword)
+Hirrus 1-MH49,p-4_Wing
+#Nchord    Cspace   [ Nspan Sspace ]
+11        1.0
+
+INDEX                        | (keyword)
+30100                          | Lsurf
+
+YDUPLICATE
+0.0
+
+SCALE
+1.0  1.0  1.0
+
+TRANSLATE
+0.0  0.0  0.0
+
+ANGLE
+   3.000                         | dAinc
+
+
+#______________
+SECTION                                                     |  (keyword)
+   0.0000  202.0000    0.0000  395.0000   0.000    3    1   | Xle Yle Zle   Chord Ainc   [ Nspan Sspace ]
+
+AFIL 0.0 1.0
+MH49.dat
+#______________
+SECTION                                                     |  (keyword)
+  97.8657  400.0000   -5.1289  367.0000   0.000    5    1   | Xle Yle Zle   Chord Ainc   [ Nspan Sspace ]
+
+AFIL 0.0 1.0
+MH49.dat
+
+#______________
+SECTION                                                     |  (keyword)
+ 231.6158  652.0000  -13.6908  323.0000  -1.100    5    1   | Xle Yle Zle   Chord Ainc   [ Nspan Sspace ]
+
+AFIL 0.0 1.0
+AZ2003_az_moy_p-4.dat
+
+CONTROL                                                     |  (keyword)
+Hirrus_1-MH49,p-4_Wing_Flap_1  -0.25  0.800      0.3806      0.9246     -0.0158  -1.0  | name, gain,  Xhinge,  XYZhvec,  SgnDup
+#______________
+SECTION                                                     |  (keyword)
+ 382.3997  900.0000  -22.1009  262.0000  -1.800    5    1   | Xle Yle Zle   Chord Ainc   [ Nspan Sspace ]
+
+AFIL 0.0 1.0
+AZ2003_az_moy_p-4.dat
+
+CONTROL                                                     |  (keyword)
+Hirrus_1-MH49,p-4_Wing_Flap_2  -0.25  0.800      0.3267      0.9449     -0.0220  -1.0  | name, gain,  Xhinge,  XYZhvec,  SgnDup
+#______________
+SECTION                                                     |  (keyword)
+ 567.1707 1130.5599  -31.8165  160.0000  -3.100    1    1   | Xle Yle Zle   Chord Ainc   [ Nspan Sspace ]
+
+AFIL 0.0 1.0
+AZ2003_az_ext.dat
+
+#______________
+SECTION                                                     |  (keyword)
+ 597.8626 1151.2187  -18.3830  140.0000   1.000    1    1   | Xle Yle Zle   Chord Ainc   [ Nspan Sspace ]
+
+AFIL 0.0 1.0
+AZ2003_az_ext.dat
+
+#______________
+SECTION                                                     |  (keyword)
+ 632.9421 1163.3921    1.2299  120.0000   1.500    5    1   | Xle Yle Zle   Chord Ainc   [ Nspan Sspace ]
+
+AFIL 0.0 1.0
+AZ2003_az_ext.dat
+
+#______________
+SECTION                                                     |  (keyword)
+ 793.9959 1163.7580  112.7506   45.0000   2.000    5    1   | Xle Yle Zle   Chord Ainc   [ Nspan Sspace ]
+
+AFIL 0.0 1.0
+AZ2003_az_ext.dat
+
+
+
