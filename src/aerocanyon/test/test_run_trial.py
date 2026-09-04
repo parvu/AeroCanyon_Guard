@@ -90,7 +90,7 @@ def test_spawn_xyz_uses_the_mission_files_first_waypoint(tmp_path):
         44.4345, 26.0480, rt.HOME_LAT, rt.HOME_LON)
     assert x == pytest.approx(expected_east)
     assert y == pytest.approx(expected_north)
-    assert z == pytest.approx(cg.GROUND_Z + 1.2)
+    assert z == pytest.approx(rt.MAP_ZONE_GROUND_Z + 1.2)
 
 
 def test_spawn_xyz_skips_a_takeoff_items_zeroed_coordinates(tmp_path):

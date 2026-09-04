@@ -100,15 +100,24 @@ SPAWN_XYZ = (float(cg.CANYON_ENTRY[0]), float(cg.CANYON_ENTRY[1]),
 # -- that static XML can't reference this value directly, so keep them
 # in sync by hand if either changes.
 
+# map_zone's own ground reference -- kept separate from urban_canyon's
+# GROUND_Z (74, a synthetic-world convention unrelated to real elevation).
+# map_zone_ap.sdf's terrain and --home altitude are both zeroed (not the
+# real ~76m Bucharest MSL elevation) so Gazebo's absolute z and
+# ArduPilot's home-altitude belief agree -- the JSON-FDM link reports raw
+# Gazebo z back to SITL, and a mismatch there desyncs SITL's altitude
+# belief from the simulated position. See map_zone_ap.sdf's own comment.
+MAP_ZONE_GROUND_Z = 0.0
+
 # map_zone's documented default spawn (README's manual-flight setup):
-# local ENU (0, 0), 1.2m above the terrain's z=74 ground level -- raised
-# from 0.2m (SPAWN_XYZ's own urban_canyon convention) after live-verifying
-# in the native Gazebo GUI that the real OSM terrain mesh has actual
+# local ENU (0, 0), 1.2m above the terrain's ground level -- raised from
+# 0.2m (SPAWN_XYZ's own urban_canyon convention) after live-verifying in
+# the native Gazebo GUI that the real OSM terrain mesh has actual
 # geometry right at the home point/local origin (a small structure, not
 # visible in map_zone_geometry.BUILDINGS -- that parse only covers ways
 # explicitly tagged building=*, and this clearly isn't one), close enough
 # to the ground that 0.2m clearance spawned the vehicle inside it.
-MAP_ZONE_SPAWN_XYZ = (0.0, 0.0, cg.GROUND_Z + 1.2)
+MAP_ZONE_SPAWN_XYZ = (0.0, 0.0, MAP_ZONE_GROUND_Z + 1.2)
 
 
 def _spawn_xyz(world, mission_file):
@@ -132,7 +141,7 @@ def _spawn_xyz(world, mission_file):
     wp = next((it for it in items if (it['x_lat'], it['y_long']) != (0.0, 0.0)),
               items[0])
     north, east = frames.latlon_to_ned(wp['x_lat'], wp['y_long'], HOME_LAT, HOME_LON)
-    return (east, north, cg.GROUND_Z + 1.2)  # see MAP_ZONE_SPAWN_XYZ's own comment
+    return (east, north, MAP_ZONE_GROUND_Z + 1.2)  # see MAP_ZONE_SPAWN_XYZ's own comment
 
 
 # map_zone's world file is map_zone_ap.sdf, not map_zone.sdf -- its
@@ -464,7 +473,10 @@ def run_one(mode, trial, duration, clean_respawn=False, seed=0, turbulence=2.5,
         _reset_gazebo_model(world, spawn_xyz)
 
     apstate_dir = pathlib.Path(tempfile.mkdtemp(prefix='aerocanyon_apstate_'))
-    home_str = f'{HOME_LAT},{HOME_LON},{HOME_ALT},0'
+    # map_zone's --home altitude must match its own (zeroed) ground
+    # reference, not urban_canyon's HOME_ALT=74 -- see MAP_ZONE_GROUND_Z.
+    home_alt = MAP_ZONE_GROUND_Z if world == 'map_zone' else HOME_ALT
+    home_str = f'{HOME_LAT},{HOME_LON},{home_alt},0'
     arduplane = _spawn(
         f'{ARDUPLANE} --model JSON --home {home_str} '
         f'--wipe --defaults {TRICOPTER_PARM}',

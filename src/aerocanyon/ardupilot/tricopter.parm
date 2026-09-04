@@ -18,7 +18,12 @@ Q_TILT_MASK       3        # front pair (motors 1+2) ONLY -- rear stays out, see
 Q_TILT_TYPE       2        # VectoredYaw -- required for the rear tilt servo (k_tiltMotorRear) to move at all
 Q_TILT_YAW_ANGLE  20       # front pair's -20..0 deg hover yaw-trim sub-range
 Q_TILT_FIX_ANGLE  0        # must stay 0, or it eats into the range maths
-Q_TILT_MAX        8         # degrees, down from 45 -- see the AUTO-mission note further down
+Q_TILT_MAX        20        # degrees -- raised from 8 (itself down from 45) after
+# live-testing on the zeroed-altitude map_zone world: 8 deg was too
+# conservative and capped forward cruise speed to ~1.4 m/s even with
+# Q_WP_SPD=10. 20 deg gives a reasonable ~5 m/s cruise while staying well
+# under the lift-destroying territory near 45 -- see the AUTO-mission
+# note further down for why this fallback exists at all.
 # RATE_UP/RATE_DN are named for forward-to-hover / hover-to-forward
 # respectively (ArduPlane/tiltrotor.cpp's own @Description, opposite of
 # what the names suggest). At the old 40 deg/s, the full Q_TILT_MAX=8deg
@@ -76,9 +81,13 @@ Q_A_RAT_RLL_D     0.004
 Q_A_RAT_PIT_P     0.20
 Q_A_RAT_PIT_I     0.20
 Q_A_RAT_PIT_D     0.004
-Q_A_RAT_YAW_P     0.16
-Q_A_RAT_YAW_I     0.027
-Q_A_RAT_YAW_D     0.004
+Q_A_RAT_YAW_P     0.25       # up from 0.16 -- Q_TILT_MAX=20's wider forward-tilt
+# swing on the front pair now visibly fights the same servos' yaw-trim
+# duty (Q_TILT_TYPE=2 VectoredYaw shares them). Raising P/D pushes the
+# yaw-rate loop through that disturbance harder; live-verify for
+# oscillation before trusting this over more than one flight.
+Q_A_RAT_YAW_I     0.03        # up slightly from 0.027, holds against sustained bias
+Q_A_RAT_YAW_D     0.008       # doubled from 0.004, damps the extra P
 
 # --- Q-mode attitude limit (Phase 2 gain-tuning pass) ---
 # Q_A_ANGLE_MAX (AC_AttitudeControl's ANGLE_MAX, exposed here under the
@@ -95,7 +104,11 @@ Q_A_RAT_YAW_D     0.004
 # Python side. Raised modestly, not aggressively -- see
 # docs/superpowers/plans/2026-09-02-mission-stack-mavros-port.md for the
 # gain-tuning trail.
-Q_A_ANGLE_MAX     35       # degrees, up from the 30 deg default
+Q_A_ANGLE_MAX     40       # degrees, up from 35 -- more forward-lean authority for
+# AC_PosControl to build cruise speed via pitch (main-rotor thrust
+# vectoring) rather than leaning on the Q_TILT_MAX fallback. Hover sits
+# at 47% throttle (Q_M_THST_HOVER), leaving ~53% margin for the added
+# vertical-thrust loss from the steeper lean.
 
 # --- RC-override failsafe margin (Phase 2, mid-flight-landing bug) ---
 # RC_OVERRIDE_TIME (RC_Channel.cpp / RC_Channels_VarInfo.h, confirmed
@@ -164,6 +177,25 @@ Q_WP_SPD          10.0       # m/s, ArduPilot's own default
 # yaw-trim sub-range is a separate, absolute-degree servo-calibration
 # offset applied in Tiltrotor::vectoring() -- confirmed unaffected by
 # this change.)
+
+# --- PSC Z (altitude/throttle loop) gains -- the "untried next" item
+# from the AUTO-mission tilt bug above. First attempt at smoothing the
+# fallback's real remaining trigger: throttle_output ITSELF, still
+# capped at 8 deg via Q_TILT_MAX above but reacting on every
+# vertical-velocity error via Tiltrotor::continuous_update()'s
+# unconditional settilt = (throttle_output - throttle_min) * 0.02.
+# Live-observed this session: heading during ordinary AUTO cruise
+# doesn't just fail to converge, it wanders unpredictably (e.g. one
+# transit leg drifted from a correct ~89 deg heading at AUTO-engage to
+# 233 deg fifty seconds later) -- consistent with a twitchy vertical
+# loop feeding variable, uncommanded tilt into the SAME front-pair
+# servos VectoredYaw (Q_TILT_TYPE=2) uses for yaw trim, fighting it.
+# Q_P_D_VEL_P (ArduPilot default 5.0, never tuned for this frame) is
+# the most directly-coupled lever: it sets how aggressively a small
+# vertical-velocity error becomes a throttle_output swing. Lowered to
+# 3.0 as a first, conservative test -- not yet confirmed to fix the
+# heading wander, just the first untried change in this direction.
+Q_P_D_VEL_P       3.0
 
 FLTMODE_CH        0        # disable RC mode-switch: control_server pins ch8 to 1500,
                            # which ArduPilot would otherwise read as a mode-switch position

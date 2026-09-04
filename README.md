@@ -111,10 +111,16 @@ wrong here.
 The default manual-flight world is `src/aerocanyon/worlds/map_zone_ap.sdf`:
 a real-world OSM-derived 3D terrain model of the Politehnica/AFI area of
 Bucharest (`src/aerocanyon/map_zone/`), matching this project's `--home`
-coordinates below, with the tricopter spawned at z=75.2m, 1.2m above the
-terrain's z=74 ground level (raised from 0.2m -- the real OSM mesh has
+coordinates below, with the tricopter spawned at z=1.2m, 1.2m above the
+terrain's z=0 ground level (raised from 0.2m -- the real OSM mesh has
 actual geometry right at the home point, close enough to the ground
-that 0.2m clearance spawned the vehicle inside it).
+that 0.2m clearance spawned the vehicle inside it). World and `--home`
+altitude are both zeroed rather than the real ~76m Bucharest MSL
+elevation, so Gazebo's absolute z matches ArduPilot's home-altitude
+reference over the JSON-FDM link -- a mismatch there desyncs SITL's
+altitude belief from the simulated position. A collision-only
+`safety_floor` well below the terrain (z=-1) catches the vehicle if it
+ever falls through a gap in the mesh.
 
 ```bash
 # Terminal 1: Gazebo (headless -- no native GUI needed for the browser viewer below)
@@ -133,7 +139,7 @@ sleep 5
 # lists --defaults). mavproxy.py is not installed/required.
 mkdir -p /tmp/apstate && cd /tmp/apstate
 $HOME/ardupilot/build/sitl/bin/arduplane --model JSON \
-  --home 44.434424990487216,26.04781615647584,74,0 \
+  --home 44.434424990487216,26.04781615647584,0,0 \
   --wipe --defaults $HOME/AeroCanyon_Guard/src/aerocanyon/ardupilot/tricopter.parm &
 sleep 10
 

@@ -83,6 +83,24 @@
                 && entity.parent !== scene.modelManipulator.object) {
               scene.updatePose(entity, msg.pose[i].position,
                 msg.pose[i].orientation);
+              // Follow toggle (default on, like gz gui's own right-click
+              // "Follow" -- not the always-on auto-follow removed
+              // 2026-08-27 for fighting manual pan/zoom every frame; this
+              // one is opt-out via the button instead).
+              if (msg.pose[i].name === 'tricopter_0' ||
+                  msg.pose[i].name === 'tricopter_ap') {
+                if (followCamera) { pointCameraAt(entity); }
+                // The static wind_field_viz.json grid (10m x / 15m y
+                // spacing) almost never has a point near enough to see
+                // under the close-up follow camera -- vehicleWindArrow
+                // tracks the vehicle itself instead, 1m above the
+                // fuselage so it doesn't clip through it. It's the SAME
+                // live sample as the grid arrows (wind_field_node
+                // publishes wind AT the vehicle's own position, see its
+                // docstring), just anchored somewhere always in view.
+                vehicleWindArrow.position.copy(entity.position);
+                vehicleWindArrow.position.z += 1.0;
+              }
             }
           }
         }
@@ -197,6 +215,13 @@
     // spd+/spd- wind_speed_scale multiplier.
     var WIND_ARROW_DISPLAY_SCALE = 0.6;
 
+    // Always-in-view arrow, anchored to the vehicle's own position (see
+    // the pose-update callback above) rather than the sparse static grid.
+    var vehicleWindArrow = new THREE.ArrowHelper(
+      new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, 0), 0.01, 0x3399ff);
+    scene.scene.add(vehicleWindArrow);
+    windArrows.push(vehicleWindArrow);
+
     function loadWindField() {
       fetch('wind_field_viz.json').then(function (r) { return r.json(); })
         .then(function (data) {
@@ -248,9 +273,21 @@
         if (tries > 0) { setTimeout(function () { resetCameraPose(tries - 1); }, 500); }
         return;
       }
-      const p = tricopter.position;
+      pointCameraAt(tricopter);
+    }
+
+    // Shared camera placement, fixed offset behind/above the target --
+    // used both for the initial framing (resetCameraPose) and, when
+    // followCamera is on, on every pose update below.
+    function pointCameraAt(entity) {
+      const p = entity.position;
       const cam = scene.camera;
-      cam.position.set(p.x + 2.5, p.y - 2.5, p.z + 1.554);
+      // Offset read directly off the native gz gui camera (sim paused,
+      // live-measured via /gui/camera/pose minus the vehicle's own
+      // /world/.../dynamic_pose/info position at that instant: (-135.42,
+      // -2.95, 22.89) - (-138.42, -3.58, 20.99) = (3.0, 0.63, 1.90)) --
+      // matches how the user actually framed it there, not a guessed ratio.
+      cam.position.set(p.x + 3.0, p.y + 0.63, p.z + 1.90);
       // Real bug found live 2026-08-27: this vendored three.js build (r86,
       // see gz3d.js) only supports Object3D.lookAt(vector) -- a single
       // Vector3 -- not the (x,y,z) numbers form modern three.js added later.
@@ -264,6 +301,13 @@
       // scratch camera in the browser console and finding the resulting
       // quaternion was already NaN before any render happened.
       cam.lookAt(new THREE.Vector3(p.x, p.y, p.z + 0.146));
+    }
+
+    var followCamera = true;
+    function toggleFollow() {
+      followCamera = !followCamera;
+      document.getElementById('followBtn').textContent =
+        'follow: ' + (followCamera ? 'on' : 'off');
     }
 
     function animate() {
@@ -850,6 +894,7 @@
       <button onclick="manualCmd('land')">land now</button>
       <button onclick="manualCmd('transition_fw')">transition FW</button>
       <button onclick="manualCmd('transition_mc')">transition MC</button>
+      <button id="followBtn" onclick="toggleFollow()">follow: on</button>
     </div>
 
     <div id="speedControls" style="position: fixed; top: 10px; right: 10px;

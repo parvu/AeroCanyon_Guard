@@ -131,9 +131,15 @@ def generate_map_zone(nx=60, ny=40, nz=24):
     """
     from . import map_zone_geometry as mz
 
+    # NOT cg.GROUND_Z (74, urban_canyon's own convention) -- map_zone's
+    # terrain/vehicle spawn/--home altitude were all rezeroed to 0 (see
+    # map_zone_ap.sdf's own comment and run_trial.MAP_ZONE_GROUND_Z), so
+    # this grid's z-origin has to match that, not the other world's.
+    MAP_ZONE_GROUND_Z = 0.0
+
     xs_lo, xs_hi = -300.0, 300.0
     ys_lo, ys_hi = -300.0, 300.0
-    zs_lo, zs_hi = cg.GROUND_Z, cg.GROUND_Z + 100.0
+    zs_lo, zs_hi = MAP_ZONE_GROUND_Z, MAP_ZONE_GROUND_Z + 100.0
 
     xs = np.linspace(xs_lo, xs_hi, nx)
     ys = np.linspace(ys_lo, ys_hi, ny)
@@ -144,7 +150,7 @@ def generate_map_zone(nx=60, ny=40, nz=24):
         for j, y in enumerate(ys):
             for k, z in enumerate(zs):
                 p = np.array([x, y, z])
-                agl = z - cg.GROUND_Z
+                agl = z - MAP_ZONE_GROUND_Z
                 base = log_law(agl)
                 v = np.array([base, 0.0, 0.0]) + _recirculation(p, mz.BUILDINGS)
                 field[i, j, k] = v

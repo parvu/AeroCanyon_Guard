@@ -7,10 +7,30 @@
          manual-flight sections above. map_zone.dae (src/aerocanyon/map_zone/)
          is an OSM-derived 3D model of the Politehnica/AFI area of
          Bucharest, matching this project's ArduPilot --home coordinates
-         (44.434424990487216,26.04781615647584,76 -- see README). No
-         separate ground_plane: map_zone's own mesh is the ground and
-         buildings combined, static, so a flat plane underneath would
-         only z-fight it. -->
+         (44.434424990487216,26.04781615647584,0 -- see README). World and
+         --home altitude are both zeroed (not the real ~76m Bucharest MSL
+         elevation) so Gazebo's absolute z and ArduPilot's home-altitude
+         reference agree -- the JSON-FDM link reports raw Gazebo z back to
+         SITL, and a mismatch there desyncs SITL's altitude belief from
+         the simulated position. map_zone's own mesh is the visible
+         ground and buildings combined -- the collision-only safety_floor
+         model below sits well under it (z=-1, no visual) purely to catch
+         the vehicle if it ever falls through a hole/gap in that mesh; it
+         is far enough below z=0 not to z-fight the terrain. -->
+    <model name="safety_floor">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>10000 10000</size>
+            </plane>
+          </geometry>
+        </collision>
+      </link>
+      <pose>0 0 -1 0 0 0</pose>
+    </model>
     <physics name="1ms" type="ignored">
       <max_step_size>0.001</max_step_size>
       <real_time_factor>1.0</real_time_factor>
@@ -41,12 +61,12 @@
 
     <include>
       <uri>model://map_zone</uri>
-      <pose>0 0 74 0 0 0</pose>
+      <pose>0 0 0 0 0 0</pose>
     </include>
 
     <include>
       <uri>model://tricopter_ap</uri>
-      <pose>0 0 75.2 0 0 0</pose>
+      <pose>0 0 1.2 0 0 0</pose>
     </include>
   </world>
 </sdf>

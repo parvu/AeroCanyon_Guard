@@ -22,10 +22,15 @@ OUT_PATH = (pathlib.Path(__file__).resolve().parents[3]
            / 'web_viewer' / 'wind_field_viz.json')
 
 
-def export(data_dir=DATA_DIR, out_path=OUT_PATH,
-          z_targets=(cg.GROUND_Z + 10.0, cg.GROUND_Z + 25.0),
-          x_stride=6, y_stride=5):
-    grid = WindGrid.load(str(data_dir))
+def export(data_dir=DATA_DIR, out_path=OUT_PATH, world='urban_canyon',
+          z_targets=None, x_stride=6, y_stride=5):
+    if z_targets is None:
+        # map_zone's terrain/vehicle spawn sit near z=0 (rezeroed from the
+        # real ~74-76m Bucharest MSL convention, see map_zone_ap.sdf's own
+        # comment) -- urban_canyon's ground stays at its own GROUND_Z=74.
+        ground_z = 0.0 if world == 'map_zone' else cg.GROUND_Z
+        z_targets = (ground_z + 10.0, ground_z + 25.0)
+    grid = WindGrid.load(str(data_dir), world=world)
 
     zs = sorted({int(round((z - grid.origin[2]) / grid.spacing[2]))
                 for z in z_targets})
@@ -48,8 +53,10 @@ def export(data_dir=DATA_DIR, out_path=OUT_PATH,
 
 
 def main():
-    n = export()
-    print(f'wrote {n} points to {OUT_PATH}')
+    import sys
+    world = sys.argv[1] if len(sys.argv) > 1 else 'urban_canyon'
+    n = export(world=world)
+    print(f'wrote {n} points to {OUT_PATH} for world={world}')
 
 
 if __name__ == '__main__':
