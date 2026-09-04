@@ -18,13 +18,19 @@ verification, not part of the original Task 1 write-up: `k_scripting1`
 needed a -4500..+4500 scaled range not 0..1000, and `SERVO5/6/8_FUNCTION`
 needed remapping for the new mixer's generic k_motorN numbering).
 
-**Task 4 (hover re-tune) PAUSED, not complete.** Hit two real blockers
-during a genuine AUTO/`NAV_VTOL_TAKEOFF` climb attempt: severe motor
-asymmetry with flat attitude (likely integrator windup, root cause not
-confirmed) and MAVLink disarm commands silently not taking effect
-(had to kill SITL directly). Full details, working theories, and what
-NOT to skip when resuming: see `ardupilot-phase2-notes` memory, item 3.
-Tasks 5-6 not started (blocked on Task 4).
+**Task 4 (hover re-tune) DONE** (commit `fe5a464`). Root cause of the
+motor asymmetry/instability found and fixed: the hover factor table's
+front-motor pitch factors were `1.0` each (2:1 imbalance vs rear's
+`-1.0`) instead of the real `AP_MotorsTri`-matching `0.5` each (1:1
+balance) -- see `ardupilot-phase2-notes` memory for the full source
+citation and derivation. Live-verified: a 15s hover attempt converges
+to a stable, non-drifting 0.0deg roll/pitch after a rough ~4s spool-up
+transient. The disarm-not-working observation from the original Task 4
+attempt was a separate false alarm (measurement artifact, not a real
+bug) -- also detailed in memory.
+
+Tasks 5-6 (AUTO mission re-verify, first real transition attempt) not
+yet started.
 
 ## Global Constraints
 
