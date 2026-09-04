@@ -10,6 +10,22 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-04-scripting-mixer-fw-transition-design.md`
 
+## Status (2026-09-04)
+
+Tasks 1-3 DONE and live-verified (commits `c83a015`, `eb032e9`,
+`50ecc04` -- the latter two are real bugs found and fixed during
+verification, not part of the original Task 1 write-up: `k_scripting1`
+needed a -4500..+4500 scaled range not 0..1000, and `SERVO5/6/8_FUNCTION`
+needed remapping for the new mixer's generic k_motorN numbering).
+
+**Task 4 (hover re-tune) PAUSED, not complete.** Hit two real blockers
+during a genuine AUTO/`NAV_VTOL_TAKEOFF` climb attempt: severe motor
+asymmetry with flat attitude (likely integrator windup, root cause not
+confirmed) and MAVLink disarm commands silently not taking effect
+(had to kill SITL directly). Full details, working theories, and what
+NOT to skip when resuming: see `ardupilot-phase2-notes` memory, item 3.
+Tasks 5-6 not started (blocked on Task 4).
+
 ## Global Constraints
 
 - Motor indices are 0-based and MUST match the existing physical convention already in `tricopter.parm`/`model.sdf`: motor 0 = front right, motor 1 = rear, motor 2 = front left.
