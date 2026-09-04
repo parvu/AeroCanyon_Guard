@@ -11,11 +11,16 @@
 
 # --- Frame / tilt geometry -- exact values from Task 2's live SITL spike ---
 Q_ENABLE          1
-Q_FRAME_CLASS     7        # tricopter
+# Q_FRAME_CLASS changed 7->17 (Tri -> Dynamic Scripting Matrix) 2026-09-04
+# -- see docs/superpowers/specs/2026-09-04-scripting-mixer-fw-transition-design.md
+# and the matching plan. Q_FRAME_TYPE/Q_TILT_* below are UNCHANGED and
+# still apply to the front pair's own tilt-yaw mechanism; only the
+# overall mixer class and the rear motor's role change.
+Q_FRAME_CLASS     17       # Dynamic Scripting Matrix -- see scripts/tricopter_mixer.lua
 Q_FRAME_TYPE      1
 Q_TILT_ENABLE     1
 Q_TILT_MASK       3        # front pair (motors 1+2) ONLY -- rear stays out, see Task 2 section 5
-Q_TILT_TYPE       2        # VectoredYaw -- required for the rear tilt servo (k_tiltMotorRear) to move at all
+Q_TILT_TYPE       2        # VectoredYaw -- required for the front pair's own tilt-yaw mechanism
 Q_TILT_YAW_ANGLE  20       # front pair's -20..0 deg hover yaw-trim sub-range
 Q_TILT_FIX_ANGLE  0        # must stay 0, or it eats into the range maths
 Q_TILT_MAX        20        # degrees -- raised from 8 (itself down from 45) after
@@ -61,10 +66,23 @@ SERVO13_MIN       1000
 SERVO13_MAX       2000
 SERVO13_REVERSED  0
 
-SERVO14_FUNCTION  45       # k_tiltMotorRear -> rear tilt
+# SERVO14_FUNCTION changed 45->94 (k_tiltMotorRear -> k_scripting1)
+# 2026-09-04 -- scripts/tricopter_mixer.lua now owns the rear tilt
+# schedule directly (in lockstep with its own motor-factor-table swap),
+# not ArduPilot's own Tiltrotor class. The script's own scaled-output
+# convention (0=down/hover, 1000=horizontal/cruise) is designed to match
+# the SDF's native motor_1_joint range directly (0=upright, +pi/2=
+# forward -- see model.sdf's own comment on that joint), the SAME
+# convention the UNREVERSED front tilt servos (SERVO12/13 below) use --
+# not the old k_tiltMotorRear+REVERSED=1 180deg-offset workaround this
+# replaces. REVERSED changed 1->0 to match. NEEDS LIVE VERIFICATION
+# (see the matching plan's Task 2/3) -- if the rear servo ends up moving
+# the wrong direction, flip this back to 1 first before suspecting the
+# script logic.
+SERVO14_FUNCTION  94
 SERVO14_MIN       1000
 SERVO14_MAX       2000
-SERVO14_REVERSED  1        # REQUIRED -- the only way to invert; MIN>MAX does NOT work
+SERVO14_REVERSED  0
 
 # --- Rate gains: starting point ONLY, reasoned from this session's PX4 ---
 # empirical tuning (MC_ROLL_P=5.0, MC_ROLLRATE_P/I/D=0.2/0.2/0.004,
@@ -249,3 +267,13 @@ ARSPD_USE         1
 # Default 15m was too low for map_zone's real Bucharest building heights,
 # risking a collision during the VTOL climb-then-return home. Raised to 50m.
 Q_RTL_ALT         50
+
+# --- Dynamic scripting motor mixer -- FW transition, 2026-09-04 ---
+# See docs/superpowers/specs/2026-09-04-scripting-mixer-fw-transition-design.md
+# for why: Q_FRAME_CLASS=7 (Tri) has no way to give the rear motor an
+# independent cruise-only role -- ArduPilot's own tiltrotor.cpp assumes
+# the FRONT (tilting) pair becomes the cruise thruster, the opposite of
+# this vehicle's real design. Q_FRAME_CLASS=17 (Dynamic Scripting
+# Matrix, set above alongside the other Q_FRAME_* params) hands
+# motor-factor allocation to scripts/tricopter_mixer.lua instead.
+SCR_ENABLE        1
