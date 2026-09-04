@@ -42,11 +42,25 @@ Q_TILT_RATE_UP    15
 Q_TILT_RATE_DN    15
 
 # Motor thrust channels -- must match Task 3's Gazebo ArduPilotPlugin channels
-# 4/5/7 (0-indexed) = SERVO5/6/8 (1-indexed). Tri motor order per
-# AP_MotorsTri.cpp: motor1=front right, motor2=front left, motor4=rear.
-SERVO5_FUNCTION   33       # motor 1 = front right
-SERVO6_FUNCTION   34       # motor 2 = front left
-SERVO8_FUNCTION   36       # motor 4 = rear (never stops)
+# 4/5/7 (0-indexed) = SERVO5/6/8 (1-indexed). Physical wiring (which
+# SERVO channel drives which Gazebo motor joint) is fixed and did NOT
+# change with the 2026-09-04 Q_FRAME_CLASS=17 switch -- SERVO5 is still
+# front-right, SERVO6 still front-left, SERVO8 still rear.
+#
+# What DID change: AP_MotorsTri (old Q_FRAME_CLASS=7) used its own
+# special motor1/motor2/motor4 numbering (skipping motor3). The generic
+# AP_MotorsMatrix-based Dynamic Scripting Matrix (new Q_FRAME_CLASS=17)
+# instead expects motor index N (as passed to
+# scripts/tricopter_mixer.lua's Motors_dynamic:add_motor(N, ...)) to map
+# straight to k_motor(N+1) -- motor 0->k_motor1, 1->k_motor2, 2->k_motor3,
+# no skipping. The script registers 0=front-right, 1=rear, 2=front-left,
+# so SERVO8 (rear) needs k_motor2 now, not k_motor4, and SERVO6
+# (front-left) needs k_motor3, not k_motor2. Live-caught 2026-09-04: with
+# the old assignments still in place, front-left got no motor command at
+# all (SERVO8_raw read 0 on arming) since nothing was assigned k_motor3.
+SERVO5_FUNCTION   33       # k_motor1 -> script motor index 0 -> front right
+SERVO6_FUNCTION   35       # k_motor3 -> script motor index 2 -> front left
+SERVO8_FUNCTION   34       # k_motor2 -> script motor index 1 -> rear
 SERVO7_FUNCTION   0
 SERVO3_FUNCTION   0        # no separate fixed fwd throttle in Phase 1 (see Task 2 section 5 cruise-thrust concern)
 
