@@ -34,7 +34,7 @@ from . import constants as C
 from . import frames
 from .cbf_filter import CBFFilter
 from .constants import MASS_KG
-from .rc_pwm import MODE_QSTABILIZE, arm, pwm, pwm_throttle, set_mode
+from .rc_pwm import arm, pwm, set_mode
 
 # Raised from 20 -- belt-and-suspenders alongside _mission_confirmed
 # (below) for the mission-complete-instantly bug documented near
@@ -108,14 +108,18 @@ ENABLE_VTOL_TRANSITION = False  # unchanged -- see cbf_filter.py's own use of th
 # landed, ArduPilot sees zero/partial items and instantly reports
 # "complete" -- independent of which pre-arm hold mode was used, which is
 # exactly the pattern observed across all four variants. _mission_confirmed
-# (see _tick()) now gates BOTH the QSTABILIZE-climb engage sequence below
-# and the later AUTO switch on the FCU's own WaypointPush response, not
-# just the request having been sent -- variant (3) (QSTABILIZE, climb,
-# then AUTO) is back in use at the user's request, now that the actual
-# root cause has a real fix rather than relying on engage-sequence timing
-# alone.
-QSTAB_CLIMB_ALT_M = 20.0
-QSTAB_CLIMB_THROTTLE = 0.5  # fixed climb-stick fraction, [-1, 1]
+# (see _tick()) gates the arm+AUTO engage sequence below on the FCU's own
+# WaypointPush response, not just the request having been sent.
+#
+# Real bug found live 2026-09-04: the QSTABILIZE-climb-then-AUTO variant
+# (arm into QSTABILIZE, hold a fixed RC throttle stick until
+# QSTAB_CLIMB_ALT_M, only then switch to AUTO) was dropped at the user's
+# request after a bad start under this exact sequence. The mission itself
+# already opens with a NAV_VTOL_TAKEOFF item (command 84, see
+# map_zone_demo.json) that climbs to its own target altitude -- AUTO's
+# own takeoff handling does that job natively, so the custom QSTABILIZE
+# climb was redundant machinery duplicating (and, live-verified,
+# sometimes fighting) it. Now: arm straight into AUTO.
 
 # QuadPlane's own AUTO-mode navigation never turns the nose to face the
 # next waypoint outside the final landing approach -- confirmed against
@@ -171,8 +175,7 @@ class ControllerNode(Node):
         self.fcu_mode = ''
         self._was_armed = False
         self._mission_complete = False
-        self._engage_phase = 'preflight'  # preflight -> climbing -> auto
-        self._climb_start_down = 0.0
+        self._engage_phase = 'preflight'  # preflight -> auto
 
         # The CBF's stall barrier is a fixed-wing (loss-of-lift) concept
         # -- see cbf_filter.py's module docstring.
@@ -428,21 +431,21 @@ class ControllerNode(Node):
     def _yaw_to_target(self):
         """Stream a yaw-only RC override toward the mission's active
         cruise/landing target -- see the YAW_RATE_MAX_DEG_S/YAW_KP
-        comment above for why this is needed at all. Runs in both
-        CMODE(MODE_QSTABILIZE) (the climb phase) and CMODE(MODE_AUTO):
-        QSTABILIZE reads RC yaw directly as a manual yaw-rate command
-        (no STICK_MIXING gating needed, unlike AUTO's in_vtol_auto()
-        path), so starting this correction during the climb rather than
-        only once AUTO engages means the vehicle is already facing
-        roughly the right way when AUTO takes over navigation --
-        live-verified the alternative (yaw uncontrolled during climb):
-        the vehicle can enter AUTO facing nearly the OPPOSITE direction
-        from its target (up to ~165 deg off observed), and since
-        QuadPlane's own position controller converts world-frame desired
-        motion into body-frame lean using the CURRENT heading, a badly
-        wrong heading at AUTO engage actively flies it away from the
-        target until the YAW_RATE_MAX_DEG_S-capped correction catches up."""
-        if self.fcu_mode not in (f'CMODE({MODE_QSTABILIZE})', f'CMODE({MODE_AUTO})'):
+        comment above for why this is needed at all. Runs in
+        CMODE(MODE_AUTO), including during the mission's own
+        NAV_VTOL_TAKEOFF climb (not just level cruise): AUTO's
+        in_vtol_auto() reads RC yaw as long as STICK_MIXING != NONE (the
+        SITL default, unset in tricopter.parm -- see the module-level
+        comment above), so this correction is live from the moment AUTO
+        engages, same as it was during the since-removed QSTABILIZE climb
+        phase. Without it: the vehicle can enter AUTO facing nearly the
+        OPPOSITE direction from its target (up to ~165 deg off observed),
+        and since QuadPlane's own position controller converts
+        world-frame desired motion into body-frame lean using the
+        CURRENT heading, a badly wrong heading actively flies it away
+        from the target until the YAW_RATE_MAX_DEG_S-capped correction
+        catches up."""
+        if self.fcu_mode != f'CMODE({MODE_AUTO})':
             return
 
         target_ned, _ = self._active_target()
@@ -512,24 +515,11 @@ class ControllerNode(Node):
                 since_stream_started = self.tick - SETPOINTS_BEFORE_OFFBOARD - ENGAGE_RETRY_TICKS
                 if (since_stream_started >= 0
                         and since_stream_started % ENGAGE_RETRY_TICKS == 0):
-                    set_mode(self.cmd_client, MODE_QSTABILIZE)
+                    set_mode(self.cmd_client, MODE_AUTO)
                     arm(self.arm_client, True)
-                    self.get_logger().info('requested QSTABILIZE mode and arm')
+                    self.get_logger().info('requested AUTO mode and arm')
         elif self._engage_phase == 'preflight':
-            self._engage_phase = 'climbing'
-            self._climb_start_down = self.pos[2]
-        elif self._engage_phase == 'climbing':
-            climbed_m = self._climb_start_down - self.pos[2]  # NED down decreases while climbing
-            if climbed_m >= QSTAB_CLIMB_ALT_M:
-                set_mode(self.cmd_client, MODE_AUTO)
-                self._engage_phase = 'auto'
-                self.get_logger().info(f'climbed {climbed_m:.1f}m, switching to AUTO')
-            else:
-                msg = OverrideRCIn()
-                channels = [OverrideRCIn.CHAN_NOCHANGE] * 18
-                channels[2] = pwm_throttle(QSTAB_CLIMB_THROTTLE, 1.0)
-                msg.channels = channels
-                self.rc_pub.publish(msg)
+            self._engage_phase = 'auto'
 
         if self.mode == 'treatment':
             self._treatment_tick()

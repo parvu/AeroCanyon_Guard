@@ -216,3 +216,10 @@ SERIAL0_PROTOCOL  2
 # param exists for ArduPlane -- confirmed absent from ArduPlane/Parameters.cpp
 # and Parameters.h. Q_FRAME_CLASS above is the real, already-set equivalent.
 # Omitted rather than writing an unknown param.)
+
+# --- Waypoint acceptance radius -- live-caught 2026-09-04 ---
+# Never overridden here before, so the local SITL was flying on
+# ArduPlane's own compiled default of 90m -- a fixed-wing convention
+# (planes need room to turn), way too loose for this hovering
+# multicopter's waypoint transitions. Corrected live to 5m.
+WP_RADIUS         5

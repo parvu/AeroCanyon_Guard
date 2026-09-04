@@ -36,12 +36,6 @@ def test_point_above_all_buildings_is_clear():
     assert d > 10.0
 
 
-def test_sdf_contains_every_building():
-    sdf = cg.to_sdf()
-    for b in cg.BUILDINGS:
-        assert f'name="{b.name}"' in sdf
-
-
 def test_entry_and_exit_are_on_the_canyon_axis_outside_the_buildings():
     xs = [b.cx for b in cg.BUILDINGS]
     assert cg.CANYON_ENTRY[0] < min(xs)

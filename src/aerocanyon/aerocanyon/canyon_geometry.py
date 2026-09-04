@@ -93,37 +93,3 @@ def distance_and_normal(p):
     return best
 
 
-def to_sdf():
-    """Render BUILDINGS as SDF <model> blocks for inclusion in a world."""
-    blocks = []
-    for b in BUILDINGS:
-        blocks.append(f"""
-    <model name="{b.name}">
-      <static>true</static>
-      <pose>{b.cx} {b.cy} {GROUND_Z + b.sz / 2.0} 0 0 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry><box><size>{b.sx} {b.sy} {b.sz}</size></box></geometry>
-        </collision>
-        <visual name="visual">
-          <geometry><box><size>{b.sx} {b.sy} {b.sz}</size></box></geometry>
-          <material>
-            <ambient>0.76 0.69 0.55 1</ambient>
-            <diffuse>0.83 0.76 0.61 1</diffuse>
-          </material>
-        </visual>
-      </link>
-    </model>""")
-    return ''.join(blocks)
-
-
-if __name__ == '__main__':
-    import pathlib
-    import sys
-
-    src = pathlib.Path(__file__).resolve().parents[1] / 'worlds' / '_template.sdf'
-    dst = pathlib.Path(__file__).resolve().parents[1] / 'worlds' / 'urban_canyon.sdf'
-    if not src.exists():
-        sys.exit(f'missing template: {src}')
-    dst.write_text(src.read_text().replace('<!--BUILDINGS-->', to_sdf()))
-    print(f'wrote {dst} with {len(BUILDINGS)} buildings')

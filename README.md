@@ -12,12 +12,9 @@ MAVROS for ROS2 ↔ ArduPilot bridging.
 
 - **aerocanyon** — the primary scenario: canyon geometry, wind field, PINN
   wind estimator, CBF safety filter, trial orchestration, and figure
-  generation. Autonomous missions (no manual control). **Currently being
-  ported from px4_msgs to mavros_msgs** — see
-  [What's not here yet](#whats-not-here-yet-phase-2) below; until that
-  lands, `controller_node.py`, `run_trial.py`, `trial_logger.py`,
-  `fo_pinn_node.py`, and `wind_field_node.py` still import the
-  now-removed `px4_msgs` package and will not run.
+  generation. Autonomous missions (no manual control), running on
+  ArduPilot SITL + MAVROS (see [What's not here yet](#whats-not-here-yet-phase-2)
+  below for the remaining open item, FW transition).
 
 ## Prerequisites
 
@@ -249,27 +246,17 @@ with `python3 -c "import struct; ..."` reading `/dev/input/js0`'s
 
 ## Run the automated baseline/treatment trial
 
-**PENDING PORT — the section below still describes the pre-ArduPilot
-(PX4) design.** `controller_node.py`, `run_trial.py`, `trial_logger.py`,
-`fo_pinn_node.py`, and `wind_field_node.py` all still import the
-now-removed `px4_msgs` package and do not currently run. Porting these
-to MAVROS/mavros_msgs, regenerating the wind field for the `map_zone`
-terrain, retraining the FO-PINN estimator, and re-running the trial
-suite is the active Phase 2 work -- see
-[What's not here yet](#whats-not-here-yet-phase-2) below.
-
 ### AeroCanyon-Guard: Tricopter Canyon Transit
 
 Autonomous mission: tricopter VTOL transits an urban canyon under
 spatially-varying wind disturbance. FO-PINN estimates wind forces, CBF
 safety filter prevents collisions and stalls.
 
-### Regenerate the world and the wind grid
+### Regenerate the wind grid
 
 ```bash
 cd $HOME/AeroCanyon_Guard
 source /opt/ros/jazzy/setup.bash && source install/setup.bash
-python3 -m aerocanyon.canyon_geometry        # writes worlds/urban_canyon.sdf
 python3 -m aerocanyon.canyon_field           # writes data/wind_grid.npy
 ```
 
@@ -397,14 +384,11 @@ See [History.md](History.md) for known pitfalls and their fixes (arming, telemet
 
 ## What's not here yet (Phase 2)
 
-Manual hover flight (documented above) works end to end. Explicitly out
-of scope, not yet implemented:
+Both manual hover flight and the autonomous CBF/PINN mission stack
+(`controller_node.py`, `run_trial.py`'s automated baseline/treatment
+trial, `wind_field_node.py`) work end to end on ArduPilot SITL + MAVROS.
+Explicitly out of scope, not yet implemented:
 
-- The autonomous CBF/PINN mission stack (`controller_node.py`,
-  `run_trial.py`'s automated baseline/treatment trial, `wind_field_node.py`,
-  `train_pinn.py`) -- these still import the removed `px4_msgs` package
-  and need porting to `mavros_msgs`/MAVROS topics before anything flies a
-  mission by itself.
 - VTOL forward-flight transition -- `ArduPlane`'s `GUIDED` mode has no
   velocity-setpoint path for this airframe (see `control_server.py`'s
   module docstring), and ArduPilot's own `tiltrotor.cpp` cruise logic

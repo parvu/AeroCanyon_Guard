@@ -13,10 +13,8 @@ from aerocanyon import frames
 from aerocanyon.controller_node import (CRUISE_ALT_M, CRUISE_WP_SEQ,
                                         ENGAGE_RETRY_TICKS, HOME_LAT, HOME_LON,
                                         LAND_TRIGGER_LOCAL_M, MODE_AUTO,
-                                        QSTAB_CLIMB_ALT_M,
                                         SETPOINTS_BEFORE_OFFBOARD,
                                         ControllerNode)
-from aerocanyon.rc_pwm import MODE_QSTABILIZE
 
 
 class _FakeFuture:
@@ -140,56 +138,44 @@ def test_build_mission_for_urban_canyon_is_unaffected():
     assert mission[3].command == 85  # NAV_VTOL_LAND
 
 
-def test_requests_qstabilize_and_arm_once_mission_confirmed():
+def test_requests_auto_and_arm_once_mission_confirmed():
     arm_calls, mode_calls, _ = _run_ticks(
         'baseline', SETPOINTS_BEFORE_OFFBOARD + ENGAGE_RETRY_TICKS + 1)
-    assert mode_calls == [MODE_QSTABILIZE], (
-        'arms into QSTABILIZE first (climbs, then AUTO) -- gated on '
-        '_mission_confirmed, not just the push having been sent, which is '
-        'what actually fixed the mission-complete-instantly bug (see the '
-        'module docstring above _tick)')
+    assert mode_calls == [MODE_AUTO], (
+        'arms straight into AUTO -- the mission\'s own NAV_VTOL_TAKEOFF '
+        'item handles the climb now, see the module docstring above '
+        '_tick for why the earlier QSTABILIZE-climb-then-AUTO sequence '
+        'was dropped. Still gated on _mission_confirmed, not just the '
+        'push having been sent, which is what actually fixed the '
+        'mission-complete-instantly bug')
     assert arm_calls == [True]
 
 
-def test_does_not_switch_to_auto_before_climbing_past_threshold():
+def test_engage_phase_reaches_auto_immediately_once_armed():
+    """No climb-threshold delay any more -- preflight -> auto on the very
+    next tick after mavros reports armed."""
     rclpy.init(args=[])
     try:
         node = ControllerNode()
         node.mode = 'baseline'
-        node.mavros_armed = True
-        mode_calls = []
+        node.mavros_armed = False
         import aerocanyon.controller_node as cn
         cn.arm = lambda client, value: None
-        cn.set_mode = lambda client, mode: mode_calls.append(mode)
+        cn.set_mode = lambda client, mode: None
         node.mission_client.call_async = _confirmed_push()
 
-        for _ in range(5):
+        for _ in range(SETPOINTS_BEFORE_OFFBOARD + ENGAGE_RETRY_TICKS + 1):
             node._tick()
-        node.destroy_node()
-    finally:
-        rclpy.shutdown()
-    assert mode_calls == []
+        phase_before_armed = node._engage_phase
 
-
-def test_switches_to_auto_once_climbed_past_threshold():
-    rclpy.init(args=[])
-    try:
-        node = ControllerNode()
-        node.mode = 'baseline'
         node.mavros_armed = True
-        mode_calls = []
-        import aerocanyon.controller_node as cn
-        cn.arm = lambda client, value: None
-        cn.set_mode = lambda client, mode: mode_calls.append(mode)
-        node.mission_client.call_async = _confirmed_push()
-
-        node._tick()  # enters 'climbing', captures the start altitude
-        node.pos = np.array([0.0, 0.0, -QSTAB_CLIMB_ALT_M - 1.0])  # NED down: climbed past threshold
         node._tick()
+        phase_after_armed = node._engage_phase
         node.destroy_node()
     finally:
         rclpy.shutdown()
-    assert mode_calls == [MODE_AUTO]
+    assert phase_before_armed == 'preflight'
+    assert phase_after_armed == 'auto'
 
 
 def test_disarming_after_flying_marks_mission_complete_and_stops_re_arming():
@@ -197,7 +183,7 @@ def test_disarming_after_flying_marks_mission_complete_and_stops_re_arming():
     try:
         node = ControllerNode()
         node.mode = 'baseline'
-        node.mavros_armed = True
+        node.mavros_armed = False
         arm_calls = []
         mode_calls = []
         import aerocanyon.controller_node as cn
@@ -205,10 +191,12 @@ def test_disarming_after_flying_marks_mission_complete_and_stops_re_arming():
         cn.set_mode = lambda client, mode: mode_calls.append(mode)
         node.mission_client.call_async = _confirmed_push()
 
-        node._tick()  # enters 'climbing'
-        node.pos = np.array([0.0, 0.0, -QSTAB_CLIMB_ALT_M - 1.0])
-        node._tick()  # switches to AUTO
+        for _ in range(SETPOINTS_BEFORE_OFFBOARD + ENGAGE_RETRY_TICKS + 1):
+            node._tick()  # requests arm + AUTO
         assert mode_calls == [MODE_AUTO]
+
+        node.mavros_armed = True  # engage_phase: preflight -> auto
+        node._tick()
 
         node.mavros_armed = False  # landed and disarmed
         for _ in range(3 * ENGAGE_RETRY_TICKS):
@@ -217,8 +205,8 @@ def test_disarming_after_flying_marks_mission_complete_and_stops_re_arming():
     finally:
         rclpy.shutdown()
     assert mode_calls == [MODE_AUTO], (
-        'must not request QSTABILIZE/AUTO again after mission completion')
-    assert arm_calls == [], 'must not re-arm after landing'
+        'must not request AUTO again after mission completion')
+    assert arm_calls == [True], 'must not re-arm after landing'
 
 
 def test_retries_arm_request_until_engaged():
@@ -421,15 +409,16 @@ def test_yaw_to_target_publishes_yaw_only_override_when_in_auto():
     assert list(ch[0:3]) == [OverrideRCIn.CHAN_NOCHANGE] * 3, 'must not touch roll/pitch/throttle'
 
 
-def test_yaw_to_target_publishes_yaw_only_override_during_qstabilize_climb():
-    """The climb phase (QSTABILIZE) has no yaw control of its own --
-    live-verified the vehicle can enter AUTO facing ~165 deg away from
+def test_yaw_to_target_publishes_yaw_only_override_during_auto_takeoff_climb():
+    """AUTO's own NAV_VTOL_TAKEOFF climb has no yaw control of its own --
+    live-verified the vehicle can enter cruise facing ~165 deg away from
     its target if nothing corrects heading during the climb. Same
-    correction as AUTO mode, just gated on QSTABILIZE instead."""
+    correction path as level AUTO cruise, since it's all CMODE(MODE_AUTO)
+    now that the separate QSTABILIZE climb phase is gone."""
     rclpy.init(args=[])
     try:
         node = ControllerNode()
-        node.fcu_mode = f'CMODE({MODE_QSTABILIZE})'
+        node.fcu_mode = f'CMODE({MODE_AUTO})'
         entry_ned = frames.enu_to_ned(cg.CANYON_ENTRY)
         land_ned = np.array([entry_ned[0], LAND_TRIGGER_LOCAL_M, entry_ned[2]])
         node.pos = land_ned - np.array([0.0, 50.0, 0.0])  # target is due east
@@ -445,11 +434,11 @@ def test_yaw_to_target_publishes_yaw_only_override_during_qstabilize_climb():
     assert ch[3] == 2000, 'target due east of a north-facing vehicle should command full right yaw'
 
 
-def test_yaw_to_target_does_nothing_outside_qstabilize_or_auto_mode():
+def test_yaw_to_target_does_nothing_outside_auto_mode():
     rclpy.init(args=[])
     try:
         node = ControllerNode()
-        node.fcu_mode = 'CMODE(18)'  # QHOVER, neither QSTABILIZE nor AUTO
+        node.fcu_mode = 'CMODE(18)'  # QHOVER, not AUTO
         published = []
         node.rc_pub.publish = lambda msg: published.append(msg)
         node._yaw_to_target()
