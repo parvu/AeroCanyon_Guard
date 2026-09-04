@@ -23,14 +23,22 @@ local MOTOR_FRONT_RIGHT = 0
 local MOTOR_REAR = 1
 local MOTOR_FRONT_LEFT = 2
 
+-- Roll/pitch factors here match AP_MotorsTri's own real, tested values
+-- (get_roll_factor()/get_pitch_factor_json() in AP_MotorsTri.cpp), NOT
+-- arbitrary +-1.0 guesses. Live-caught 2026-09-04: an earlier version of
+-- this table used pitch=+-1.0 for the front pair (matching rear 1:1
+-- each), doubling the real front pitch authority vs AP_MotorsTri's own
+-- 0.5 each -- caused an immediate pitching moment on throttle-up before
+-- any real attitude error existed to correct, compounding into a roll
+-- tip-over within ~3s of arming.
 local hover_factors = motor_factor_table()
 hover_factors:roll(MOTOR_FRONT_RIGHT, -1.0)
-hover_factors:pitch(MOTOR_FRONT_RIGHT, 1.0)
+hover_factors:pitch(MOTOR_FRONT_RIGHT, 0.5)
 hover_factors:yaw(MOTOR_FRONT_RIGHT, 0.0)
 hover_factors:throttle(MOTOR_FRONT_RIGHT, 1.0)
 
 hover_factors:roll(MOTOR_FRONT_LEFT, 1.0)
-hover_factors:pitch(MOTOR_FRONT_LEFT, 1.0)
+hover_factors:pitch(MOTOR_FRONT_LEFT, 0.5)
 hover_factors:yaw(MOTOR_FRONT_LEFT, 0.0)
 hover_factors:throttle(MOTOR_FRONT_LEFT, 1.0)
 
