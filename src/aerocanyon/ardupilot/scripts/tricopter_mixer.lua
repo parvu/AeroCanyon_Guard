@@ -76,13 +76,18 @@ local function update()
         current_tilt_deg = math.max(current_tilt_deg - step_deg, target_tilt_deg)
     end
 
-    -- Scaled-output convention (0-1000 for "fully down" to "fully
-    -- horizontal") matches tiltrotor.cpp's own k_tiltMotorRear write
-    -- (tiltrotor.cpp:575, 1000*fraction) -- k_scripting1 is a different
-    -- function so this needs live verification against actual SERVO14
-    -- PWM output; switch to SRV_Channels:set_output_pwm(...) with
-    -- explicit 1000/2000 endpoints if this doesn't map as expected.
-    SRV_Channels:set_output_scaled(REAR_TILT_FUNCTION, 1000.0 * (current_tilt_deg / 90.0))
+    -- Live-verified 2026-09-04: k_scripting1 is an ANGLE-type function
+    -- (SRV_Channel_aux.cpp's function_is_pwm_or_angle-style switch calls
+    -- set_angle(4500) for it, same as k_tiltMotorRear/k_tiltMotorLeft/
+    -- k_tiltMotorRight) -- scaled input range is -4500..+4500
+    -- (centidegrees), mapped to the full SERVO14_MIN..MAX PWM span, NOT
+    -- 0..1000 as first assumed. Confirmed live: sending 0 produced
+    -- PWM 1500 (TRIM) instead of the expected "down" endpoint, and 1000
+    -- produced ~1611 -- both exactly consistent with the angle-type
+    -- +-4500 formula, not the 0..1000 one. -4500 = fully down (matches
+    -- SERVO14_MIN, tilt=0deg), +4500 = fully horizontal (matches
+    -- SERVO14_MAX, tilt=90deg).
+    SRV_Channels:set_output_scaled(REAR_TILT_FUNCTION, (current_tilt_deg / 90.0) * 9000.0 - 4500.0)
 
     if want_hover and current_tilt_deg <= 0.01 and not in_hover_table then
         Motors_dynamic:load_factors(hover_factors)
