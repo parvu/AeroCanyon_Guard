@@ -9,6 +9,32 @@
 # libraries/AP_Arming/AP_Arming.cpp, libraries/SITL/SITL.cpp,
 # libraries/AP_SerialManager/AP_SerialManager.cpp) -- none are guessed.
 
+# --- VTOL thrust-loss detection disabled -- root-caused 2026-09-05 ---
+# ArduPlane/quadplane.cpp's own thrust-loss detector (separate from, and
+# NOT guarded by, AP_MotorsMatrix::check_for_failed_motor's own
+# number_motors>=6 check) fires "Potential VTOL Thrust Loss (N)" whenever
+# the aircraft is descending at high commanded throttle with a small
+# lean angle and reasonable attitude tracking -- exactly the symptoms of
+# this airframe's real, ongoing thrust-margin problem during the FW
+# transition, not an actual failed motor. Once it fires, it calls
+# motors->set_thrust_boost(true), which makes AP_MotorsMatrix exclude
+# the flagged "lost" motor (whichever one happened to have the highest
+# filtered output at that instant -- here, always index 2 = front
+# left) from its normal RPY/collective bounds so the OTHER motors can
+# be boosted to compensate. That's the right call for a hex/octa frame
+# with real redundancy; for this 3-motor tricopter with NO redundant
+# motor, it permanently locks the mixer into a wildly asymmetric,
+# unrecoverable state -- confirmed live via a 150m-altitude test (real
+# altitude margin ruled out ground-impact/failsafe causes): RCOU showed
+# front-left pinned at PWM 1000 (dead minimum) while front-right and
+# rear pinned at max, and BOTH front tilt servos locked at their
+# maximum -- frozen, unchanging, for the rest of the flight. This
+# exact "Potential VTOL Thrust Loss (2)" message appeared in EVERY
+# transition test run this session; this detector, not raw thrust
+# margin or mixer RPY-authority squeeze, is the real, final root cause.
+# Q_THRST_LOSS_OPT bit 0 disables the detector entirely.
+Q_THRST_LOSS_OPT  1
+
 # --- Frame / tilt geometry -- exact values from Task 2's live SITL spike ---
 Q_ENABLE          1
 # Q_FRAME_CLASS changed 7->17 (Tri -> Dynamic Scripting Matrix) 2026-09-04
