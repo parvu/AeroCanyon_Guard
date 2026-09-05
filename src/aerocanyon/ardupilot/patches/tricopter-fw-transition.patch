@@ -1,0 +1,97 @@
+diff --git a/ArduPlane/quadplane.cpp b/ArduPlane/quadplane.cpp
+index 9982dfce04..9be885650e 100644
+--- a/ArduPlane/quadplane.cpp
++++ b/ArduPlane/quadplane.cpp
+@@ -1375,11 +1375,25 @@ float QuadPlane::assist_climb_rate_cms(void) const
+     }
+     climb_rate_cms = constrain_float(climb_rate_cms, -wp_nav->get_default_speed_down_ms() * 100.0, wp_nav->get_default_speed_up_ms() * 100.0);
+ 
+-    // bring in the demanded climb rate over 2 seconds
+-    const uint32_t ramp_up_time_ms = 2000;
+-    const uint32_t dt_since_start = last_pidz_active_ms - last_pidz_init_ms;
+-    if (dt_since_start < ramp_up_time_ms) {
+-        climb_rate_cms = linear_interpolate(0, climb_rate_cms, dt_since_start, 0, ramp_up_time_ms);
++    // bring in the demanded climb rate over 2 seconds -- skipped for
++    // tiltrotors (AeroCanyon_Guard patch, 2026-09-05). This ramp assumes
++    // an airframe with a dedicated forward-thrust motor, where easing
++    // VTOL climb-rate authority in over 2s while the forward motor takes
++    // over is fine. A tiltrotor has no such motor -- it depends entirely
++    // on VTOL lift until real airspeed is reached -- so ramping this
++    // authority from zero right as assisted_flight engages guarantees a
++    // ~2s window with near-zero climb-rate correction at exactly the
++    // moment a sink is most likely to start. Root-caused via a live SITL
++    // crash: QTUN logs showed the commanded climb rate (ThI) collapse to
++    // near-zero the instant Ast (assisted_flight) went true, with the
++    // vehicle then sinking uncorrected until PSC's own velocity-error
++    // feedback caught up too late to prevent hitting the ground.
++    if (!tiltrotor.enabled()) {
++        const uint32_t ramp_up_time_ms = 2000;
++        const uint32_t dt_since_start = last_pidz_active_ms - last_pidz_init_ms;
++        if (dt_since_start < ramp_up_time_ms) {
++            climb_rate_cms = linear_interpolate(0, climb_rate_cms, dt_since_start, 0, ramp_up_time_ms);
++        }
+     }
+     
+     return climb_rate_cms;
+diff --git a/ArduPlane/tiltrotor.cpp b/ArduPlane/tiltrotor.cpp
+index 10789bc320..b7b515c605 100644
+--- a/ArduPlane/tiltrotor.cpp
++++ b/ArduPlane/tiltrotor.cpp
+@@ -225,7 +225,23 @@ void Tiltrotor::continuous_update(void)
+ 
+         // option set then if disarmed move to VTOL position to prevent ground strikes, allow tilt forward in manual mode for testing
+         const bool disarmed_tilt_up = !plane.arming.is_armed_and_safety_off() && (plane.control_mode != &plane.mode_manual) && quadplane.option_is_set(QuadPlane::Option::DISARMED_TILT_UP);
+-        slew(disarmed_tilt_up ? 0.0 : get_forward_flight_tilt());
++        // Capped at Q_TILT_MAX instead of full forward tilt (AeroCanyon_Guard
++        // patch, 2026-09-05) -- same reasoning as the assisted_flight/TIMER
++        // branch below, closing a gap that branch's cap didn't cover.
++        // assisted_flight is re-scored every tick and can legitimately read
++        // false for a single tick during a violent, still-unresolved
++        // attitude oscillation even deep into a transition attempt -- when
++        // it does, THIS branch fires instead (armed, !in_vtol_mode(),
++        // !assisted_flight), and slewed the front pair straight to
++        // get_forward_flight_tilt() (~90deg), undoing the other branch's
++        // cap entirely for that tick. Root-caused via a live 150m-altitude
++        // SITL test: RCOU showed both front tilt servos pinned at PWM 2000
++        // (their max) for the rest of the flight, unchanged, exactly
++        // matching this unconditional slew target -- confirmed via source
++        // math (Tiltrotor::vectoring()'s base_output formula) that a
++        // current_tilt near 1.0 is the only way both front tilt PWMs reach
++        // exactly 2000 regardless of which vectoring sub-branch runs.
++        slew(disarmed_tilt_up ? 0.0 : MIN(max_angle_deg * (1/90.0), get_forward_flight_tilt()));
+ 
+         max_change = tilt_max_change(false);
+ 
+@@ -321,7 +337,31 @@ void Tiltrotor::continuous_update(void)
+         transition->transition_state >= Tiltrotor_Transition::State::TIMER) {
+         // we are transitioning to fixed wing - tilt the motors all
+         // the way forward
+-        slew(get_forward_flight_tilt());
++        //
++        // Capped at Q_TILT_MAX instead of full forward tilt
++        // (AeroCanyon_Guard patch, 2026-09-05). This unconditional jump
++        // to get_forward_flight_tilt() (~90 deg) assumes the STANDARD
++        // ArduPilot tiltrotor design, where the front (tilting) pair
++        // becomes the cruise thruster once transitioned. This airframe
++        // is the deliberate opposite: only the rear motor tilts/cruises
++        // (see scripts/tricopter_mixer.lua), the front pair is meant to
++        // stay near-vertical always. Root-caused via a live SITL crash:
++        // this line fires at exactly the moment assisted_flight and
++        // transition TIMER engage -- precisely when a sudden,
++        // uncommanded 20+ degree roll/pitch excursion was logged, and
++        // the vehicle lost far more vertical thrust than the front
++        // pair's own factor-table throttle allocation could explain.
++        // Slamming the front pair toward 90 deg here does two things
++        // this project never wants: removes their vertical lift on top
++        // of the rear's own tilt-driven loss, and feeds a rapidly
++        // moving current_tilt into vectoring()'s live sin/cos yaw-roll
++        // mixing (Q_TILT_TYPE=2), producing a torque transient. Capping
++        // this at Q_TILT_MAX matches the ceiling already used
++        // everywhere else in this file's throttle-driven fallback, so
++        // the front pair's behavior stays continuous across states
++        // instead of jumping to a different physical assumption the
++        // instant transition timer starts.
++        slew(MIN(max_angle_deg * (1/90.0), get_forward_flight_tilt()));
+     } else {
+         // until we have completed the transition we limit the tilt to
+         // Q_TILT_MAX. Anything above 50% throttle gets
