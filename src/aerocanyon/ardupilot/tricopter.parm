@@ -62,7 +62,64 @@ SERVO5_FUNCTION   33       # k_motor1 -> script motor index 0 -> front right
 SERVO6_FUNCTION   35       # k_motor3 -> script motor index 2 -> front left
 SERVO8_FUNCTION   34       # k_motor2 -> script motor index 1 -> rear
 SERVO7_FUNCTION   0
-SERVO3_FUNCTION   0        # no separate fixed fwd throttle in Phase 1 (see Task 2 section 5 cruise-thrust concern)
+
+# --- Elevon/elevator wiring bug -- root-caused 2026-09-05 ---
+# SERVO3_FUNCTION=0 here was ALWAYS about disabling the compiled
+# default k_throttle on SERVO3 ("no separate fixed fwd throttle"), a
+# real and correct call for Phase 1. But model.sdf's servo_2 topic (=
+# SERVO3, 1-indexed) is wired to the elevator_joint -- the vehicle's
+# ONE real, centered pitch surface -- not to any throttle-adjacent
+# output. Disabling SERVO3 doesn't just remove a spare throttle output,
+# it leaves the actual elevator permanently at trim, full stop.
+# Meanwhile SERVO1/SERVO2 were NEVER overridden in this file, so they
+# sat at ArduPlane's compiled defaults: SERVO1=k_aileron (->
+# left_elevon_joint, model.sdf servo_0) and SERVO2=k_elevator ->
+# right_elevon_joint (servo_1). Both elevon-shaped surfaces sit
+# laterally offset from centerline (cp y=+-0.535m in model.sdf) -- so
+# every "pitch" command physically deflected ONLY the right elevon
+# (an off-center surface), which cannot help but also produce a
+# rolling moment, and every "roll" command deflected only the left
+# elevon alone, coupling back into pitch. Root-caused via a live SITL
+# crash: ATT logs showed roll and pitch spiking together (~20 deg)
+# at the exact instant the FW transition needed real pitch authority
+# for the first time -- a pure aerodynamic-surface wiring bug, entirely
+# independent of the motors/mixer/tilt logic four earlier fix attempts
+# targeted.
+#
+# First fix (plain differential k_aileron on both elevon-shaped
+# panels, pitch routed only to the real elevator) stopped the coupling
+# and stabilized attitude, but left a persistent, never-quite-zeroing
+# roll/pitch trim after the tilt -- suspect: pitch authority sitting on
+# ONE surface (the small, centered elevator, area=0.01 vs each elevon's
+# area=0.5 in model.sdf) is far weaker than it should be.
+#
+# Corrected 2026-09-05: SERVO1/2 should be k_elevon_left/right (77/78),
+# not plain k_aileron. ArduPilot's servos.cpp runs
+# channel_function_mixer(k_aileron, k_elevator, k_elevon_left,
+# k_elevon_right) UNCONDITIONALLY every tick -- with 77/78 assigned,
+# each physical elevon-shaped panel automatically gets the CORRECT
+# combined aileron+elevator mix (true differential elevons), not just
+# a bare roll or bare pitch command. Confirmed this is what
+# tiltrotor.cpp's own vectoring() already expects: it reads
+# k_elevon_left, k_elevon_right, AND k_elevator as three separate,
+# simultaneously-meaningful values (tiltrotor.cpp ~line 600-630) --
+# i.e. ArduPilot's own tilt-vectoring code assumes exactly this
+# 3-surface layout (two mixed elevons + one dedicated elevator), which
+# this vehicle actually has. SERVO3 (the real elevator) stays k_elevator
+# and now adds ON TOP of the elevons' own pitch contribution instead of
+# carrying pitch alone.
+SERVO1_FUNCTION   77       # k_elevon_left -> left_elevon_joint (true mixed elevon)
+SERVO2_FUNCTION   78       # k_elevon_right -> right_elevon_joint (true mixed elevon)
+SERVO2_REVERSED   0        # channel_function_mixer already handles differential sign
+
+# --- Elevator/rudder disabled, 2026-09-05, user's call for this config ---
+# Pure elevon-only setup for this test: the real elevator_joint (SERVO3)
+# and rudder_joint (SERVO4) both sit unused. Pitch and roll authority
+# comes entirely from the two mixed elevons above; yaw comes from
+# Q_TILT_TYPE=2 VectoredYaw (front tilt servos) in Q-modes. Revisit if
+# cruise-phase yaw authority turns out to need the rudder back.
+SERVO3_FUNCTION   0        # elevator disabled
+SERVO4_FUNCTION   0        # rudder disabled
 
 # Tilt servo channels -- must match Task 3's Gazebo ArduPilotPlugin channels
 # 11/12/13 (0-indexed) = SERVO12/13/14 (1-indexed).
@@ -177,6 +234,26 @@ Q_M_THST_HOVER    0.47
 # ArduPilot default.
 Q_WP_SPD          10.0       # m/s, ArduPilot's own default
 
+# --- Climb-rate throttle margin (crash root-caused 2026-09-05) ---
+# Q_WP_SPD_UP (AC_WPNav's vertical climb-speed cap, shared by VTOL
+# takeoff and Q-mode waypoint altitude changes) was never overridden,
+# so it sat at AC_WPNav.cpp's WP_SPD_UP_DEFAULT = 2.5 m/s. Logged CTUN
+# during a live SITL crash confirmed this exactly: climb rate held
+# 2.4-2.6 m/s throughout the pre-transition climb, and RCOU showed the
+# front motor pair already at ~78-82% PWM sustaining that climb -- with
+# hover itself at 47% (Q_M_THST_HOVER), a 2.5 m/s climb was already
+# spending most of the front pair's headroom before the rear tilt servo
+# (running on its own independent timer, see tricopter_mixer.lua) ever
+# starts stealing the rear's vertical lift. By the time the tilt was
+# underway, even a FULLY FIXED throttle-authority bug (see the
+# ArduPilot quadplane.cpp patch, assist_climb_rate_cms()) couldn't help
+# -- the position controller commanded 100% throttle and still couldn't
+# arrest the sink, a genuine thrust ceiling, not a control-loop gap.
+# Halved to 1.2 m/s so the pre-transition climb leaves real throttle
+# margin in reserve for the tilt window instead of arriving there
+# already near-maxed.
+Q_WP_SPD_UP       1.2        # m/s, down from the 2.5 default
+
 # --- Root cause of the above: Tiltrotor::continuous_update's AUTO-mode
 # forward-tilt fallback (Q_TILT_MAX, moved up next to the other tilt
 # params) ---
@@ -277,6 +354,26 @@ WP_RADIUS         5
 # project's wind_field_node tests.
 ARSPD_TYPE        100
 ARSPD_USE         1
+
+# --- Cruise-transition cutoff speed -- lowered back 2026-09-05 ---
+# tricopter_mixer.lua reads this (MIN_CRUISE_AIRSPEED_MS) as the
+# minimum airspeed before it starts blending motor RPY authority away
+# in favour of the elevons/rudder. Originally 9 (the compiled default),
+# raised to 15 after a crash was blamed on insufficient wing lift at
+# 9 m/s -- but the REAL cause of that crash (found later the same day)
+# was a wrong elevon/elevator SERVO wiring coupling every pitch command
+# into an uncommanded ~20deg roll, plus ArduPilot's own tiltrotor.cpp
+# slamming the front pair to ~90deg on transition -- both now fixed,
+# both independent of airspeed. With those gone, attitude is stable
+# through the transition and this airframe never even reaches 15 m/s
+# under vertical-thrust alone (plateaus ~7 m/s) -- Q_WP_SPD_UP's lower
+# climb margin plus rear_vertical_efficiency (tricopter_mixer.lua) give
+# a better shot at actually sustaining flight past whatever speed the
+# cutoff is, so lowered back to 9 to let cruise_ready actually fire and
+# test the real remaining question (does the wing carry weight once
+# motor authority hands over) instead of gating on a speed the vehicle
+# can't reach in the first place.
+ARSPD_FBW_MIN     9
 
 # --- QRTL climb altitude -- live-caught 2026-09-04 ---
 # Default 15m was too low for map_zone's real Bucharest building heights,

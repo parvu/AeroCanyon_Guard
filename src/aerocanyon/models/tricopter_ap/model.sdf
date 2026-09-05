@@ -1231,10 +1231,40 @@
            reproduce these exact numbers -- what this SDF actually
            depends on is the angle/velocity mapping per channel, not the
            channel number itself. -->
+      <!-- Thrust margin raised 2026-09-05, at the user's request after
+           live manual flight (Mission Planner) never got past ~7 m/s
+           cruise regardless of throttle -- matching this project's own
+           earlier drag/thrust math (rear motor's real max thrust vs
+           parasitic+induced drag at cruise speed came out to only ~3.7%
+           margin). The real thrust source here is the six per-rotor
+           LiftDrag "propeller blade" plugins above (link_name=rotor_N),
+           driven by each rotor_N_joint's actual angular velocity -- NOT
+           the motorConstant*velocity^2 figure in this file's older
+           comments, which described a DELETED plugin kept only as a
+           stale reference number. Two real levers on that thrust, both
+           raised together: multiplier (the commanded top rotor angular
+           velocity at full throttle, 1500->1800, +20%) and cmd_max/
+           cmd_min (the PID's torque authority to actually REACH that
+           velocity against the blades' own aerodynamic drag load,
+           2.5->8.0 N*m, raised further still at the user's request for
+           more headroom to reliably reach the new target -- kept
+           symmetric/negative on cmd_min: this bounds the velocity PID's
+           corrective torque, not motor thrust direction, and needs to
+           go negative to brake an overshooting rotor regardless of
+           which way the target itself spins) -- raising multiplier
+           alone without more torque
+           authority would just mean the PID can't climb to the new
+           target and steady-state thrust barely changes. Since thrust
+           from a blade-element LiftDrag model scales with velocity
+           squared, +20% velocity is a real ~+44% thrust ceiling, not a
+           token bump. All three motors scaled together (not just rear)
+           to preserve the existing front/rear pitch-factor balance
+           (0.5/-1.0, tuned assuming identical motor characteristics) --
+           singling out rear would reintroduce a new asymmetry. -->
       <control channel="4"> <!-- SERVO5: motor 1 = front right -->
         <jointName>rotor_0_joint</jointName>
         <useForce>1</useForce>
-        <multiplier>1500</multiplier>
+        <multiplier>1800</multiplier>
         <offset>0</offset>
         <servo_min>1000</servo_min>
         <servo_max>2000</servo_max>
@@ -1244,14 +1274,14 @@
         <d_gain>0</d_gain>
         <i_max>0</i_max>
         <i_min>0</i_min>
-        <cmd_max>2.5</cmd_max>
-        <cmd_min>-2.5</cmd_min>
+        <cmd_max>8.0</cmd_max>
+        <cmd_min>-8.0</cmd_min>
         <rotorVelocitySlowdownSim>1</rotorVelocitySlowdownSim>
       </control>
       <control channel="5"> <!-- SERVO6: motor 2 = front left -->
         <jointName>rotor_2_joint</jointName>
         <useForce>1</useForce>
-        <multiplier>-1500</multiplier>
+        <multiplier>-1800</multiplier>
         <offset>0</offset>
         <servo_min>1000</servo_min>
         <servo_max>2000</servo_max>
@@ -1261,14 +1291,14 @@
         <d_gain>0</d_gain>
         <i_max>0</i_max>
         <i_min>0</i_min>
-        <cmd_max>2.5</cmd_max>
-        <cmd_min>-2.5</cmd_min>
+        <cmd_max>8.0</cmd_max>
+        <cmd_min>-8.0</cmd_min>
         <rotorVelocitySlowdownSim>1</rotorVelocitySlowdownSim>
       </control>
       <control channel="7"> <!-- SERVO8: motor 4 = rear -->
         <jointName>rotor_1_joint</jointName>
         <useForce>1</useForce>
-        <multiplier>1500</multiplier>
+        <multiplier>1800</multiplier>
         <offset>0</offset>
         <servo_min>1000</servo_min>
         <servo_max>2000</servo_max>
@@ -1278,8 +1308,8 @@
         <d_gain>0</d_gain>
         <i_max>0</i_max>
         <i_min>0</i_min>
-        <cmd_max>2.5</cmd_max>
-        <cmd_min>-2.5</cmd_min>
+        <cmd_max>8.0</cmd_max>
+        <cmd_min>-8.0</cmd_min>
         <rotorVelocitySlowdownSim>1</rotorVelocitySlowdownSim>
       </control>
 

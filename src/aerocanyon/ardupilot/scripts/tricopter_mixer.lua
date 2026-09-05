@@ -65,6 +65,39 @@ local MOTOR_IDS = {MOTOR_FRONT_RIGHT, MOTOR_FRONT_LEFT, MOTOR_REAR}
 -- Builds a motor_factor_table blended between hover (blend=0) and
 -- cruise (blend=1). Called every tick while blend is moving so the
 -- mixer output is continuous, not a step.
+--
+-- rear_vertical_efficiency (cos(tilt) scaling of rear's hover THROTTLE
+-- factor) -- tried TWICE, reverted TWICE, 2026-09-05, do not retry.
+-- Both times the front motors' PWM stayed dead flat instead of rising
+-- to cover the gap, even after attitude was confirmed stable. Read
+-- AP_MotorsMatrix.cpp's actual output_armed_stabilizing() properly
+-- this time (RCOU from that last test as evidence): rear pinned at its
+-- PWM ceiling while fronts sat locked at ~1585-1595 for 20+ continuous
+-- seconds, completely unresponsive to ThI/ThO climbing from 0.92 to
+-- 0.975 over the same window. The real mechanism: the shared collective
+-- ceiling (throttle_thrust_best_plus_adj) is bounded by thr_adj, which
+-- is itself bounded by rpy_high/rpy_low -- the MOST EXTREME per-motor
+-- roll+pitch+yaw excursion across ALL motors, not per-motor. Rear alone
+-- carries pitch factor -1.0 (fronts only +-0.5 each) to hold attitude,
+-- so rear's own large RPY swing squeezes the SHARED ceiling every other
+-- motor draws from too -- explaining why scaling rear's THROTTLE factor
+-- never helped fronts: the actual bottleneck was never rear's throttle
+-- share, it was rear's pitch-authority footprint capping everyone's
+-- collective headroom.
+--
+-- rear_pitch_redistribution -- TRIED AND REVERTED 2026-09-05, do not
+-- retry. Attempted to shed rear's pitch-authority share onto the fronts
+-- as it tilts (2*front_new + rear_new = 2.0 kept constant), reasoning
+-- from the same rpy_high/rpy_low squeeze mechanism above. Live result
+-- was far WORSE than any previous attempt: a genuine aerodynamic
+-- stall/tumble, pitch spiking past 80 degrees and roll spinning through
+-- 45 -> 149 -> 161 degrees, airspeed cratering to ~0.2-0.3 m/s at the
+-- peak. This is the THIRD distinct mixer-factor-rebalancing idea to
+-- fail live (rear throttle factor x2, now rear pitch factor) -- strong,
+-- repeated evidence that dynamically reweighting this hover factor
+-- table by tilt angle is the wrong lever for this problem, not just an
+-- unlucky formula each time. Don't attempt a fourth variant of this
+-- same idea without a fundamentally different diagnosis first.
 local function build_blended_factors(blend)
     local t = motor_factor_table()
     for _, m in ipairs(MOTOR_IDS) do
@@ -86,10 +119,23 @@ motors:set_frame_string("tricopter scripting mixer")
 local current_tilt_deg = 0.0
 local cruise_request_ticks = 0
 local CRUISE_DEBOUNCE_TICKS = 10  -- 1s at UPDATE_HZ=10
-local MIN_CRUISE_AIRSPEED_MS = param:get('ARSPD_FBW_MIN') or 6.0
+local MIN_CRUISE_AIRSPEED_MS = param:get('ARSPD_FBW_MIN') or 15.0
 local cruise_blend = 0.0
 local BLEND_DURATION_S = 2.5
 local BLEND_STEP = 1.0 / (BLEND_DURATION_S * UPDATE_HZ)
+
+-- Climb-rate stability gate -- added 2026-09-05 after a solo (no GCS
+-- involved) SITL crash showed tilt+airspeed alone isn't enough: ATT
+-- logs showed roll stuck ~20deg off level and pitch diverging in a
+-- growing oscillation right as ArduPilot's own transition state
+-- machine declared done, meaning the vehicle was NOT actually in
+-- stable flight at the instant cruise_ready fired. Require the
+-- climb rate itself to be small and steady for CLIMB_STABLE_TICKS in a
+-- row -- a real proxy for "attitude control has this handled", not
+-- just "airspeed and tilt happen to be at their target values".
+local climb_stable_ticks = 0
+local CLIMB_STABLE_TICKS = 20  -- 2s at UPDATE_HZ=10
+local CLIMB_RATE_STABLE_MAX = 1.0  -- m/s, |climb rate| below this counts as stable
 
 local function update()
     -- Live-caught 2026-09-04: gating purely on in_vtol_mode() let the
@@ -121,6 +167,15 @@ local function update()
         cruise_request_ticks = cruise_request_ticks + 1
     end
     local want_hover = raw_want_hover or (cruise_request_ticks < CRUISE_DEBOUNCE_TICKS)
+    if want_hover then
+        -- Only count climb-rate stability once we're actually
+        -- committed to the cruise attempt -- a slow, steady VTOL
+        -- climb is "stable" too, but that's not what this gate is
+        -- meant to measure, and letting it accumulate here would let
+        -- cruise_ready fire the instant want_hover flips, skipping the
+        -- whole point of requiring sustained stability IN cruise.
+        climb_stable_ticks = 0
+    end
     local target_tilt_deg = want_hover and 0.0 or 90.0
     local step_deg = 90.0 / (TILT_SLEW_DURATION_S * UPDATE_HZ)
 
@@ -173,7 +228,22 @@ local function update()
     -- there's no single tick where authority disappears outright --
     -- motor authority fades out as (nominally) the surfaces fade in.
     local airspeed_ms = ahrs:airspeed_EAS() or 0.0
-    local cruise_ready = (not want_hover) and current_tilt_deg >= 89.99 and airspeed_ms >= MIN_CRUISE_AIRSPEED_MS
+    -- get_velocity_NED() returns the Vector3f directly, or nil if the
+    -- EKF doesn't have a velocity estimate yet (see e.g. ArduPilot's own
+    -- guided_above_terrain_posvelaccel_sub.lua) -- NOT a
+    -- boolean-plus-value pair despite the binding doc's "boolean
+    -- Vector3f'Null" signature; that's the underlying C++ return type
+    -- used to build the nil-on-failure Lua value, not a second return.
+    local vel_ned = ahrs:get_velocity_NED()
+    local climb_rate_ms = vel_ned and -vel_ned:z() or 0.0
+    if vel_ned and math.abs(climb_rate_ms) < CLIMB_RATE_STABLE_MAX then
+        climb_stable_ticks = climb_stable_ticks + 1
+    else
+        climb_stable_ticks = 0
+    end
+    local cruise_ready = (not want_hover) and current_tilt_deg >= 89.99
+        and airspeed_ms >= MIN_CRUISE_AIRSPEED_MS
+        and climb_stable_ticks >= CLIMB_STABLE_TICKS
 
     if cruise_ready then
         cruise_blend = math.min(cruise_blend + BLEND_STEP, 1.0)
