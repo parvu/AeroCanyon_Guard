@@ -15,8 +15,8 @@ git apply ~/AeroCanyon_Guard/src/aerocanyon/ardupilot/patches/tricopter-fw-trans
 
 ## `tricopter-fw-transition.patch`
 
-Two fixes to `ArduPlane/quadplane.cpp` and `ArduPlane/tiltrotor.cpp`,
-found live-debugging this project's FW-transition crash (2026-09-05):
+One fix remains applied to `ArduPlane/quadplane.cpp`, found
+live-debugging this project's FW-transition crash (2026-09-05):
 
 1. **`quadplane.cpp`, `assist_climb_rate_cms()`**: skips the 2-second
    ramp-from-zero on the assisted-flight climb-rate demand for
@@ -26,32 +26,35 @@ found live-debugging this project's FW-transition crash (2026-09-05):
    no such motor and depends entirely on VTOL lift until real airspeed
    is reached, so ramping authority from zero right as assisted_flight
    engages guaranteed a ~2s window with near-zero climb-rate correction
-   at exactly the moment a sink was most likely to start.
+   at exactly the moment a sink was most likely to start. Still valid
+   for any tiltrotor regardless of which motors do the tilting, so kept
+   through the 2026-09-06 redesign below.
 
-2. **`tiltrotor.cpp`, `continuous_update()`**: caps the front tilt
-   pair at `Q_TILT_MAX` (this project's own deliberate ceiling)
-   instead of slewing to full forward tilt (~90deg), in BOTH places
-   `continuous_update()` can reach that slew (the assisted_flight/TIMER
-   branch, and the earlier `!in_vtol_mode() && !assisted_flight`
-   branch that fires when `assisted_flight` flickers false mid-flight).
-   Unconditional full-forward tilt assumes the STANDARD ArduPilot
-   tiltrotor design, where the front (tilting) pair becomes the cruise
-   thruster once transitioned -- this airframe is the deliberate
-   opposite (only the rear motor tilts/cruises, see
-   `scripts/tricopter_mixer.lua`), so slamming the front pair to 90deg
-   removes vertical lift this design never intended to give up, and
-   feeds a rapidly-changing tilt fraction into `vectoring()`'s live
-   sin/cos yaw-roll mixing, producing a torque transient. Confirmed via
-   live SITL RCOU: before this patch, both front tilt servos pinned at
-   PWM 2000 (max) for the rest of the flight; after, they hold exactly
-   the predicted Q_TILT_MAX-derived PWM (~1363).
+**REVERTED 2026-09-06** (pilot's call: "disable script and let ardupilot
+do the transition"): `tiltrotor.cpp`, `continuous_update()` no longer
+caps the front tilt pair at `Q_TILT_MAX` -- it slews to full forward
+tilt (~90deg) again, ArduPilot's own unmodified behaviour. That cap
+existed because this project's earlier design kept the front pair
+near-vertical always and used only the rear motor as the cruise pusher
+(entirely managed by `scripts/tricopter_mixer.lua`'s own transition
+state machine) -- the project now uses ArduPilot's standard tiltrotor
+assumption instead (front pair tilts fully forward and becomes the
+cruise thruster, native `Tiltrotor`/`QuadPlane` transition logic used
+as-is), so the cap's reasoning no longer applies. The file now carries
+only comment-only diffs marking where the reverted hunks were: no
+functional difference from stock `tiltrotor.cpp`. The patch file itself
+was regenerated from `git diff` after this revert, so applying it fresh
+reproduces exactly this state (fix #1 + comment-only tiltrotor.cpp
+markers), not the old front-tilt cap.
 
-**Not fixed by this patch**, still open as of 2026-09-05: even with
-both of the above applied, the front-left motor still pins at minimum
-PWM while front-right and rear pin at max, for the remainder of a
-flight -- a real, unresolved asymmetry in AP_MotorsMatrix's
-RPY/collective throttle allocation once this airframe's assisted-flight
-transition triggers, independent of the tilt-servo behavior these
-patches fix. See `ardupilot_phase2_notes` project memory and
-`tricopter_mixer.lua`'s own comments for the mixer-side attempts (and
-their failures) at addressing this.
+**Previously "not fixed by this patch" (2026-09-05), root-caused and
+fixed 2026-09-06**: the front-left motor pinning at minimum PWM while
+front-right/rear pinned at max during assisted flight turned out to be
+`Q_TILT_MASK` itself, not `AP_MotorsMatrix`'s RPY/collective allocation
+-- see `tricopter.parm`'s own comment on that param. `Q_TILT_MASK=3`
+(binary `011`, bits 0+1) told `Tiltrotor::tiltrotor_is_motor_tilting()`
+that motor index 1 (the REAR motor, in this project's `Motors_dynamic`
+numbering) was one of the tilting pair, while excluding index 2
+(front-left) from ever being recognised as tilting -- exactly backwards
+from the intended front-right+front-left pair. Corrected to `5` (binary
+`101`, bits 0+2).
